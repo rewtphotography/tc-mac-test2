@@ -25,6 +25,14 @@ targets.append(
     )
 )
 products.append(.executable(name: "TrainCull", targets: ["TrainCull"]))
+// Checks that need Apple's imaging frameworks, such as the TIFF export opening in Apple's reader.
+targets.append(
+    .testTarget(
+        name: "TrainCullTests",
+        dependencies: ["TrainCull", "TraincullCore"],
+        swiftSettings: [.swiftLanguageMode(.v5)]
+    )
+)
 #endif
 
 let package = Package(

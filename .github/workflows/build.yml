@@ -24,35 +24,62 @@ jobs:
   mac:
     name: Mac app
     runs-on: macos-15
+    env:
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
       - run: swift --version
       - name: Tests
         run: swift test
+      # Alpha numbers follow on from the last published one (alpha 4 came from the earlier
+      # repository), so a failed build never uses a number up.
+      - name: Build number
+        id: number
+        run: |
+          LAST=$(gh release list --limit 200 --json tagName \
+            --jq '[.[].tagName | select(startswith("alpha-")) | ltrimstr("alpha-") | tonumber] | max // 4')
+          echo "value=$((LAST + 1))" >> "$GITHUB_OUTPUT"
+          echo "Building alpha $((LAST + 1))"
       - name: Build the app
-        run: scripts/make-app.sh "${{ github.run_number }}"
+        run: scripts/make-app.sh "${{ steps.number.outputs.value }}"
+      # Start the app on a folder of made-up frames (no photos are kept in the repository),
+      # once in the single view and once side by side, and keep a picture of each.
       - name: Launch check
         run: |
-          open build/TrainCull.app
-          sleep 8
-          pgrep -x TrainCull
-          screencapture -x build/launch.png || true
-          pkill -x TrainCull || true
+          swift scripts/make-fixture.swift "$PWD/build/fixture"
+          shoot() {
+            open -n build/TrainCull.app --args -TCOpenFolder "$PWD/build/fixture" "${@:2}"
+            sleep 12
+            pgrep -x TrainCull
+            screencapture -x "build/$1.png" || true
+            pkill -x TrainCull || true
+            sleep 2
+          }
+          shoot launch
+          shoot launch-compare -TCCompare YES
+          echo "---- the app's own log ----"
+          cat "$HOME/Library/Logs/TrainCull/"*.log || true
+          mkdir -p build/logs && cp "$HOME/Library/Logs/TrainCull/"*.log build/logs/ || true
       - uses: actions/upload-artifact@v4
         with:
           name: TrainCull
-          path: build/*.zip
+          path: build/TrainCull.dmg
       - uses: actions/upload-artifact@v4
         with:
           name: launch-screenshot
-          path: build/launch.png
+          path: |
+            build/launch.png
+            build/launch-compare.png
+            build/logs
           if-no-files-found: ignore
-      - name: Publish as a pre-release
-        env:
-          GH_TOKEN: ${{ github.token }}
+      # A full release, not a pre-release, so that
+      # https://github.com/<owner>/<repo>/releases/latest/download/TrainCull.dmg
+      # always downloads the newest build.
+      - name: Publish
         run: |
-          gh release create "alpha-${{ github.run_number }}" build/*.zip \
-            --prerelease \
+          N="${{ steps.number.outputs.value }}"
+          gh release create "alpha-$N" build/TrainCull.dmg \
+            --latest \
             --target "$GITHUB_SHA" \
-            --title "TrainCull 0.1.0 alpha ${{ github.run_number }}" \
+            --title "TrainCull 0.1.0 alpha $N" \
             --notes-file packaging/RELEASE_NOTES.md

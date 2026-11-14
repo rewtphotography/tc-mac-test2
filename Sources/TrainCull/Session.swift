@@ -68,6 +68,18 @@ enum LabelColor: Int, CaseIterable {
     }
 }
 
+/// One of the two large images: slot 0 is the single view and the left side of the
+/// side-by-side view, slot 1 the right side.
+final class HeroSlot {
+    weak var view: HeroNSView?
+    /// Goes up each time the slot is given another frame, so late results for an earlier one are dropped.
+    var token = 0
+    /// The frame the slot shows.
+    var frame: Int?
+    /// What the last click here zoomed to.
+    var target: FaceResult?
+}
+
 /// Everything the window shows: the open folder, its frames, the selection and the hero image.
 final class Session: ObservableObject {
     enum Pane { case folders, thumbnails }
@@ -75,12 +87,21 @@ final class Session: ObservableObject {
 
     @Published var folder: URL?
     @Published var frames: [FrameItem] = []
+    /// The frame ratings, labels and edits act on. In the side-by-side view it is the active image.
     @Published var selected = 0
     @Published var pane = Pane.folders
     @Published var status = ""
     @Published var message: String?
-    @Published var heroState = ""
-    @Published var zoomText = "Fit"
+    /// For each large image: what it shows ("Preview", "Raw") and its zoom.
+    @Published var heroStates = ["", ""]
+    @Published var zoomTexts = ["Fit", "Fit"]
+    /// The two frames shown side by side; nil in the single view.
+    @Published var compare: ComparePair?
+    /// Goes up when the thumbnail pane should scroll to the selected frame and flash it.
+    @Published var revealTick = 0
+    @Published var flashed: Int?
+    /// "Exporting 3 / 12" while an export runs.
+    @Published var exportStatus: String?
     @Published var recents: [URL] = []
     @Published var volumes: [Volume] = []
     @Published var ratedCount = 0
@@ -99,14 +120,19 @@ final class Session: ObservableObject {
     @Published var defaults: [String: Float] = [:]
 
     let formats = Formats()
-    private weak var hero: HeroNSView?
+    /// The main window, so keys typed in another window (Diagnostics) are left alone.
+    weak var window: NSWindow?
+    private let slots = [HeroSlot(), HeroSlot()]
     private var generation = 0
-    private var heroToken = 0
+    private var exportRun = 0
+    private var flashToken = 0
+    private var folderOpened = CFAbsoluteTimeGetCurrent()
     private var faces: [Int: DetectedFaces] = [:]
     private var chosenFace: [Int: Int] = [:]
     private var rawCache: [(id: Int, values: [String: Float], image: CGImage)] = []
     private var fullSize: [Int: CGSize] = [:]
     private var editToken = 0
+    private var valuesToken = 0
     private var draftBusy = false
     private var saveToken = 0
     private var pendingSave: FrameItem?
@@ -120,13 +146,24 @@ final class Session: ObservableObject {
     private let heroQueue = DispatchQueue(label: "hero", qos: .userInteractive, attributes: .concurrent)
     private let rawQueue = DispatchQueue(label: "raw", qos: .userInitiated)
     private let sidecarQueue = DispatchQueue(label: "sidecars", qos: .userInitiated)
+    private let exportQueue = DispatchQueue(label: "export", qos: .userInitiated)
     private var keyMonitor: Any?
     private var messageToken = 0
     private var loadedCount = 0
 
     var current: FrameItem? { frames.indices.contains(selected) ? frames[selected] : nil }
 
+    /// The slot ratings and keys act on: the active side when comparing, else the single view.
+    var activeSlot: Int { compare?.active.rawValue ?? 0 }
+    var heroState: String { heroStates[activeSlot] }
+    var zoomText: String { zoomTexts[activeSlot] }
+    private var hero: HeroNSView? { slots[activeSlot].view }
+    /// Editing happens in the single view only, so its token marks "still the same frame".
+    private var heroToken: Int { slots[0].token }
+
     init() {
+        Log.shared.writeHeader()
+        MemoryMonitor.shared.start()
         recents = (UserDefaults.standard.stringArray(forKey: "recentFolders") ?? [])
             .map { URL(fileURLWithPath: $0) }
             .filter { FileManager.default.fileExists(atPath: $0.path) }
@@ -138,9 +175,17 @@ final class Session: ObservableObject {
         NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
             self?.flushSave()
             self?.sidecarQueue.sync {}
+            Log.note("memory", MemoryMonitor.shared.sentence)
+            Log.note("app", "quit")
+            Log.shared.flush()
         }
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             (self?.handleKey(event) ?? false) ? nil : event
+        }
+        // For the automated build's launch check: open a folder straight away, and optionally
+        // show its first two frames side by side.
+        if let path = UserDefaults.standard.string(forKey: "TCOpenFolder") {
+            DispatchQueue.main.async { self.open(URL(fileURLWithPath: path)) }
         }
     }
 
@@ -161,8 +206,10 @@ final class Session: ObservableObject {
         do {
             try NSWorkspace.shared.unmountAndEjectDevice(at: volume.url)
             if let f = folder, f.path.hasPrefix(volume.url.path) { close() }
+            Log.note("folder", "ejected \(volume.name)")
             say("\(volume.name) ejected. Safe to unplug.")
         } catch {
+            Log.note("folder", "couldn't eject \(volume.name): \(error)")
             say("\(volume.name) couldn't be ejected: \(error.localizedDescription)")
         }
         refreshVolumes()
@@ -178,19 +225,35 @@ final class Session: ObservableObject {
         if panel.runModal() == .OK, let url = panel.url { open(url) }
     }
 
+    /// Empties both large images and drops whatever was on its way to them.
+    private func clearSlots() {
+        compare = nil
+        for (i, slot) in slots.enumerated() {
+            slot.token += 1
+            slot.frame = nil
+            slot.target = nil
+            slot.view?.show(nil, space: .zero, newFrame: true)
+            setState(i, "")
+        }
+    }
+
+    private func setState(_ index: Int, _ text: String) {
+        if heroStates[index] != text { heroStates[index] = text }
+    }
+
     private func close() {
         flushSave()
+        exportRun += 1
         visible = []
         filter = .all
         generation += 1
-        heroToken += 1
         loadQueue.cancelAllOperations()
         folder = nil
         frames = []
-        hero?.show(nil, space: .zero, newFrame: true)
+        clearSlots()
         pane = .folders
         status = ""
-        heroState = ""
+        Log.note("folder", "closed")
     }
 
     /// Opens one folder. Only that folder is shown; subfolders are not entered.
@@ -202,7 +265,7 @@ final class Session: ObservableObject {
         values = [:]
         defaults = [:]
         generation += 1
-        heroToken += 1
+        exportRun += 1
         let gen = generation
         loadQueue.cancelAllOperations()
         folder = url
@@ -211,17 +274,25 @@ final class Session: ObservableObject {
         chosenFace = [:]
         rawCache = []
         selected = 0
-        hero?.show(nil, space: .zero, newFrame: true)
-        heroState = ""
+        clearSlots()
         pane = .thumbnails
         status = "Scanning folder…"
         remember(url)
+        folderOpened = CFAbsoluteTimeGetCurrent()
+        let opened = folderOpened
+        Log.note("folder", "opening \(url.path)")
         let formats = self.formats
         DispatchQueue.global(qos: .userInitiated).async {
             let names = (try? FileManager.default.contentsOfDirectory(atPath: url.path)) ?? []
             let dir = FileDirOps(url)
             // Repair leftovers of an interrupted rating save before reading any sidecar.
             let repairs = Sidecars.recover(dir, names)
+            for repair in repairs { Log.note("save", "repaired \(repair)") }
+            // An export cut short (the app quit part-way) leaves a hidden, unfinished file.
+            for n in names where n.hasPrefix(".") && n.hasSuffix(".exporting") {
+                try? FileManager.default.removeItem(at: url.appendingPathComponent(n))
+                Log.note("export", "removed the unfinished export \(n)")
+            }
             let after = repairs.isEmpty ? names : ((try? FileManager.default.contentsOfDirectory(atPath: url.path)) ?? names)
             var sidecars: [String: String] = [:]
             for n in after where !n.hasPrefix(".") && n.lowercased().hasSuffix(".xmp") {
@@ -236,6 +307,8 @@ final class Session: ObservableObject {
                 let values = text.map { SidecarValues(rating: Xmp.readRating($0) ?? 0, label: Xmp.readLabel($0)) }
                 return FrameItem(id: i, url: fileURL, sidecarName: sidecar, values: values, adjust: text.map(Adjust.read) ?? [:])
             }
+            let withSidecar = items.filter { $0.sidecarName != nil }.count
+            Log.note("folder", "\(names.count) files, \(items.count) raw, \(withSidecar) with a sidecar; scanned in \(Log.seconds(since: opened))")
             DispatchQueue.main.async {
                 guard gen == self.generation else { return }
                 self.frames = items
@@ -246,7 +319,9 @@ final class Session: ObservableObject {
                     return
                 }
                 self.loadThumbnails(gen)
-                self.showSelected()
+                self.selectionChanged()
+                self.show(0)
+                if UserDefaults.standard.bool(forKey: "TCCompare"), items.count > 1 { self.commandClick(1) }
             }
         }
     }
@@ -272,13 +347,20 @@ final class Session: ObservableObject {
                     case let .success((info, image)):
                         item.info = info
                         item.thumb = image
-                        if item.id == self.selected, self.hero?.space == .zero { self.showSelected() }
+                        // A large image that was waiting for this frame's thumbnail can start now.
+                        for (i, slot) in self.slots.enumerated() where slot.frame == item.id && slot.view?.space == .zero {
+                            self.show(i)
+                        }
                     case let .failure(error):
                         item.failed = "\(error)"
+                        Log.note("image", "\(item.name): thumbnail failed: \(error)")
                     }
                     self.loadedCount += 1
                     if self.loadedCount == total {
                         self.status = ""
+                        let failed = self.frames.filter { $0.failed != nil }.count
+                        Log.note("folder", "\(total) thumbnails loaded \(Log.seconds(since: self.folderOpened)) after opening\(failed > 0 ? ", \(failed) failed" : "")")
+                        MemoryMonitor.mark("loading \(total) thumbnails")
                     } else if self.loadedCount % 16 == 0 {
                         self.status = "Loading \(self.loadedCount) / \(total)"
                     }
@@ -303,7 +385,22 @@ final class Session: ObservableObject {
         case let .rated(stars): visible = frames.filter { $0.rating >= stars }
         case .rejected: visible = frames.filter { $0.rating < 0 }
         }
-        if !visible.contains(where: { $0.id == selected }), let first = visible.first { select(first.id) }
+        Log.note("filter", "\(new): \(visible.count) of \(frames.count) frames shown")
+        // The side-by-side view keeps its two frames whatever the filter.
+        if compare == nil, !visible.contains(where: { $0.id == selected }), let first = visible.first { select(first.id) }
+        reveal()
+    }
+
+    /// Scrolls the thumbnail pane to the selected frame and flashes it, so it is easy to find
+    /// again after a filter or a long scroll.
+    func reveal() {
+        revealTick += 1
+        flashed = selected
+        flashToken += 1
+        let token = flashToken
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { [weak self] in
+            if self?.flashToken == token { self?.flashed = nil }
+        }
     }
 
     func toggleRated() {
@@ -318,6 +415,7 @@ final class Session: ObservableObject {
     func toggleRejected() { setFilter(filter == .rejected ? .all : .rejected) }
 
     func say(_ text: String) {
+        Log.note("message", text)
         message = text
         messageToken += 1
         let token = messageToken
@@ -326,30 +424,64 @@ final class Session: ObservableObject {
         }
     }
 
-    // MARK: The hero image
+    // MARK: The large images
 
-    func attach(_ view: HeroNSView) {
-        hero = view
+    func attach(_ view: HeroNSView, slot index: Int) {
+        slots[index].view = view
         view.targetFor = { [weak self] point in
-            self?.zoomTarget(at: point) ?? FaceResult(method: .point, anchor: P(Double(point.x), Double(point.y)), eyeSpan: nil)
+            self?.zoomTarget(at: point, slot: index)
+                ?? FaceResult(method: .point, anchor: P(Double(point.x), Double(point.y)), eyeSpan: nil)
         }
         view.onZoom = { [weak self] fitted, percent in
             let text = fitted ? "Fit" : "\(percent)%"
-            DispatchQueue.main.async { if self?.zoomText != text { self?.zoomText = text } }
+            DispatchQueue.main.async {
+                if let self = self, self.zoomTexts[index] != text { self.zoomTexts[index] = text }
+            }
         }
-        if current != nil { showSelected() }
+        view.acceptsClick = { [weak self] in self?.clicked(index) ?? true }
+        view.onUserZoom = { [weak self] kind in self?.userZoomed(index, kind) }
+        if frame(for: index) != nil { show(index) }
+    }
+
+    /// The frame a slot should show: the selected one in the single view, its side's frame when comparing.
+    private func frame(for index: Int) -> FrameItem? {
+        let id: Int
+        if let pair = compare {
+            id = pair.frame(index == 0 ? .left : .right)
+        } else if index == 0 {
+            id = selected
+        } else {
+            return nil
+        }
+        return frames.indices.contains(id) ? frames[id] : nil
+    }
+
+    /// A plain click on a thumbnail selects it. A command-click starts the side-by-side view,
+    /// or replaces its active image; a plain click does nothing while comparing.
+    func thumbnailClicked(_ id: Int, command: Bool) {
+        if command {
+            commandClick(id)
+        } else if compare == nil {
+            select(id)
+        }
     }
 
     func select(_ index: Int) {
-        guard frames.indices.contains(index), index != selected else { return }
+        guard compare == nil, frames.indices.contains(index), index != selected else { return }
         flushSave()
         selected = index
-        showSelected()
+        selectionChanged()
+        show(0)
     }
 
-    /// Steps through the frames the thumbnail pane shows.
+    /// Left and right arrows: through the frames the thumbnail pane shows. In the side-by-side
+    /// view only the active image moves, and it steps over the frame on the other side.
     func step(_ by: Int) {
         guard !visible.isEmpty else { return }
+        if let pair = compare {
+            if let target = pair.stepTarget(by, in: visible.map { $0.id }) { setActiveFrame(target) }
+            return
+        }
         guard let at = visible.firstIndex(where: { $0.id == selected }) else {
             select(visible[0].id)
             return
@@ -357,99 +489,268 @@ final class Session: ObservableObject {
         select(visible[min(max(at + by, 0), visible.count - 1)].id)
     }
 
-    /// Shows the selected frame: the thumbnail at once, then the large embedded preview, then
-    /// the raw rendered by Apple's decoder once the frame has been still for a moment.
-    private func showSelected() {
-        guard let item = current, let hero = hero else { return }
-        heroToken += 1
-        let token = heroToken
-        let url = item.url
-        let id = item.id
-        let formats = self.formats
-        let adjust = item.adjust
-        values = adjust
-        defaults = [:]
+    /// The selected frame changed: the editing controls follow it.
+    private func selectionChanged() {
         editToken += 1
+        valuesToken += 1
+        guard let item = current else {
+            values = [:]
+            defaults = [:]
+            return
+        }
+        Log.note("select", "\(item.name) (\(item.id + 1) of \(frames.count))")
+        values = item.adjust
+        defaults = [:]
+        let token = valuesToken
+        let url = item.url
         heroQueue.async {
             let found = Adjust.defaults(url)
-            DispatchQueue.main.async { if token == self.heroToken { self.defaults = found } }
+            DispatchQueue.main.async { if token == self.valuesToken { self.defaults = found } }
         }
+    }
+
+    /// Shows a slot's frame: the thumbnail at once, then the large embedded preview, then the
+    /// raw rendered by Apple's decoder once the frame has been still for a moment.
+    private func show(_ index: Int, keepZoom: Bool = false) {
+        let slot = slots[index]
+        guard let item = frame(for: index), let view = slot.view else { return }
+        slot.token += 1
+        slot.frame = item.id
+        slot.target = nil
+        let token = slot.token
+        let url = item.url
+        let id = item.id
+        let name = item.name
+        let formats = self.formats
+        let adjust = item.adjust
+        let started = CFAbsoluteTimeGetCurrent()
 
         if let cached = rawCache.first(where: { $0.id == id && $0.values == adjust }) {
-            hero.show(cached.image, space: CGSize(width: cached.image.width, height: cached.image.height), newFrame: true)
-            heroState = "Raw"
+            view.show(cached.image, space: CGSize(width: cached.image.width, height: cached.image.height), newFrame: true, keepZoom: keepZoom)
+            setState(index, "Raw")
+            Log.note("image", "\(name): raw render reused")
             return
         }
         if let t = item.thumb {
-            hero.show(t, space: CGSize(width: t.width, height: t.height), newFrame: true)
+            view.show(t, space: CGSize(width: t.width, height: t.height), newFrame: true, keepZoom: keepZoom)
         } else {
-            hero.show(nil, space: .zero, newFrame: true)
+            view.show(nil, space: .zero, newFrame: true)
         }
-        heroState = "Preview"
+        setState(index, "Preview")
 
         let needFaces = faces[id] == nil
         heroQueue.async {
-            guard let (_, big) = try? Imaging.preview(url, formats, maxPixels: nil) else { return }
+            guard let (_, big) = try? Imaging.preview(url, formats, maxPixels: nil) else {
+                Log.note("image", "\(name): the embedded preview couldn't be read")
+                return
+            }
             let size = Imaging.rawSize(url) ?? CGSize(width: big.width, height: big.height)
+            Log.note("image", "\(name): embedded preview \(big.width)×\(big.height) after \(Log.seconds(since: started))")
             DispatchQueue.main.async {
                 self.fullSize[id] = size
-                guard token == self.heroToken else { return }
-                self.hero?.show(big, space: size, newFrame: false)
+                guard token == slot.token else { return }
+                slot.view?.show(big, space: size, newFrame: false)
             }
             if needFaces {
+                let detecting = CFAbsoluteTimeGetCurrent()
                 let found = Imaging.detectFaces(big)
+                Log.note("image", "\(name): \(found.subjects.count) face(s) found in \(Log.seconds(since: detecting))")
                 DispatchQueue.main.async { self.faces[id] = found }
             }
         }
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-            guard token == self.heroToken else { return }
+            guard token == slot.token else { return }
             self.rawQueue.async {
                 var stillWanted = false
-                DispatchQueue.main.sync { stillWanted = token == self.heroToken }
+                DispatchQueue.main.sync { stillWanted = token == slot.token }
                 guard stillWanted else { return }
+                let rendering = CFAbsoluteTimeGetCurrent()
                 let raw = Imaging.renderRaw(url, adjust)
                 let image = raw ?? Imaging.fullJpeg(url, formats)
+                if let image = image {
+                    Log.note("image", "\(name): \(raw != nil ? "raw render" : "embedded JPEG (no raw render)") \(image.width)×\(image.height) in \(Log.seconds(since: rendering)), \(Log.seconds(since: started)) after selecting")
+                } else {
+                    Log.note("image", "\(name): neither the raw nor its embedded JPEG could be shown")
+                }
+                MemoryMonitor.mark("rendering \(name)")
                 DispatchQueue.main.async {
                     guard let image = image else {
-                        if token == self.heroToken { self.heroState = "Preview only" }
+                        if token == slot.token { self.setState(index, "Preview only") }
                         return
                     }
                     if raw != nil { self.cache(id, adjust, image) }
-                    guard token == self.heroToken, item.adjust == adjust else { return }
-                    self.hero?.show(image, space: CGSize(width: image.width, height: image.height), newFrame: false)
-                    self.heroState = raw != nil ? "Raw" : "Embedded JPEG (raw rendering isn't available for this camera on this Mac)"
+                    guard token == slot.token, item.adjust == adjust else { return }
+                    slot.view?.show(image, space: CGSize(width: image.width, height: image.height), newFrame: false)
+                    self.setState(index, raw != nil ? "Raw" : "Embedded JPEG")
                 }
             }
         }
     }
 
-    /// A click goes to face zoom on the face nearest the click; with no face, to the clicked point.
-    private func zoomTarget(at point: CGPoint) -> FaceResult {
-        let fallback = FaceResult(method: .point, anchor: P(Double(point.x), Double(point.y)), eyeSpan: nil)
-        guard let item = current, let found = faces[item.id], !found.subjects.isEmpty,
-              let space = hero?.space, space.width > 0, found.imageWidth > 0 else { return fallback }
+    /// A slot's faces, in pixels of what its view shows now.
+    private func subjects(in index: Int) -> [Subject]? {
+        guard let id = slots[index].frame, let found = faces[id], found.imageWidth > 0,
+              let space = slots[index].view?.space, space.width > 0 else { return nil }
         let k = Double(space.width) / found.imageWidth
-        let subjects = found.subjects.map { $0.scaled(k) }
-        func distance(_ s: Subject) -> Double {
-            let dx = s.centerX - Double(point.x), dy = s.centerY - Double(point.y)
-            return dx * dx + dy * dy
-        }
-        let index = subjects.indices.min { distance(subjects[$0]) < distance(subjects[$1]) } ?? 0
-        chosenFace[item.id] = index
-        return Framing.fromSubject(subjects[index])
+        return found.subjects.map { $0.scaled(k) }
     }
 
-    /// Tab: the next face, when the frame has several.
-    private func nextFace() {
-        guard let item = current, let found = faces[item.id], found.subjects.count > 1,
-              let hero = hero, hero.space.width > 0 else { return }
-        let index = ((chosenFace[item.id] ?? -1) + 1) % found.subjects.count
-        chosenFace[item.id] = index
-        hero.zoom(to: Framing.fromSubject(found.subjects[index].scaled(Double(hero.space.width) / found.imageWidth)))
+    private func nearest(_ subjects: [Subject], _ x: Double, _ y: Double) -> Int {
+        func distance(_ s: Subject) -> Double {
+            let dx = s.centerX - x, dy = s.centerY - y
+            return dx * dx + dy * dy
+        }
+        return subjects.indices.min { distance(subjects[$0]) < distance(subjects[$1]) } ?? 0
+    }
+
+    /// A click goes to face zoom on the face nearest the click; with no face, to the clicked point.
+    private func zoomTarget(at point: CGPoint, slot index: Int) -> FaceResult {
+        var result = FaceResult(method: .point, anchor: P(Double(point.x), Double(point.y)), eyeSpan: nil)
+        if let id = slots[index].frame, let found = subjects(in: index), !found.isEmpty {
+            let face = nearest(found, Double(point.x), Double(point.y))
+            chosenFace[id] = face
+            result = Framing.fromSubject(found[face])
+        }
+        slots[index].target = result
+        Log.note("zoom", "click → \(result.method.rawValue)")
+        return result
+    }
+
+    /// The next face, when the frame has several: Tab in the single view, the Next Face button
+    /// when comparing (where one face is enough: the button then zooms to it).
+    func nextFace() {
+        let index = activeSlot
+        guard let id = slots[index].frame, let view = slots[index].view,
+              let found = subjects(in: index), found.count > (compare == nil ? 1 : 0) else { return }
+        let face = ((chosenFace[id] ?? -1) + 1) % found.count
+        chosenFace[id] = face
+        let result = Framing.fromSubject(found[face])
+        slots[index].target = result
+        Log.note("zoom", "face \(face + 1) of \(found.count)")
+        view.zoom(to: result)
+        userZoomed(index, .click)
+    }
+
+    // MARK: Side by side
+
+    /// Command-click on a thumbnail: show it beside the current image, or, when already
+    /// comparing, put it in place of the active image.
+    func commandClick(_ id: Int) {
+        guard frames.indices.contains(id) else { return }
+        if let pair = compare {
+            if id != pair.left && id != pair.right { setActiveFrame(id) }
+            return
+        }
+        guard current != nil, id != selected else { return }
+        flushSave()
+        if editing { editing = false }
+        Log.note("compare", "started: \(frames[selected].name) | \(frames[id].name)")
+        // Both sides start fitted, so their zoom is linked from the first click.
+        slots[0].view?.fit(animated: false)
+        compare = ComparePair(left: selected, right: id, active: .right)
+        selected = id
+        selectionChanged()
+        // The right-hand view shows its frame as soon as the window has made it (`attach`).
+        if slots[1].view != nil { show(1) }
+    }
+
+    /// Puts another frame on the active side.
+    private func setActiveFrame(_ id: Int) {
+        guard var pair = compare, frames.indices.contains(id) else { return }
+        pair.activeFrame = id
+        compare = pair
+        selected = id
+        selectionChanged()
+        // A zoomed image stays zoomed on the same spot, to step through a burst at one zoom.
+        show(pair.active.rawValue, keepZoom: true)
+    }
+
+    func setActiveSide(_ side: ComparePair.Side) {
+        guard var pair = compare, pair.active != side else { return }
+        pair.active = side
+        compare = pair
+        selected = pair.activeFrame
+        selectionChanged()
+    }
+
+    /// Back to the single view, which then shows the active image.
+    func endCompare() {
+        guard let pair = compare else { return }
+        Log.note("compare", "ended on \(frames.indices.contains(pair.activeFrame) ? frames[pair.activeFrame].name : "?")")
+        compare = nil
+        selected = pair.activeFrame
+        slots[1].token += 1
+        slots[1].frame = nil
+        slots[1].target = nil
+        slots[1].view?.show(nil, space: .zero, newFrame: true)
+        setState(1, "")
+        if slots[0].frame != selected {
+            show(0)
+        } else {
+            slots[0].view?.fit(animated: false)
+        }
+        selectionChanged()
+        reveal()
+    }
+
+    /// The first click on the inactive image only makes it active.
+    private func clicked(_ index: Int) -> Bool {
+        guard let pair = compare, pair.active.rawValue != index else { return true }
+        setActiveSide(index == 0 ? .left : .right)
+        return false
+    }
+
+    /// Image pixels per pixel of what a slot's view shows right now: above 1 while it still
+    /// shows a small preview of a frame whose real size is known.
+    private func coarseness(_ index: Int) -> CGFloat {
+        guard let id = slots[index].frame, let space = slots[index].view?.space, space.width > 0 else { return 1 }
+        var full = fullSize[id]
+        if full == nil, let other = slots[1 - index].frame, let guess = fullSize[other] {
+            // Not measured yet. Frames from one camera are the same size, turned or not.
+            let sameWay = (guess.width >= guess.height) == (space.width >= space.height)
+            full = sameWay ? guess : CGSize(width: guess.height, height: guess.width)
+        }
+        return (full?.width ?? space.width) / space.width
+    }
+
+    /// One image's zoom changed by a click or a pinch: the image beside it follows. A click
+    /// brings it to the same percentage, centred on its own face (the one sitting where the
+    /// clicked face sits) or else on the same spot of the frame. A pinch changes its zoom only.
+    private func userZoomed(_ index: Int, _ kind: HeroNSView.UserZoom) {
+        guard compare != nil, let mine = slots[index].view, let other = slots[1 - index].view else { return }
+        let scale = mine.zoomScale.map { $0 / coarseness(index) * coarseness(1 - index) }
+        switch kind {
+        case .pinch:
+            other.follow(scale: scale, face: nil, spot: nil, animated: false)
+        case .click:
+            other.follow(scale: scale, face: scale == nil ? nil : matchingFace(in: 1 - index, to: index), spot: mine.spot, animated: true)
+        }
+    }
+
+    /// The face in one image that sits where the face just zoomed to sits in the other. Nil
+    /// when that zoom wasn't to a face, or this image has none.
+    private func matchingFace(in index: Int, to source: Int) -> FaceResult? {
+        guard let target = slots[source].target, target.method != .point,
+              let from = slots[source].view?.space, from.width > 0, from.height > 0,
+              let to = slots[index].view?.space,
+              let id = slots[index].frame, let found = subjects(in: index), !found.isEmpty else { return nil }
+        let face = nearest(found, target.anchor.x / Double(from.width) * Double(to.width),
+                           target.anchor.y / Double(from.height) * Double(to.height))
+        chosenFace[id] = face
+        let result = Framing.fromSubject(found[face])
+        slots[index].target = result
+        return result
     }
 
     // MARK: Editing
+
+    /// The Edit button. Editing happens in the single view, so it leaves the side-by-side view first.
+    func toggleEditing() {
+        if compare != nil { endCompare() }
+        editing.toggle()
+        Log.note("edit", editing ? "edit mode on" : "edit mode off")
+    }
 
     private func cache(_ id: Int, _ values: [String: Float], _ image: CGImage) {
         rawCache.removeAll { $0.id == id }
@@ -546,6 +847,7 @@ final class Session: ObservableObject {
         pendingSave = nil
         saveToken += 1
         let fields = Adjust.fields(item.adjust)
+        let changed = item.adjust.keys.sorted().joined(separator: ", ")
         let values = SidecarValues(rating: item.rating, label: item.label)
         let known = item.sidecarName
         let base = item.baseName
@@ -555,8 +857,10 @@ final class Session: ObservableObject {
             let sidecar = known ?? (dir.exists(fresh) ? fresh : nil)
             do {
                 let name = try Edits.write(dir, baseName: base, sidecarName: sidecar, values: values, fields: fields)
+                Log.note("save", "\(item.name): edits saved to \(name ?? sidecar ?? "no sidecar (nothing changed)") [\(changed)]")
                 DispatchQueue.main.async { if let name = name { item.sidecarName = name } }
             } catch {
+                Log.note("save", "\(item.name): edits NOT saved: \(error)")
                 DispatchQueue.main.async { self.say("The edits for \(item.name) couldn't be saved. \(error)") }
             }
         }
@@ -571,6 +875,7 @@ final class Session: ObservableObject {
             return
         }
         let urls = items.map { $0.url }
+        Log.note("send", "to Photoshop: \(items.map { $0.name }.joined(separator: ", "))")
         // Let any save still on its way reach the disk first.
         sidecarQueue.async {
             DispatchQueue.main.async {
@@ -583,6 +888,102 @@ final class Session: ObservableObject {
         }
     }
 
+    // MARK: Exports
+
+    /// Extracts the embedded JPEG, or exports a developed 16-bit TIFF, for some frames: one at
+    /// a time, each saved next to its raw under the raw's name.
+    func export(_ kind: Export.Kind, _ items: [FrameItem]) {
+        guard !items.isEmpty else { return }
+        guard exportStatus == nil else {
+            say("An export is already running.")
+            return
+        }
+        flushSave()
+        exportRun += 1
+        let run = exportRun
+        let total = items.count
+        exportStatus = "Exporting 0 / \(total)"
+        let formats = self.formats
+        let jobs = items.map { (url: $0.url, name: $0.name, adjust: $0.adjust, shot: $0.info?.shot) }
+        Log.note("export", "\(total) \(kind.noun)(s) requested")
+        exportQueue.async {
+            // Let any save still on its way reach the disk first.
+            self.sidecarQueue.sync {}
+            var saved: [URL] = []
+            var failures = 0
+            var lastError = ""
+            var stopped = false
+            for job in jobs {
+                var wanted = false
+                DispatchQueue.main.sync { wanted = run == self.exportRun }
+                if !wanted {
+                    stopped = true
+                    break
+                }
+                let start = CFAbsoluteTimeGetCurrent()
+                do {
+                    let out: URL
+                    switch kind {
+                    case .jpeg: out = try Export.embeddedJpeg(job.url, formats)
+                    case .tiff: out = try Export.developedTiff(job.url, job.adjust, shot: job.shot)
+                    }
+                    saved.append(out)
+                    let size = (try? out.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+                    Log.note("export", "\(job.name) → \(out.lastPathComponent), \(MemoryStats.plain(UInt64(size))), \(Log.seconds(since: start))")
+                } catch {
+                    failures += 1
+                    lastError = "\(error)"
+                    Log.note("export", "\(job.name) failed: \(error)")
+                }
+                let done = saved.count + failures
+                DispatchQueue.main.async { if run == self.exportRun { self.exportStatus = "Exporting \(done) / \(total)" } }
+            }
+            let summary: String
+            if total == 1 {
+                summary = saved.first.map { "Saved \($0.lastPathComponent) next to the raw." }
+                    ?? "The \(kind.noun) for \(jobs[0].name) couldn't be exported: \(lastError)."
+            } else {
+                summary = (stopped ? "Export stopped. " : "")
+                    + "Saved \(saved.count) \(kind.noun)\(saved.count == 1 ? "" : "s") next to the raws."
+                    + (failures > 0 ? " \(failures) couldn't be exported; the log says why." : "")
+            }
+            DispatchQueue.main.async {
+                self.exportStatus = nil
+                self.say(summary)
+            }
+        }
+    }
+
+    func exportCurrent(_ kind: Export.Kind) {
+        if let item = current { export(kind, [item]) }
+    }
+
+    /// Exports every frame the thumbnail pane shows, after asking: with a filter on, that is
+    /// the way to export just the keepers.
+    func exportShown(_ kind: Export.Kind) {
+        let items = visible
+        guard !items.isEmpty else { return }
+        let count = NumberFormatter.localizedString(from: NSNumber(value: items.count), number: .decimal)
+        let alert = NSAlert()
+        if kind == .jpeg {
+            alert.messageText = "Extract the embedded JPEG from all \(count) frames shown?"
+            alert.informativeText = "Each JPEG is saved next to its raw file."
+        } else {
+            alert.messageText = "Export a 16-bit TIFF of all \(count) frames shown?"
+            alert.informativeText = "Each TIFF is saved next to its raw file. They are large, often well over 100 MB each, and take a few seconds each."
+        }
+        alert.addButton(withTitle: kind == .jpeg ? "Extract" : "Export")
+        alert.addButton(withTitle: "Cancel")
+        if alert.runModal() == .alertFirstButtonReturn { export(kind, items) }
+    }
+
+    func stopExport() {
+        guard exportStatus != nil else { return }
+        exportRun += 1
+        exportStatus = "Stopping the export…"
+        Log.note("export", "stop requested")
+    }
+
     // MARK: Ratings and labels
 
     /// 1–5 stars, 0 for none, -1 for reject. Written to the sidecar at once.
@@ -590,6 +991,7 @@ final class Session: ObservableObject {
         guard let item = current, item.rating != rating else { return }
         let old = SidecarValues(rating: item.rating, label: item.label)
         item.rating = rating
+        Log.note("rate", "\(item.name): \(rating < 0 ? "reject" : "\(rating) star(s)")")
         save(item, old)
     }
 
@@ -610,6 +1012,7 @@ final class Session: ObservableObject {
         guard new != item.label else { return }
         let old = SidecarValues(rating: item.rating, label: item.label)
         item.label = new
+        Log.note("rate", "\(item.name): label \(new ?? "removed")")
         save(item, old)
     }
 
@@ -625,9 +1028,12 @@ final class Session: ObservableObject {
             let fresh = base + ".xmp"
             let sidecar = known ?? (dir.exists(fresh) ? fresh : nil)
             do {
+                let start = CFAbsoluteTimeGetCurrent()
                 let name = try Ratings.write(dir, baseName: base, sidecarName: sidecar, values)
+                Log.note("save", "\(item.name): rating saved to \(name ?? sidecar ?? "no sidecar (nothing to record)") in \(Log.seconds(since: start))")
                 DispatchQueue.main.async { if let name = name { item.sidecarName = name } }
             } catch {
+                Log.note("save", "\(item.name): rating NOT saved: \(error)")
                 DispatchQueue.main.async {
                     item.rating = old.rating
                     item.label = old.label
@@ -645,16 +1051,33 @@ final class Session: ObservableObject {
         if !event.modifierFlags.intersection([.command, .control, .option]).isEmpty { return false }
         if NSApp.keyWindow?.firstResponder is NSText { return false }
         if NSApp.keyWindow?.attachedSheet != nil || NSApp.modalWindow != nil { return false }
+        // Keys typed in another window (Diagnostics) are not for the photos.
+        if let window = window, NSApp.keyWindow !== window { return false }
         guard folder != nil, !frames.isEmpty else { return false }
         switch event.keyCode {
         case 123: step(-1); return true // left
         case 124: step(1); return true // right
-        case 126: nudgeRating(1); return true // up
-        case 125: nudgeRating(-1); return true // down
-        case 53: // esc
-            if hero?.isZoomed == true { hero?.fit(); return true }
+        case 126, 125: // up, down: only where one large image fills the view
+            if compare == nil { nudgeRating(event.keyCode == 126 ? 1 : -1) }
+            return true
+        case 53: // esc: back one level. Zoom, then full screen, then the side-by-side view.
+            let views = compare == nil ? [slots[0].view] : slots.map { $0.view }
+            if views.contains(where: { $0?.isZoomed == true }) {
+                for view in views { view?.fit() }
+                return true
+            }
+            if let window = window, window.styleMask.contains(.fullScreen) {
+                window.toggleFullScreen(nil)
+                return true
+            }
+            if compare != nil {
+                endCompare()
+                return true
+            }
             return false
-        case 48: nextFace(); return true // tab
+        case 48: // tab: the other image when comparing, else the next face
+            if let pair = compare { setActiveSide(pair.active.other) } else { nextFace() }
+            return true
         case 49: NSApp.keyWindow?.toggleFullScreen(nil); return true // space
         default: break
         }

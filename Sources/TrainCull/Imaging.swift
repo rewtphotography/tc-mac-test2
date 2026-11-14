@@ -16,7 +16,7 @@ enum Imaging {
     static let firstReadBytes = 512 * 1024
     static let thumbnailPixels = 400
 
-    private static let ciContext = CIContext(options: [.cacheIntermediates: false])
+    static let ciContext = CIContext(options: [.cacheIntermediates: false])
 
     /// The embedded JPEG bytes a recipe points at.
     private static func jpegData(_ src: ByteSource, _ ref: JpegRef) -> Data? {
@@ -112,7 +112,19 @@ enum Imaging {
         return ciContext.createCGImage(out, from: e, format: .RGBA8, colorSpace: space)
     }
 
-    /// Faces and eye centres in an upright image, using Apple's Vision framework.
+    /// The raw developed by Apple's decoder with the frame's adjustments, not yet turned into
+    /// pixels, and the rectangle it covers. Exports render it at full quality.
+    static func developed(_ url: URL, _ values: [String: Float]) -> (image: CIImage, extent: CGRect)? {
+        guard let filter = CIRAWFilter(imageURL: url) else { return nil }
+        Adjust.apply(values, to: filter)
+        guard let decoded = filter.outputImage else { return nil }
+        let e = decoded.extent
+        if e.isInfinite || e.isEmpty { return nil }
+        return (Adjust.finish(decoded, values), e)
+    }
+
+    /// Faces and eye centres in an upright image, using Apple's Vision framework. Faces are
+    /// listed from left to right, so "the next face" means the same thing in every frame.
     static func detectFaces(_ image: CGImage) -> DetectedFaces {
         let w = Double(image.width), h = Double(image.height)
         let request = VNDetectFaceLandmarksRequest()
@@ -137,6 +149,7 @@ enum Imaging {
             }
             subjects.append(s)
         }
+        subjects.sort { $0.centerX < $1.centerX }
         return DetectedFaces(subjects: subjects, imageWidth: w)
     }
 }

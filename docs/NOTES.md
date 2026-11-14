@@ -29,6 +29,13 @@ Principles, from the owner:
 - Edit mode: an Edit button at the top right slides the thumbnail pane away and the editing
   pane in. A small top-left button brings thumbnails back for a quick look; that combination
   is a spot check, not a view to build around.
+- The title bar is the plain thin one, with no toolbar. Edit is the word alone (never an icon
+  beside it), in the accent colour so it is easy to spot, filled while edit mode is on.
+- The bar under the image is one line: stars, reject and labels on the left, the camera
+  settings centred in the space between, file name, position, state and zoom on the right.
+  When the window is too narrow the settings give way first. Nothing is stacked there.
+- Clicking a count at the bottom left (frames, rated, rejected) also scrolls the thumbnails to
+  the current image and flashes its outline, so it is never lost.
 
 **The large image**
 - Fitted by default. No loupe, ever. Full screen is optional and never required for zooming
@@ -37,6 +44,8 @@ Principles, from the owner:
   (`Framing.swift`). With no face found, the click zooms to 100% where it was clicked. A
   second click returns to fit.
 - Two-finger drag is the only way to pan. Pinch reaches any other zoom, up to 200%.
+- Going to a zoom and back is a short glide (about a fifth of a second), not a jump. It is
+  skipped when the Mac is set to reduce motion.
 - It always shows the raw rendered by Apple's decoder: the embedded preview first, replaced
   by the raw render once the frame has been still for a moment. Thumbnails stay embedded
   previews.
@@ -49,7 +58,8 @@ Bridge, Photoshop or Lightroom has it)
   unrated sets 1, up at 5 does nothing, down at 1 clears, never into reject. These two keys
   are the first to give up if another shortcut needs room.
 - X: reject. 6 / 7 / 8 / 9: red / yellow / green / blue label.
-- Tab: next face. Space: full screen. Esc: back one level.
+- Tab: next face. Space: full screen. Esc: back one level (zoom, then full screen, then the
+  side-by-side view).
 
 **Ratings, labels, edits**
 - `xmp:Rating` 1–5, 0 none, -1 reject. `xmp:Label` holds Bridge's label names: Select,
@@ -60,25 +70,52 @@ Bridge, Photoshop or Lightroom has it)
 - TrainCull is the first step and Camera Raw is a handoff: no two-way sync. Re-editing in
   TrainCull after Camera Raw is expected to be rare.
 
-**Side-by-side compare (decided, not built)**
-- Command-click a second thumbnail to show two images side by side.
-- Zoom is linked. Panning is independent, with a possible toggle to link it.
+**Side-by-side compare (built in alpha 5)**
+- Command-click a second thumbnail to show two images side by side. The image that was
+  showing goes left, the clicked one right, and the right one is active.
+- Zoom is linked. Panning is independent, with a possible toggle to link it (not built; wait
+  until it is missed).
 - The active image has a small coloured border. Ratings, labels, reject and left / right act
-  on it alone. The first click on the inactive image only makes it active; a click on the
-  active image zooms both.
-- Tab switches the active image; a clear on-screen button steps faces in this view.
+  on it alone: with 10 on the left and 20 active on the right, the right arrow shows 21 on the
+  right and the left stays on 10. The arrows step over the frame on the other side, so the
+  two sides never show the same photo.
+- The first click on the inactive image only makes it active; a click on the active image
+  zooms both: to the same percentage, each centred on its own face (the one sitting where the
+  clicked face sits), or on the same spot of the frame when it has no face. Pinch zooms both.
+- A zoomed active image stays zoomed, on the same spot, when the arrows move it to another
+  frame, so a burst can be checked at one zoom.
+- Tab switches the active image; a Next Face button on the image steps faces in this view.
+  Faces are counted from left to right.
 - While comparing, command-click a thumbnail replaces the active image; a plain click on a
-  thumbnail does nothing.
-- Leaving takes Esc or a visible back button. Esc goes back one level at a time: full-screen
-  compare, windowed compare, single view. The single view then shows the active image.
+  thumbnail does nothing. The other side's thumbnail has a quieter outline.
+- Leaving takes Esc or the visible Single View button. Esc goes back one level at a time:
+  zoom, full screen, the side-by-side view. The single view then shows the active image.
 - Space makes the compare view full screen, with the same behaviour.
+- Up / down do nothing here (they belong to the single view), and Edit leaves this view first.
 
 **Exports**
 - "Export" means two things: extract the embedded JPEG unchanged, or render from raw plus
   edits. Extract and a developed 16-bit TIFF are wanted now (TIFF: ProPhoto RGB, ZIP
   compression, named after the raw). Rendered JPEG and other formats wait for the owner's
   research.
+- Both are built (alpha 5). They are in the File menu and a thumbnail's right-click menu; the
+  TIFF is also at the bottom of the editing pane. No shortcuts.
+- Exports are saved next to the raw, under its name (`.jpg`, `.tif`). An export never replaces
+  a file: a taken name gets `-2`, `-3`.
+- The File menu can also export "all frames shown", after asking. With a filter on, that is
+  how the keepers are exported; choosing several frames by hand is still to design.
+- The extracted JPEG's picture data is copied byte for byte. When the photo was taken on its
+  side and the JPEG doesn't say so itself, a small note of the orientation is added so it
+  opens upright.
+- The TIFF also carries camera, lens, capture time and exposure settings.
 - Send to Photoshop: at the bottom of the editing pane and in a thumbnail's right-click menu.
+
+**Diagnostics**
+- While in alpha, log freely: every session writes a plain-text log on the Mac
+  (`~/Library/Logs/TrainCull`, the last ten kept) with what was opened, how long each step
+  took, every save, export and error. Nothing leaves the Mac.
+- Memory use is read every second (the figure Activity Monitor shows) and at heavy moments.
+  Help → Diagnostics states it in plain language (now, average, peak) and reveals the log file.
 
 **Cameras**
 - Sony ARW is built in as a recipe (data describing where a format keeps its embedded
@@ -89,26 +126,31 @@ Bridge, Photoshop or Lightroom has it)
   integrations, transfer and drive tools, controller support, batch rename, keywords, a
   folder tree, a calibration table mapping Apple's values to Camera Raw's.
 
-## What is built (alpha 4)
+## What is built (alpha 5)
 
 Folder opening (button, File menu, drag and drop, recents, drives), resizable left pane,
 thumbnails with rating, label and reject marks, the large image with raw render and face
-zoom, ratings and labels, edit mode with 15 of Apple's raw controls saved to the sidecar,
-Send to Photoshop, the camera settings line under the image, click-to-filter on the counts
-at the bottom left (double-click the rated count to choose stars), an app icon.
+zoom with a glide, ratings and labels, edit mode with 15 of Apple's raw controls saved to the
+sidecar, Send to Photoshop, the one-line bar under the image, click-to-filter on the counts
+at the bottom left (double-click the rated count to choose stars), side-by-side compare,
+extracting the embedded JPEG, exporting a developed 16-bit TIFF, the diagnostics log and
+memory report, an app icon.
 
-Checked by tests (42): raw and recipe reading, the settings line, sidecar editing, crash-safe
-saving, face-zoom maths. Checked by the owner on 1,523 Sony a7 IV frames: thumbnails, raw
-render, face zoom. Not yet used by anyone on real files: edit mode, saving edits, Send to
-Photoshop, filtering.
+Checked by tests on Linux (64): raw and recipe reading, the settings line, sidecar editing,
+crash-safe saving, face-zoom maths, the TIFF writer, JPEG orientation, compare stepping,
+memory figures. Checked by a test on the Mac build: an exported TIFF opens in Apple's reader
+with the right pixels. Checked by the automated build's screenshots (made-up frames): the
+window, the thumbnails, the single and side-by-side views. Checked by the owner on 1,523
+Sony a7 IV frames (alpha 4): thumbnails, raw render, face zoom.
+
+Not yet used by anyone on real files: edit mode, saving edits, Send to Photoshop, filtering,
+side-by-side compare, both exports, the zoom glide.
 
 ## Next, in order
 
-1. Fix whatever the owner's use of alpha 4 shows.
-2. Side-by-side compare.
-3. Extract embedded JPEG; developed 16-bit TIFF.
-4. Soft-focus and closed-eyes flags from Apple's face landmarks.
-5. A Settings window (label names, editor choice), Undo after reject, a diagnostics log.
+1. Fix whatever the owner's use of alpha 5 shows; read the log and memory figures they send.
+2. Soft-focus and closed-eyes flags from Apple's face landmarks.
+3. A Settings window (label names, editor choice), Undo after reject.
 
 ## Still to design
 
@@ -124,5 +166,17 @@ shown, how several frames are selected for the editor, the font, the overall loo
 - The slider ranges are a best reading of Apple's controls, not verified.
 - While a slider moves the image is a quick smaller render; the full one follows.
 - Thumbnails do not show edits.
-- Each downloaded build must be allowed once in System Settings, Privacy & Security.
+- Each downloaded build must be allowed once in System Settings, Privacy & Security. Only an
+  Apple Developer account (paid yearly) removes that step.
 - GitHub counts Mac build minutes at ten times the normal rate on a private repository.
+- The download link only works for someone signed in to GitHub while the repository is private.
+- Raw renders are kept for the last three frames and each is large; with two images side by
+  side, memory use is expected to be higher. The log's memory lines are there to measure it.
+- In the side-by-side view "the same percentage" assumes both frames are the same size until
+  each has been measured; frames of different sizes can differ for a moment after loading.
+- The zoom glide redraws the image on the processor. The log notes how many frames each glide
+  drew; if that is low on large files the drawing should move to the graphics card.
+- An exported TIFF has not yet been opened in Photoshop by anyone, only in Apple's reader.
+- Exports land in the folder being browsed; they are not shown there (only raws are).
+- An export that is interrupted leaves a hidden `.exporting` file, removed the next time the
+  folder is opened.

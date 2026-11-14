@@ -1,10 +1,12 @@
 import AppKit
+import QuartzCore
 import SwiftUI
 import TraincullCore
 
 /// The large focus image. It starts fitted; a click goes to face zoom (or to the clicked point
 /// when no face is known); a second click returns to fit. Two-finger drag pans, pinch zooms.
-/// There is no loupe and no mouse-drag panning.
+/// There is no loupe and no mouse-drag panning. Going to a zoom and back is a short glide, not
+/// a jump. In the side-by-side view there are two of these, and one follows the other's zoom.
 ///
 /// Coordinates: the image "space" is the full-size frame in pixels, x to the right and y down.
 /// The picture drawn may be a smaller preview of the same frame; it is stretched over the space.
@@ -19,10 +21,30 @@ final class HeroNSView: NSView {
     /// The last face-framed zoom (1 = 100%), for the dead zone.
     private var lastFaceScale: Double?
 
+    /// A glide in progress from an earlier zoom to the current one. `fromInverse` is one over
+    /// the scale it started at: the view moves evenly in that, which keeps the point being
+    /// zoomed to steady on screen.
+    private struct Glide {
+        let fromInverse: CGFloat
+        let fromCenter: CGPoint
+        let start: CFTimeInterval
+        var frames = 0
+    }
+
+    private var glide: Glide?
+    private var glideTimer: Timer?
+    static let glideSeconds: CFTimeInterval = 0.22
+
+    enum UserZoom { case click, pinch }
+
     /// What to frame for a click at a point of the space.
     var targetFor: ((CGPoint) -> FaceResult)?
     /// Called when the zoom changes: fitted or not, and the zoom in percent.
     var onZoom: ((Bool, Int) -> Void)?
+    /// Asked before a click is acted on; answering false swallows the click.
+    var acceptsClick: (() -> Bool)?
+    /// Called after a click or a pinch here changed the zoom, so the image beside this one can follow.
+    var onUserZoom: ((UserZoom) -> Void)?
 
     static let maxZoom: CGFloat = 2 // 200%
     static let deadZone = 0.05
@@ -35,16 +57,46 @@ final class HeroNSView: NSView {
         guard space.width > 0, space.height > 0, bounds.width > 0, bounds.height > 0 else { return 1 }
         return min(bounds.width / space.width, bounds.height / space.height)
     }
-    private var shownScale: CGFloat { isFit ? fitScale : scale }
-    private var shownCenter: CGPoint { isFit ? CGPoint(x: space.width / 2, y: space.height / 2) : center }
+    /// Where the view is heading: the zoom and centre it shows once any glide has finished.
+    private var targetScale: CGFloat { isFit ? fitScale : scale }
+    private var targetCenter: CGPoint { isFit ? CGPoint(x: space.width / 2, y: space.height / 2) : center }
 
-    /// Shows a picture of the current frame. `newFrame` returns to the fitted view.
-    func show(_ picture: CGImage?, space newSpace: CGSize, newFrame: Bool) {
+    /// What is on screen right now: the target, or a point on the way to it.
+    private var shown: (scale: CGFloat, center: CGPoint) {
+        let s = targetScale, c = targetCenter
+        guard let g = glide, s > 0 else { return (s, c) }
+        let t = min(max((CACurrentMediaTime() - g.start) / HeroNSView.glideSeconds, 0), 1)
+        let eased = CGFloat(1 - pow(1 - t, 3)) // quick at first, settling at the end
+        let inverse = g.fromInverse + (1 / s - g.fromInverse) * eased
+        return (1 / inverse, CGPoint(x: g.fromCenter.x + (c.x - g.fromCenter.x) * eased,
+                                     y: g.fromCenter.y + (c.y - g.fromCenter.y) * eased))
+    }
+
+    private var shownScale: CGFloat { shown.scale }
+    private var shownCenter: CGPoint { shown.center }
+
+    /// Shows a picture of the current frame. `newFrame` returns to the fitted view, unless
+    /// `keepZoom` asks a zoomed view to stay at the same magnification and the same spot of the
+    /// new frame (stepping through a burst in the side-by-side view).
+    func show(_ picture: CGImage?, space newSpace: CGSize, newFrame: Bool, keepZoom: Bool = false) {
         if newFrame {
-            isFit = true
+            stopGlide()
+            if keepZoom, !isFit, space.width > 0, space.height > 0, newSpace.width > 0, fitScale > 0 {
+                let magnification = scale / fitScale
+                let spot = CGPoint(x: center.x / space.width, y: center.y / space.height)
+                space = newSpace
+                scale = magnification * fitScale
+                center = CGPoint(x: spot.x * newSpace.width, y: spot.y * newSpace.height)
+            } else {
+                isFit = true
+            }
         } else if !isFit, space.width > 0, newSpace.width > 0, newSpace != space {
             // A sharper picture of the same frame arrived with a different pixel grid.
             let k = newSpace.width / space.width
+            if let g = glide {
+                glide = Glide(fromInverse: g.fromInverse * k, fromCenter: CGPoint(x: g.fromCenter.x * k, y: g.fromCenter.y * k),
+                              start: g.start, frames: g.frames)
+            }
             center = CGPoint(x: center.x * k, y: center.y * k)
             scale /= k
         }
@@ -55,18 +107,89 @@ final class HeroNSView: NSView {
         needsDisplay = true
     }
 
-    func fit() {
+    func fit(animated: Bool = true) {
         if isFit { return }
+        let from = shown
         isFit = true
         report()
-        needsDisplay = true
+        settle(from: from, animated: animated)
     }
 
     var isZoomed: Bool { !isFit }
 
+    /// View points per image pixel when zoomed; nil when fitted.
+    var zoomScale: CGFloat? { isFit ? nil : scale }
+
+    /// The middle of the view as a fraction of the image, 0 to 1 each way.
+    var spot: CGPoint {
+        guard space.width > 0, space.height > 0 else { return CGPoint(x: 0.5, y: 0.5) }
+        let c = targetCenter
+        return CGPoint(x: c.x / space.width, y: c.y / space.height)
+    }
+
+    /// Follows the image beside this one: the same zoom, centred on this image's own face when
+    /// one is given, else on the given spot of the frame, else where it already is.
+    func follow(scale target: CGFloat?, face: FaceResult?, spot: CGPoint?, animated: Bool) {
+        guard image != nil, space.width > 0, bounds.width > 0 else { return }
+        let limit = max(HeroNSView.maxZoom / backing, fitScale)
+        guard let target = target, min(target, limit) > fitScale * 1.001 else {
+            fit(animated: animated)
+            return
+        }
+        let from = shown
+        let s = min(target, limit)
+        var c = targetCenter
+        if let face = face {
+            let b = Double(backing)
+            let p = Framing.center(face.anchor, viewW: Double(bounds.width) * b, viewH: Double(bounds.height) * b, scale: Double(s) * b)
+            c = CGPoint(x: p.x, y: p.y)
+        } else if let spot = spot {
+            c = CGPoint(x: spot.x * space.width, y: spot.y * space.height)
+        }
+        isFit = false
+        scale = s
+        center = c
+        clamp()
+        report()
+        settle(from: from, animated: animated)
+    }
+
+    // MARK: Gliding
+
+    /// Redraws at the new zoom: as a glide from where the view was, or at once.
+    private func settle(from: (scale: CGFloat, center: CGPoint), animated: Bool) {
+        guard animated, window != nil, from.scale > 0, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
+            stopGlide()
+            needsDisplay = true
+            return
+        }
+        glide = Glide(fromInverse: 1 / from.scale, fromCenter: from.center, start: CACurrentMediaTime())
+        if glideTimer == nil {
+            let timer = Timer(timeInterval: 1.0 / 120.0, repeats: true) { [weak self] _ in self?.tick() }
+            RunLoop.main.add(timer, forMode: .common)
+            glideTimer = timer
+        }
+        needsDisplay = true
+    }
+
+    private func tick() {
+        if let g = glide, CACurrentMediaTime() - g.start >= HeroNSView.glideSeconds {
+            Log.note("zoom", "glide drew \(g.frames) frames in \(Int(HeroNSView.glideSeconds * 1000)) ms")
+            stopGlide()
+        }
+        needsDisplay = true
+    }
+
+    private func stopGlide() {
+        glideTimer?.invalidate()
+        glideTimer = nil
+        glide = nil
+    }
+
     /// Frames `result` the way the Android app does: eyes anchored, capped at 100%.
-    func zoom(to result: FaceResult) {
+    func zoom(to result: FaceResult, animated: Bool = true) {
         guard space.width > 0, bounds.width > 0 else { return }
+        let from = shown
         let b = Double(backing)
         let framed = Framing.frame(result, viewW: Double(bounds.width) * b, viewH: Double(bounds.height) * b,
                                    minScale: Double(fitScale) * b, previousScale: lastFaceScale, deadZone: HeroNSView.deadZone)
@@ -81,10 +204,10 @@ final class HeroNSView: NSView {
             clamp()
         }
         report()
-        needsDisplay = true
+        settle(from: from, animated: animated)
     }
 
-    private func report() { onZoom?(isFit, Int((shownScale * backing * 100).rounded())) }
+    private func report() { onZoom?(isFit, Int((targetScale * backing * 100).rounded())) }
 
     /// Keeps the image from leaving empty space at an edge.
     private func clamp() {
@@ -112,7 +235,9 @@ final class HeroNSView: NSView {
         bounds.fill()
         guard let picture = image, space.width > 0, space.height > 0,
               let ctx = NSGraphicsContext.current?.cgContext else { return }
-        let s = shownScale, c = shownCenter
+        let gliding = glide != nil
+        if gliding { glide?.frames += 1 }
+        let (s, c) = shown
         let vw = bounds.width / s, vh = bounds.height / s
         let whole = CGRect(origin: .zero, size: space)
         let visible = CGRect(x: c.x - vw / 2, y: c.y - vh / 2, width: vw, height: vh).intersection(whole)
@@ -126,8 +251,9 @@ final class HeroNSView: NSView {
         let x = crop.minX / kx, y = crop.minY / ky, w = crop.width / kx, h = crop.height / ky
         let left = bounds.width / 2 + (x - c.x) * s
         let top = bounds.height / 2 + (y - c.y) * s // measured down from the top of the view
-        // True pixels at 100% and above on the full-size picture; smooth otherwise.
-        ctx.interpolationQuality = (kx > 0.99 && s * backing >= 1) ? .none : .high
+        // True pixels at 100% and above on the full-size picture; smooth otherwise. A glide
+        // draws quickly and the last frame, once it has stopped, is drawn properly.
+        ctx.interpolationQuality = gliding ? .low : ((kx > 0.99 && s * backing >= 1) ? .none : .high)
         ctx.draw(part, in: CGRect(x: left, y: bounds.height - top - h * s, width: w * s, height: h * s))
     }
 
@@ -141,18 +267,22 @@ final class HeroNSView: NSView {
         let p = convert(event.locationInWindow, from: nil)
         defer { downPoint = nil }
         guard let d = downPoint, hypot(p.x - d.x, p.y - d.y) < 4, image != nil, space.width > 0 else { return }
+        guard acceptsClick?() ?? true else { return }
         if !isFit {
             fit()
+            onUserZoom?(.click)
             return
         }
         let at = spacePoint(p)
         guard CGRect(origin: .zero, size: space).contains(at) else { return }
         zoom(to: targetFor?(at) ?? FaceResult(method: .point, anchor: P(Double(at.x), Double(at.y)), eyeSpan: nil))
+        onUserZoom?(.click)
     }
 
     /// Two-finger drag on the trackpad pans a zoomed image.
     override func scrollWheel(with event: NSEvent) {
         guard !isFit else { return }
+        stopGlide()
         let k: CGFloat = event.hasPreciseScrollingDeltas ? 1 : 10
         center.x -= event.scrollingDeltaX * k / scale
         center.y -= event.scrollingDeltaY * k / scale
@@ -163,6 +293,7 @@ final class HeroNSView: NSView {
     /// Pinch zooms about the pointer, between fit and 200%.
     override func magnify(with event: NSEvent) {
         guard image != nil, space.width > 0 else { return }
+        stopGlide()
         let p = convert(event.locationInWindow, from: nil)
         let under = spacePoint(p)
         let limit = max(HeroNSView.maxZoom / backing, fitScale)
@@ -178,15 +309,19 @@ final class HeroNSView: NSView {
         }
         report()
         needsDisplay = true
+        onUserZoom?(.pinch)
     }
 }
 
+/// One large image. `slot` 0 is the single view and the left side of the side-by-side view;
+/// slot 1 is the right side.
 struct HeroView: NSViewRepresentable {
     let session: Session
+    let slot: Int
 
     func makeNSView(context: Context) -> HeroNSView {
         let view = HeroNSView()
-        session.attach(view)
+        session.attach(view, slot: slot)
         return view
     }
 

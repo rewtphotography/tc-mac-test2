@@ -12,6 +12,10 @@ what is built, and what is next.
   instead of listing them in replies; raise one only if it would cause real damage or cannot
   be undone.
 - **Build, then show the result.** Do not wait for a go-ahead that has effectively been given.
+- **With every new release, give the direct download link** (below) and the link to that
+  release's page. The owner installs from the downloaded file and does nothing else.
+- **Log freely while in alpha.** New behaviour writes what it did, how long it took and any
+  error to the diagnostics log (`Log.note`). Memory use is reported in plain language.
 - The owner does not use the terminal or Xcode and has no Apple Developer account. Explain
   anything they must do as plain steps in an app's own interface.
 - Never commit photos, raw files, sidecars, logs or signing material. Tests build their files
@@ -23,9 +27,13 @@ what is built, and what is next.
 - A Swift package. `Sources/TraincullCore` has no UI and is tested on Linux and Mac
   (`swift test`). `Sources/TrainCull` is the Mac app (SwiftUI and AppKit) and builds only on
   a Mac.
-- Every push builds the app on GitHub (`.github/workflows/build.yml`), checks that it starts,
-  and publishes it under Releases as a pre-release. The owner downloads the zip from there.
-  A screenshot of the app starting is kept with each build as the `launch-screenshot`
-  artifact; look at it.
+- Every push builds the app on GitHub (`.github/workflows/build.yml`), runs the tests, starts
+  the app on made-up frames, and publishes `TrainCull.dmg` under Releases as the latest
+  release. Alpha numbers follow on from the last published release (the first here is 5).
+- The newest build is always at
+  `https://github.com/<owner>/<repository>/releases/latest/download/TrainCull.dmg`.
+- Pictures of the app starting, in the single and side-by-side views, are kept with each
+  build as the `launch-screenshot` artifact, with the app's own log; look at them.
+- `swift test` needs no Mac for `TraincullCore`. `Tests/TrainCullTests` runs on the Mac build only.
 - Bundle ID `com.traincull`. No sandbox. The app never uses the network; the build fails if
   networking code is linked in.

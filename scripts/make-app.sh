@@ -1,6 +1,6 @@
 #!/bin/bash
-# Builds TrainCull.app from the Swift package and zips it. Run on a Mac (the automated build
-# does this); the build number is the first argument.
+# Builds TrainCull.app from the Swift package and puts it in a disk image, build/TrainCull.dmg.
+# Run on a Mac (the automated build does this); the build number is the first argument.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -32,5 +32,16 @@ codesign --force --sign - "$APP"
 codesign --verify --strict "$APP"
 test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Contents/Info.plist")" = "com.traincull"
 
-ditto -c -k --keepParent "$APP" "build/TrainCull-$VERSION-alpha$BUILD.zip"
+# A disk image to install from: open it and drag TrainCull onto the Applications folder.
+# The file name never changes, so one link always downloads the newest build.
+STAGE="build/dmg"
+mkdir -p "$STAGE"
+ditto "$APP" "$STAGE/TrainCull.app"
+ln -s /Applications "$STAGE/Applications"
+for attempt in 1 2 3; do
+  if hdiutil create -volname "TrainCull" -srcfolder "$STAGE" -ov -format UDZO "build/TrainCull.dmg"; then break; fi
+  if [ "$attempt" = 3 ]; then echo "error: the disk image couldn't be made" >&2; exit 1; fi
+  sleep 5
+done
+rm -rf "$STAGE"
 ls -lh build

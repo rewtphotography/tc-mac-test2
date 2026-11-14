@@ -27,6 +27,12 @@ struct EditPane: View {
                     .disabled(session.values.isEmpty)
                     .frame(maxWidth: .infinity)
                 Button {
+                    session.exportCurrent(.tiff)
+                } label: {
+                    Text("Export 16-bit TIFF").frame(maxWidth: .infinity)
+                }
+                .disabled(session.current == nil || session.exportStatus != nil)
+                Button {
                     if let item = session.current { session.sendToEditor([item]) }
                 } label: {
                     Text("Send to Photoshop").frame(maxWidth: .infinity)

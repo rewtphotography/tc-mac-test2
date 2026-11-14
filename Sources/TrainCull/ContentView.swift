@@ -9,6 +9,8 @@ enum Theme {
     static let muted = Color(red: 0.631, green: 0.631, blue: 0.667)
     static let accent = Color(red: 0.961, green: 0.773, blue: 0.259)
     static let reject = Color(red: 1.0, green: 0.541, blue: 0.298)
+    /// The height of the one-line bars along the bottom of the window.
+    static let barHeight: CGFloat = 28
 }
 
 struct ContentView: View {
@@ -41,24 +43,7 @@ struct ContentView: View {
         .background(Theme.background)
         .foregroundStyle(Theme.text)
         .preferredColorScheme(.dark)
-        .toolbar {
-            ToolbarItem(placement: .navigation) {
-                if session.editing {
-                    Button { session.thumbsWhileEditing.toggle() } label: {
-                        Image(systemName: "sidebar.left")
-                    }
-                    .help("Show or hide the thumbnails while editing")
-                }
-            }
-            ToolbarItem(placement: .primaryAction) {
-                Toggle(isOn: $session.editing) {
-                    Label("Edit", systemImage: "slider.horizontal.3").labelStyle(.titleAndIcon)
-                }
-                .toggleStyle(.button)
-                .disabled(session.current == nil)
-                .help("Edit this photo with Apple's raw controls")
-            }
-        }
+        .background(TitleBarSetup(session: session))
         .dropDestination(for: URL.self) { urls, _ in
             guard let url = urls.first else { return false }
             var isDirectory: ObjCBool = false
@@ -66,6 +51,93 @@ struct ContentView: View {
             session.open(isDirectory.boolValue ? url : url.deletingLastPathComponent())
             return true
         }
+    }
+}
+
+// MARK: The title bar
+
+/// There is no toolbar: the window keeps a plain, thin title bar, and the two controls that
+/// used to sit in a toolbar are placed inside it.
+struct TitleBarSetup: NSViewRepresentable {
+    let session: Session
+
+    func makeNSView(context: Context) -> NSView { Probe(session) }
+    func updateNSView(_ view: NSView, context: Context) {}
+
+    final class Probe: NSView {
+        private let session: Session
+        private var installed = false
+
+        init(_ session: Session) {
+            self.session = session
+            super.init(frame: .zero)
+        }
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) { fatalError("not used") }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            guard let window = window, !installed else { return }
+            installed = true
+            session.window = window
+            add(ThumbnailsButton(session: session), .left, to: window)
+            add(EditButton(session: session), .right, to: window)
+        }
+
+        private func add<V: View>(_ view: V, _ side: NSLayoutConstraint.Attribute, to window: NSWindow) {
+            let host = NSHostingView(rootView: view)
+            host.frame = NSRect(origin: .zero, size: host.fittingSize)
+            let controller = NSTitlebarAccessoryViewController()
+            controller.layoutAttribute = side
+            controller.view = host
+            window.addTitlebarAccessoryViewController(controller)
+        }
+    }
+}
+
+/// "Edit", in the accent colour so it is easy to spot; filled while edit mode is on.
+struct EditButton: View {
+    @ObservedObject var session: Session
+
+    var body: some View {
+        Button { session.toggleEditing() } label: {
+            Text("Edit")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(session.editing ? Theme.background : Theme.accent)
+                .padding(.horizontal, 11)
+                .padding(.vertical, 2)
+                .background(session.editing ? Theme.accent : Color.clear)
+                .overlay(RoundedRectangle(cornerRadius: 6).stroke(Theme.accent, lineWidth: 1))
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .opacity(session.current == nil ? 0.35 : 1)
+        .disabled(session.current == nil)
+        .help("Edit this photo with Apple's raw controls")
+        .padding(.trailing, 10)
+        .frame(height: 28)
+    }
+}
+
+/// Brings the thumbnails back for a quick look while editing. Only there in edit mode.
+struct ThumbnailsButton: View {
+    @ObservedObject var session: Session
+
+    var body: some View {
+        Button { session.thumbsWhileEditing.toggle() } label: {
+            Image(systemName: "sidebar.left")
+                .font(.system(size: 13))
+                .foregroundStyle(session.thumbsWhileEditing ? Theme.accent : Theme.muted)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("Show or hide the thumbnails while editing")
+        .opacity(session.editing ? 1 : 0)
+        .disabled(!session.editing)
+        .padding(.leading, 8)
+        .frame(width: 30, height: 28)
     }
 }
 
@@ -113,7 +185,9 @@ struct LeftPane: View {
             }
             Divider().overlay(Theme.line)
             Group {
-                if session.status.isEmpty && !session.frames.isEmpty {
+                if let exporting = session.exportStatus {
+                    Text(exporting).foregroundStyle(Theme.accent)
+                } else if session.status.isEmpty && !session.frames.isEmpty {
                     FilterBar(session: session)
                 } else {
                     Text(session.status.isEmpty ? " " : session.status).foregroundStyle(Theme.muted)
@@ -123,7 +197,7 @@ struct LeftPane: View {
             .lineLimit(1)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 10)
-            .padding(.vertical, 6)
+            .frame(height: Theme.barHeight)
         }
         .background(Theme.surface.opacity(0.6))
     }
@@ -131,6 +205,7 @@ struct LeftPane: View {
 
 /// The counts at the bottom of the left pane. Click one to show only those frames; click it
 /// again, or the frame count, to show everything. Double-click the rated count to choose stars.
+/// Every click also scrolls the thumbnails to the current image, so it is never lost.
 struct FilterBar: View {
     @ObservedObject var session: Session
     @State private var choosingStars = false
@@ -149,7 +224,7 @@ struct FilterBar: View {
             Text("\(session.frames.count) frames")
                 .foregroundStyle(session.filter == .all ? Theme.text : Theme.muted)
                 .onTapGesture { session.setFilter(.all) }
-                .help("Show all frames")
+                .help("Show all frames and find the current one")
             Text("·").foregroundStyle(Theme.muted)
             Text(ratedText)
                 .foregroundStyle(ratedActive ? Theme.accent : Theme.muted)
@@ -250,6 +325,13 @@ struct SectionTitle: View {
 struct ThumbnailPane: View {
     @ObservedObject var session: Session
 
+    /// The selected frame is outlined; when comparing, so is the frame on the other side, more quietly.
+    private func mark(_ id: Int) -> ThumbCell.Mark {
+        if id == session.selected { return .selected }
+        if let pair = session.compare, id == pair.otherFrame { return .beside }
+        return .none
+    }
+
     var body: some View {
         if session.frames.isEmpty {
             VStack(spacing: 10) {
@@ -269,25 +351,51 @@ struct ThumbnailPane: View {
                 ScrollView {
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 120, maximum: 260), spacing: 6)], spacing: 6) {
                         ForEach(session.visible) { item in
-                            ThumbCell(item: item, selected: item.id == session.selected)
+                            ThumbCell(item: item, mark: mark(item.id), flashed: session.flashed == item.id)
                                 .id(item.id)
-                                .onTapGesture { session.select(item.id) }
+                                .onTapGesture {
+                                    session.thumbnailClicked(item.id, command: NSEvent.modifierFlags.contains(.command))
+                                }
                                 .contextMenu {
                                     Button("Send to Photoshop") { session.sendToEditor([item]) }
+                                    Divider()
+                                    Button("Extract Embedded JPEG") { session.export(.jpeg, [item]) }
+                                    Button("Export 16-bit TIFF") { session.export(.tiff, [item]) }
                                 }
                         }
                     }
                     .padding(8)
                 }
                 .onChange(of: session.selected) { _, new in proxy.scrollTo(new) }
+                .onChange(of: session.revealTick) { _, _ in
+                    // After the grid has taken in a changed filter.
+                    let id = session.selected
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                        withAnimation(.easeInOut(duration: 0.2)) { proxy.scrollTo(id, anchor: .center) }
+                    }
+                }
+                .onAppear { proxy.scrollTo(session.selected, anchor: .center) }
             }
         }
     }
 }
 
 struct ThumbCell: View {
+    enum Mark { case none, selected, beside }
+
     @ObservedObject var item: FrameItem
-    let selected: Bool
+    let mark: Mark
+    /// Briefly drawn with a heavier outline, to catch the eye after the pane scrolls to it.
+    let flashed: Bool
+
+    private var selected: Bool { mark == .selected }
+    private var outline: Color {
+        switch mark {
+        case .selected: return Theme.accent
+        case .beside: return Theme.muted
+        case .none: return Color.clear
+        }
+    }
 
     var body: some View {
         VStack(spacing: 3) {
@@ -310,7 +418,8 @@ struct ThumbCell: View {
             }
             .aspectRatio(1, contentMode: .fit)
             .clipShape(RoundedRectangle(cornerRadius: 4))
-            .overlay(RoundedRectangle(cornerRadius: 4).stroke(selected ? Theme.accent : Color.clear, lineWidth: 2))
+            .overlay(RoundedRectangle(cornerRadius: 4).stroke(outline, lineWidth: flashed ? 5 : 2))
+            .animation(.easeOut(duration: 0.25), value: flashed)
             HStack(spacing: 4) {
                 Text(item.baseName).lineLimit(1).truncationMode(.middle)
                 Spacer(minLength: 0)
@@ -331,14 +440,32 @@ struct ThumbCell: View {
 struct HeroArea: View {
     @ObservedObject var session: Session
 
+    /// The thin coloured border that marks the active image when two are shown.
+    @ViewBuilder private func activeBorder(_ slot: Int) -> some View {
+        if session.compare != nil, session.activeSlot == slot {
+            Rectangle().strokeBorder(Theme.accent, lineWidth: 2).allowsHitTesting(false)
+        }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             ZStack(alignment: .top) {
-                HeroView(session: session)
+                // One image, or two side by side. The left one is the same view in both cases.
+                HStack(spacing: 2) {
+                    HeroView(session: session, slot: 0)
+                        .overlay(activeBorder(0))
+                    if session.compare != nil {
+                        HeroView(session: session, slot: 1)
+                            .overlay(activeBorder(1))
+                    }
+                }
+                if session.compare != nil {
+                    CompareControls(session: session)
+                }
                 if session.folder == nil {
                     Welcome(session: session)
                 }
-                if let message = session.message {
+                if let message = session.message ?? session.exportStatus {
                     Text(message)
                         .font(.system(size: 13))
                         .padding(.horizontal, 12)
@@ -352,9 +479,40 @@ struct HeroArea: View {
             if let item = session.current {
                 RatingBar(session: session, item: item)
             } else {
-                Text(appVersion).font(.system(size: 11)).foregroundStyle(Theme.muted).padding(8)
+                Text(appVersion).font(.system(size: 11)).foregroundStyle(Theme.muted).frame(height: Theme.barHeight)
             }
         }
+    }
+}
+
+/// The two buttons the side-by-side view needs on screen: the way back, and the next face
+/// (Tab switches the active image in this view, so faces get a button).
+struct CompareControls: View {
+    @ObservedObject var session: Session
+
+    private func pill(_ title: String, _ help: String, _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(Theme.text)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(Theme.surface.opacity(0.92))
+                .clipShape(RoundedRectangle(cornerRadius: 7))
+                .overlay(RoundedRectangle(cornerRadius: 7).stroke(Theme.line, lineWidth: 1))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(help)
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            pill("‹ Single View", "Back to one image (Esc)") { session.endCompare() }
+            pill("Next Face", "Zoom both images to the next face") { session.nextFace() }
+            Spacer()
+        }
+        .padding(10)
     }
 }
 
@@ -381,17 +539,29 @@ struct Welcome: View {
     }
 }
 
+/// The bar under the image, on one line: stars, reject and labels on the left, the camera
+/// settings centred in the space between, and the file's details on the right. When the window
+/// is too narrow for all three, the settings give way first.
 struct RatingBar: View {
     @ObservedObject var session: Session
     @ObservedObject var item: FrameItem
 
-    var body: some View {
-        HStack(spacing: 14) {
+    private var shot: String? {
+        guard let text = item.info?.shot?.label(), !text.isEmpty else { return nil }
+        return text
+    }
+
+    private var details: String {
+        "\(item.name) · \(item.id + 1) / \(session.frames.count) · \(session.heroState) · \(session.zoomText)"
+    }
+
+    private var controls: some View {
+        HStack(spacing: 12) {
             HStack(spacing: 2) {
                 ForEach(1 ... 5, id: \.self) { n in
                     Button { session.rate(item.rating == n ? 0 : n) } label: {
                         Text(n <= item.rating ? "★" : "☆")
-                            .font(.system(size: 18))
+                            .font(.system(size: 16))
                             .foregroundStyle(n <= item.rating ? Theme.accent : Theme.muted)
                     }
                     .buttonStyle(.plain)
@@ -400,13 +570,13 @@ struct RatingBar: View {
             }
             Button { session.toggleReject() } label: {
                 Text("✕ Reject")
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(item.rating < 0 ? Theme.background : Theme.reject)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 2)
                     .background(item.rating < 0 ? Theme.reject : Color.clear)
-                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Theme.reject, lineWidth: 1))
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .overlay(RoundedRectangle(cornerRadius: 5).stroke(Theme.reject, lineWidth: 1))
+                    .clipShape(RoundedRectangle(cornerRadius: 5))
             }
             .buttonStyle(.plain)
             .help("Reject (key X)")
@@ -415,7 +585,7 @@ struct RatingBar: View {
                     Button { session.setLabel(label) } label: {
                         Circle()
                             .fill(label.color)
-                            .frame(width: 16, height: 16)
+                            .frame(width: 13, height: 13)
                             .overlay(Circle().stroke(Theme.text, lineWidth: item.label == label.text ? 2 : 0).padding(-3))
                     }
                     .buttonStyle(.plain)
@@ -423,22 +593,37 @@ struct RatingBar: View {
                 }
             }
             if let text = item.label {
-                Text(text).font(.system(size: 12)).foregroundStyle(Theme.muted)
+                Text(text).foregroundStyle(Theme.muted)
             }
-            Spacer(minLength: 8)
-            VStack(alignment: .trailing, spacing: 2) {
-                if let shot = item.info?.shot?.label(), !shot.isEmpty {
-                    Text(shot).foregroundStyle(Theme.text)
-                }
-                Text("\(item.name) · \(item.id + 1) / \(session.frames.count) · \(session.heroState) · \(session.zoomText)")
-                    .foregroundStyle(Theme.muted)
-                    .truncationMode(.head)
-            }
-            .font(.system(size: 12))
-            .lineLimit(1)
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 8)
+        .fixedSize()
+    }
+
+    private func row(withSettings: Bool) -> some View {
+        HStack(spacing: 12) {
+            controls
+            if withSettings, let shot = shot {
+                Text(shot)
+                    .foregroundStyle(Theme.text)
+                    .frame(maxWidth: .infinity)
+            } else {
+                Spacer(minLength: 0)
+            }
+            Text(details)
+                .foregroundStyle(Theme.muted)
+                .truncationMode(.head)
+        }
+        .font(.system(size: 12))
+        .lineLimit(1)
+    }
+
+    var body: some View {
+        ViewThatFits(in: .horizontal) {
+            row(withSettings: true)
+            row(withSettings: false)
+        }
+        .padding(.horizontal, 12)
+        .frame(height: Theme.barHeight)
         .background(Theme.surface.opacity(0.6))
     }
 }
