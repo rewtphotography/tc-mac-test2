@@ -162,6 +162,10 @@ frames shown.
   after the system had dropped it. Alpha 6 renders at once in the background and keeps the
   pixels in memory of its own. Alpha 6's log should show a raw render near 0.3 s, glides at
   full frame count from the first, and any draw slower than 33 ms as a "slow" line.
+- That reading is not proven. On the build machine (no real graphics card) Core Image did
+  the work at once either way, so only the owner's next log can confirm it. If first zooms
+  still draw 1 frame, the "slow" lines will say how long the draw took and in which state;
+  the next thing to try is drawing through a layer on the graphics card.
 
 ## Next, in order
 
