@@ -10,6 +10,13 @@ An alpha build of TrainCull for Mac (Apple silicon, macOS 15 or later).
 
 **New in this build**
 
+- The first zoom after a new image is now a glide like the rest. It used to jump, most of all
+  with two images side by side. Stepping through frames should also feel smoother.
+- Memory is handed back sooner after each raw render and each export.
+- The log now notes any slow redraw, to show where the app still hesitates.
+
+**Since alpha 4**
+
 - **Side by side:** command-click a second thumbnail. The active image has a yellow border;
   stars, labels, reject and ← → act on it alone. Click the other image to make it active (or
   press Tab). Click the active image to zoom both to the face; pinch zooms both; two-finger
@@ -21,7 +28,7 @@ An alpha build of TrainCull for Mac (Apple silicon, macOS 15 or later).
 - **Help → Diagnostics** says in plain words how much memory TrainCull is using (now, average,
   peak) and shows the log file to send when something goes wrong.
 - A thinner title bar, **Edit** as a yellow word, a one-line bar under the image, a short glide
-  when zooming, and the counts at the bottom left now scroll the thumbnails to the current image.
+  when zooming, and the counts at the bottom left scroll the thumbnails to the current image.
 
 **Keys:** ← → step frames · 1–5 stars, 0 clears · ↑ ↓ raise or lower the rating · X reject ·
 6 7 8 9 red, yellow, green, blue label · Tab next face (the other image when side by side) ·

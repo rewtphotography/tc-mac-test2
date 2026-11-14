@@ -237,6 +237,14 @@ final class HeroNSView: NSView {
               let ctx = NSGraphicsContext.current?.cgContext else { return }
         let gliding = glide != nil
         if gliding { glide?.frames += 1 }
+        // A draw that takes longer than two frames of a 60 Hz screen is worth a line in the log.
+        let drawStarted = CACurrentMediaTime()
+        defer {
+            let took = CACurrentMediaTime() - drawStarted
+            if took > 0.033 {
+                Log.note("draw", "slow: \(Int(took * 1000)) ms for a \(picture.width)×\(picture.height) picture, \(isFit ? "fitted" : "zoomed")\(gliding ? ", gliding" : "")")
+            }
+        }
         let (s, c) = shown
         let vw = bounds.width / s, vh = bounds.height / s
         let whole = CGRect(origin: .zero, size: space)

@@ -347,9 +347,10 @@ final class Session: ObservableObject {
                     case let .success((info, image)):
                         item.info = info
                         item.thumb = image
-                        // A large image that was waiting for this frame's thumbnail can start now.
-                        for (i, slot) in self.slots.enumerated() where slot.frame == item.id && slot.view?.space == .zero {
-                            self.show(i)
+                        // A large image still empty because this thumbnail hadn't loaded shows it
+                        // now. Its preview and raw render are already on their way.
+                        for slot in self.slots where slot.frame == item.id && slot.view?.space == .zero {
+                            slot.view?.show(image, space: CGSize(width: image.width, height: image.height), newFrame: true)
                         }
                     case let .failure(error):
                         item.failed = "\(error)"
@@ -921,19 +922,22 @@ final class Session: ObservableObject {
                     break
                 }
                 let start = CFAbsoluteTimeGetCurrent()
-                do {
-                    let out: URL
-                    switch kind {
-                    case .jpeg: out = try Export.embeddedJpeg(job.url, formats)
-                    case .tiff: out = try Export.developedTiff(job.url, job.adjust, shot: job.shot)
+                // Each export gives its memory back before the next one starts.
+                autoreleasepool {
+                    do {
+                        let out: URL
+                        switch kind {
+                        case .jpeg: out = try Export.embeddedJpeg(job.url, formats)
+                        case .tiff: out = try Export.developedTiff(job.url, job.adjust, shot: job.shot)
+                        }
+                        saved.append(out)
+                        let size = (try? out.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+                        Log.note("export", "\(job.name) → \(out.lastPathComponent), \(MemoryStats.plain(UInt64(size))), \(Log.seconds(since: start))")
+                    } catch {
+                        failures += 1
+                        lastError = "\(error)"
+                        Log.note("export", "\(job.name) failed: \(error)")
                     }
-                    saved.append(out)
-                    let size = (try? out.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
-                    Log.note("export", "\(job.name) → \(out.lastPathComponent), \(MemoryStats.plain(UInt64(size))), \(Log.seconds(since: start))")
-                } catch {
-                    failures += 1
-                    lastError = "\(error)"
-                    Log.note("export", "\(job.name) failed: \(error)")
                 }
                 let done = saved.count + failures
                 DispatchQueue.main.async { if run == self.exportRun { self.exportStatus = "Exporting \(done) / \(total)" } }

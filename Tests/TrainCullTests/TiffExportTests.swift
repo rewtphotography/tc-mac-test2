@@ -23,6 +23,42 @@ final class TiffExportTests: XCTestCase {
         return image
     }
 
+    /// The pictures the large image draws must be finished pixels, not a recipe Core Image
+    /// works out when they are first drawn. The timings are printed for the build log.
+    func testRenderedPicturesAreFinishedPixels() throws {
+        let w = 3000, h = 2000
+        let rect = CGRect(x: 0, y: 0, width: w, height: h)
+        let image = quarters(CGFloat(w), CGFloat(h)).applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: 30]).cropped(to: rect)
+        let space = try XCTUnwrap(CGColorSpace(name: CGColorSpace.displayP3))
+        func seconds(_ work: () -> Void) -> String {
+            let start = CFAbsoluteTimeGetCurrent()
+            work()
+            return String(format: "%.3f s", CFAbsoluteTimeGetCurrent() - start)
+        }
+        var plain: CGImage?
+        let created = seconds { plain = Imaging.ciContext.createCGImage(image, from: rect, format: .RGBA8, colorSpace: space) }
+        let read = seconds { _ = plain?.dataProvider?.data }
+        var ours: CGImage?
+        let made = seconds { ours = Imaging.pixels(image, from: rect) }
+        let reread = seconds { _ = ours?.dataProvider?.data }
+        print("RENDER-CHECK createCGImage alone: \(created), then first read of its pixels: \(read)")
+        print("RENDER-CHECK Imaging.pixels: \(made), then read of its pixels: \(reread)")
+
+        let picture = try XCTUnwrap(ours)
+        XCTAssertEqual(picture.width, w)
+        XCTAssertEqual(picture.height, h)
+        XCTAssertEqual(picture.alphaInfo, .noneSkipLast)
+        let data = try XCTUnwrap(picture.dataProvider?.data)
+        XCTAssertGreaterThanOrEqual(CFDataGetLength(data), picture.bytesPerRow * h)
+        // The same pixels as the picture Core Image hands back: top-left of the red quarter.
+        let bytes = try XCTUnwrap(CFDataGetBytePtr(data))
+        let reference = try XCTUnwrap(plain?.dataProvider?.data)
+        let expected = try XCTUnwrap(CFDataGetBytePtr(reference))
+        let p = (h / 4) * picture.bytesPerRow + (w / 4) * 4
+        for channel in 0 ..< 3 { XCTAssertEqual(bytes[p + channel], expected[p + channel]) }
+        XCTAssertGreaterThan(bytes[p], bytes[p + 2]) // red, not blue
+    }
+
     func testExportedTiffOpensInApplesReaderWithTheRightPixels() throws {
         let w = 2000, h = 1000 // wide enough to need several strips
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("traincull-test-\(UUID().uuidString).tif")

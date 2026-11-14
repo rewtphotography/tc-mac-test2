@@ -53,13 +53,16 @@ enum Imaging {
     /// Reads one raw file's header and returns what the recipe found plus an upright preview.
     /// `maxPixels` nil decodes the preview at its full size.
     static func preview(_ url: URL, _ formats: Formats, maxPixels: Int?) throws -> (RawInfo, CGImage) {
-        let src = try FileByteSource(url: url)
-        try src.readHeader(firstReadBytes)
-        let info = try formats.parse(url.lastPathComponent, src)
-        guard let source = previewSource(src, info), let image = decode(source, maxPixels: maxPixels) else {
-            throw TiffError("the embedded preview couldn't be decoded")
+        // The pool hands back the memory decoding needed as soon as each picture is done.
+        try autoreleasepool {
+            let src = try FileByteSource(url: url)
+            try src.readHeader(firstReadBytes)
+            let info = try formats.parse(url.lastPathComponent, src)
+            guard let source = previewSource(src, info), let image = decode(source, maxPixels: maxPixels) else {
+                throw TiffError("the embedded preview couldn't be decoded")
+            }
+            return (info, rotated(image, clockwise: info.rotationDegrees))
         }
-        return (info, rotated(image, clockwise: info.rotationDegrees))
     }
 
     /// The full-size embedded JPEG, upright. Used when Apple's decoder can't render the raw.
@@ -101,15 +104,44 @@ enum Imaging {
     /// Renders the raw with Apple's built-in decoder and the frame's adjustments.
     /// `scale` below 1 gives a quick smaller render for live feedback while a slider moves.
     static func renderRaw(_ url: URL, _ values: [String: Float] = [:], scale: Float = 1) -> CGImage? {
-        guard let filter = CIRAWFilter(imageURL: url) else { return nil }
-        if scale < 1 { filter.scaleFactor = max(scale, 0.05) }
-        Adjust.apply(values, to: filter)
-        guard let decoded = filter.outputImage else { return nil }
-        let out = Adjust.finish(decoded, values)
-        let e = decoded.extent
-        if e.isInfinite || e.isEmpty { return nil }
+        autoreleasepool {
+            guard let filter = CIRAWFilter(imageURL: url) else { return nil }
+            if scale < 1 { filter.scaleFactor = max(scale, 0.05) }
+            Adjust.apply(values, to: filter)
+            guard let decoded = filter.outputImage else { return nil }
+            let out = Adjust.finish(decoded, values)
+            let e = decoded.extent
+            if e.isInfinite || e.isEmpty { return nil }
+            return pixels(out, from: e)
+        }
+    }
+
+    /// Turns a Core Image picture into finished 8-bit pixels, here and now.
+    ///
+    /// Core Image is free to hand back a picture that is only worked out when it is first
+    /// drawn, and to work it out again whenever the system has thrown the result away. For a
+    /// raw that work then lands on the main thread, in the middle of a zoom (alpha 5's log
+    /// showed zooms that drew a single frame). So the render is asked for at once, and the
+    /// result is copied into plain memory of its own that nothing can take back.
+    static func pixels(_ image: CIImage, from extent: CGRect) -> CGImage? {
         let space = CGColorSpace(name: CGColorSpace.displayP3) ?? CGColorSpaceCreateDeviceRGB()
-        return ciContext.createCGImage(out, from: e, format: .RGBA8, colorSpace: space)
+        guard let rendered = ciContext.createCGImage(image, from: extent, format: .RGBA8, colorSpace: space, deferred: false) else { return nil }
+        return solid(rendered)
+    }
+
+    /// A copy of a picture that owns its pixels in ordinary memory. A raw has no transparency,
+    /// so the copy also says so, which lets it be drawn without blending.
+    static func solid(_ image: CGImage) -> CGImage {
+        guard let data = image.dataProvider?.data, let provider = CGDataProvider(data: data),
+              CFDataGetLength(data) >= image.bytesPerRow * image.height else { return image }
+        var info = image.bitmapInfo
+        if image.alphaInfo == .premultipliedLast || image.alphaInfo == .last {
+            info = CGBitmapInfo(rawValue: (info.rawValue & ~CGBitmapInfo.alphaInfoMask.rawValue) | CGImageAlphaInfo.noneSkipLast.rawValue)
+        }
+        return CGImage(width: image.width, height: image.height, bitsPerComponent: image.bitsPerComponent,
+                       bitsPerPixel: image.bitsPerPixel, bytesPerRow: image.bytesPerRow,
+                       space: image.colorSpace ?? CGColorSpaceCreateDeviceRGB(), bitmapInfo: info, provider: provider,
+                       decode: nil, shouldInterpolate: true, intent: .defaultIntent) ?? image
     }
 
     /// The raw developed by Apple's decoder with the frame's adjustments, not yet turned into
@@ -126,6 +158,10 @@ enum Imaging {
     /// Faces and eye centres in an upright image, using Apple's Vision framework. Faces are
     /// listed from left to right, so "the next face" means the same thing in every frame.
     static func detectFaces(_ image: CGImage) -> DetectedFaces {
+        autoreleasepool { findFaces(image) }
+    }
+
+    private static func findFaces(_ image: CGImage) -> DetectedFaces {
         let w = Double(image.width), h = Double(image.height)
         let request = VNDetectFaceLandmarksRequest()
         let handler = VNImageRequestHandler(cgImage: image, options: [:])

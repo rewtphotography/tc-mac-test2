@@ -126,7 +126,7 @@ Bridge, Photoshop or Lightroom has it)
   integrations, transfer and drive tools, controller support, batch rename, keywords, a
   folder tree, a calibration table mapping Apple's values to Camera Raw's.
 
-## What is built (alpha 5)
+## What is built (alpha 6)
 
 Folder opening (button, File menu, drag and drop, recents, drives), resizable left pane,
 thumbnails with rating, label and reject marks, the large image with raw render and face
@@ -143,12 +143,31 @@ with the right pixels. Checked by the automated build's screenshots (made-up fra
 window, the thumbnails, the single and side-by-side views. Checked by the owner on 1,523
 Sony a7 IV frames (alpha 4): thumbnails, raw render, face zoom.
 
-Not yet used by anyone on real files: edit mode, saving edits, Send to Photoshop, filtering,
-side-by-side compare, both exports, the zoom glide.
+Used by the owner on real files in alpha 5, going by the log they sent: ratings, edit mode
+(exposure, tint), saving edits, the TIFF export (148 MB, 1.2 s), the counts at the bottom
+left, the zoom glide, side-by-side compare with stepping and Next Face. Not yet used by
+anyone: Send to Photoshop, filtering by stars or rejects, extracting the JPEG, exporting all
+frames shown.
+
+## Measured (alpha 5, the owner's log)
+
+1,523 Sony a7 IV frames on a MacBook Pro with 36 GB, four minutes of use:
+- Memory averaged 952 MB and peaked at 2.6 GB (while a tint slider moved). Just after opening
+  the folder it sat near 200 MB, later near 600 MB. Loading the 1,523 thumbnails took 2.0 s and
+  1.4 GB for a moment. Each raw render pushed it to 1.4–2.1 GB for a few seconds.
+- A glide normally drew 24 frames in 220 ms. The first zoom after a new image often drew 10,
+  and in the side-by-side view only 1: a jump. The raw "render" took 0.04 s, too quick to be
+  the real work, where the same render for a TIFF took 0.37 s. Reading: Core Image was handing
+  back a picture it only worked out when first drawn, on the main thread, and worked out again
+  after the system had dropped it. Alpha 6 renders at once in the background and keeps the
+  pixels in memory of its own. Alpha 6's log should show a raw render near 0.3 s, glides at
+  full frame count from the first, and any draw slower than 33 ms as a "slow" line.
 
 ## Next, in order
 
-1. Fix whatever the owner's use of alpha 5 shows; read the log and memory figures they send.
+1. Fix whatever the owner's use of alpha 6 shows; read the log and memory figures they send.
+   Check the alpha 6 log against "Measured" above: did the first zooms become smooth, and
+   where do average and peak memory sit now.
 2. Soft-focus and closed-eyes flags from Apple's face landmarks.
 3. A Settings window (label names, editor choice), Undo after reject.
 
@@ -170,8 +189,9 @@ shown, how several frames are selected for the editor, the font, the overall loo
   Apple Developer account (paid yearly) removes that step.
 - GitHub counts Mac build minutes at ten times the normal rate on a private repository.
 - The download link only works for someone signed in to GitHub while the repository is private.
-- Raw renders are kept for the last three frames and each is large; with two images side by
-  side, memory use is expected to be higher. The log's memory lines are there to measure it.
+- Raw renders are kept for the last three frames, 131 MB each for a 33-megapixel frame, and
+  from alpha 6 that memory is never handed back while they are kept. Resting memory may
+  therefore sit a little higher than in alpha 5 even though the peaks should be lower.
 - In the side-by-side view "the same percentage" assumes both frames are the same size until
   each has been measured; frames of different sizes can differ for a moment after loading.
 - The zoom glide redraws the image on the processor. The log notes how many frames each glide
