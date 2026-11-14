@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>TrainCull</string>
+	<key>CFBundleDisplayName</key>
+	<string>TrainCull</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.traincull</string>
+	<key>CFBundleExecutable</key>
+	<string>TrainCull</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleShortVersionString</key>
+	<string>@VERSION@</string>
+	<key>CFBundleVersion</key>
+	<string>@BUILD@</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>15.0</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.photography</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
+	<key>NSRemovableVolumesUsageDescription</key>
+	<string>TrainCull reads the raw files on the card or drive you open, and saves ratings as .xmp files next to them.</string>
+	<key>NSDesktopFolderUsageDescription</key>
+	<string>TrainCull reads the raw files in the folder you open, and saves ratings as .xmp files next to them.</string>
+	<key>NSDocumentsFolderUsageDescription</key>
+	<string>TrainCull reads the raw files in the folder you open, and saves ratings as .xmp files next to them.</string>
+	<key>NSDownloadsFolderUsageDescription</key>
+	<string>TrainCull reads the raw files in the folder you open, and saves ratings as .xmp files next to them.</string>
+	<key>NSNetworkVolumesUsageDescription</key>
+	<string>TrainCull reads the raw files in the folder you open, and saves ratings as .xmp files next to them.</string>
+</dict>
+</plist>

@@ -1,0 +1,48 @@
+# ---- Never commit photos, raw files, sidecars, logs or signing keys ----
+# Raw and image files (both letter cases; Sony writes upper case)
+*.[aA][rR][wW]
+*.[sS][rR][fF]
+*.[sS][rR]2
+*.[dD][nN][gG]
+*.[cC][rR]2
+*.[cC][rR]3
+*.[nN][eE][fF]
+*.[rR][aA][fF]
+*.[jJ][pP][gG]
+*.[jJ][pP][eE][gG]
+*.[hH][eE][iI][cC]
+*.[hH][iI][fF]
+*.[tT][iI][fF]
+*.[tT][iI][fF][fF]
+*.[pP][nN][gG]
+*.[wW][eE][bB][pP]
+*.[xX][mM][pP]
+*.[mM][pP]4
+# Diagnostics logs and exports
+*.log
+*.trace
+traincull-*.txt
+diagnostics/
+logs/
+# Signing material
+*.jks
+*.keystore
+*.p12
+*.pem
+*.pfx
+keystore*.txt
+*signing*.txt
+*.mobileprovision
+*.provisionprofile
+*.cer
+*.p8
+# ---- Xcode / Swift build output ----
+.DS_Store
+.build/
+build/
+DerivedData/
+xcuserdata/
+*.xcuserstate
+.swiftpm/
+*.ipa
+*.dSYM/

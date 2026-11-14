@@ -1,0 +1,58 @@
+name: Build
+
+on:
+  push:
+    branches: ["**"]
+    paths-ignore: ["docs/**", "**.md"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  core-tests:
+    name: Core tests (Linux)
+    runs-on: ubuntu-latest
+    container: swift:6.0
+    steps:
+      - uses: actions/checkout@v4
+      - run: swift test
+
+  mac:
+    name: Mac app
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - run: swift --version
+      - name: Tests
+        run: swift test
+      - name: Build the app
+        run: scripts/make-app.sh "${{ github.run_number }}"
+      - name: Launch check
+        run: |
+          open build/TrainCull.app
+          sleep 8
+          pgrep -x TrainCull
+          screencapture -x build/launch.png || true
+          pkill -x TrainCull || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TrainCull
+          path: build/*.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: launch-screenshot
+          path: build/launch.png
+          if-no-files-found: ignore
+      - name: Publish as a pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "alpha-${{ github.run_number }}" build/*.zip \
+            --prerelease \
+            --target "$GITHUB_SHA" \
+            --title "TrainCull 0.1.0 alpha ${{ github.run_number }}" \
+            --notes-file packaging/RELEASE_NOTES.md
