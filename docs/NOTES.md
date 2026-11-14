@@ -162,16 +162,24 @@ frames shown.
   after the system had dropped it. Alpha 6 renders at once in the background and keeps the
   pixels in memory of its own. Alpha 6's log should show a raw render near 0.3 s, glides at
   full frame count from the first, and any draw slower than 33 ms as a "slow" line.
-- That reading is not proven. On the build machine (no real graphics card) Core Image did
-  the work at once either way, so only the owner's next log can confirm it. If first zooms
-  still draw 1 frame, the "slow" lines will say how long the draw took and in which state;
-  the next thing to try is drawing through a layer on the graphics card.
+
+## Measured (alpha 6, the owner's log)
+
+Same folder and Mac, two and a half minutes of use:
+- The reading above was right. A raw render now takes 0.38–0.40 s in the background (0.9 s
+  for the very first, while thumbnails load) and the sharp image arrives about 0.55 s after
+  landing on a frame. Every glide drew 17–25 frames, including the first zoom after a new
+  image and in the side-by-side view. No draw took longer than 33 ms.
+- Memory averaged 951 MB and peaked at 2.2 GB (again while sliders moved). Loading the
+  thumbnails peaked at 0.8 GB, down from 1.4. Browsing sits at 1.3–1.4 GB just after each
+  render and rests near 770 MB, up from about 600, because the kept renders now hold their
+  memory.
+- Stepping fast renders one frame at a time, so a frame already left can hold up the wanted
+  one by up to 0.4 s. Not a complaint yet; cancel a render in flight if it becomes one.
 
 ## Next, in order
 
 1. Fix whatever the owner's use of alpha 6 shows; read the log and memory figures they send.
-   Check the alpha 6 log against "Measured" above: did the first zooms become smooth, and
-   where do average and peak memory sit now.
 2. Soft-focus and closed-eyes flags from Apple's face landmarks.
 3. A Settings window (label names, editor choice), Undo after reject.
 
