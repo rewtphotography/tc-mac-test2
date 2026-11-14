@@ -132,11 +132,14 @@ public enum Framing {
             scale = min(max(previous, lower), 1)
             kept = true
         }
-        // Centre that puts the anchor at (anchorX, anchorY) of the view. The zoom view then
-        // clamps it so the image never leaves empty space at an edge.
-        let cx = r.anchor.x + (viewW * 0.5 - viewW * anchorX) / scale
-        let cy = r.anchor.y + (viewH * 0.5 - viewH * anchorY) / scale
-        return Framed(scale: scale, center: P(cx, cy), keptPreviousZoom: kept)
+        return Framed(scale: scale, center: center(r.anchor, viewW: viewW, viewH: viewH, scale: scale), keptPreviousZoom: kept)
+    }
+
+    /// The centre that puts `anchor` at (anchorX, anchorY) of the view at a given zoom. The zoom
+    /// view then clamps it so the image never leaves empty space at an edge. Also used on its
+    /// own when a second image follows the first one's zoom in the side-by-side view.
+    public static func center(_ anchor: P, viewW: Double, viewH: Double, scale: Double) -> P {
+        P(anchor.x + (viewW * 0.5 - viewW * anchorX) / scale, anchor.y + (viewH * 0.5 - viewH * anchorY) / scale)
     }
 }
 

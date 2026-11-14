@@ -9,6 +9,11 @@ public struct ShotInfo: Equatable {
     public var iso: Int?
     /// The EXIF Model tag as recorded, e.g. "ILCE-7M4" or "NIKON D800E".
     public var model: String?
+    /// Not part of the settings line; carried into exported files. `taken` is the capture time
+    /// as the camera wrote it, "YYYY:MM:DD HH:MM:SS".
+    public var make: String?
+    public var lens: String?
+    public var taken: String?
 
     public init(focalMm: Double? = nil, fNumber: Double? = nil, exposureS: Double? = nil, iso: Int? = nil, model: String? = nil) {
         self.focalMm = focalMm
@@ -39,9 +44,13 @@ public struct ShotInfo: Equatable {
         }
         var iso: Int?
         if let e = exif, let v = tiff.value(e, 0x8827), (1 ... 9_999_999).contains(v) { iso = Int(v) }
-        let shot = ShotInfo(focalMm: positive(0x920A), fNumber: positive(0x829D), exposureS: positive(0x829A),
+        var shot = ShotInfo(focalMm: positive(0x920A), fNumber: positive(0x829D), exposureS: positive(0x829A),
                             iso: iso, model: tiff.string(ifd0, 0x0110))
-        return shot.isEmpty ? nil : shot
+        if shot.isEmpty { return nil }
+        shot.make = tiff.string(ifd0, 0x010F)
+        shot.lens = exif.flatMap { tiff.string($0, 0xA434) }
+        shot.taken = exif.flatMap { tiff.string($0, 0x9003) } ?? tiff.string(ifd0, 0x0132)
+        return shot
     }
 
     /// "85", "2.8", "24.5": whole numbers without a decimal, else one decimal.
