@@ -49,3 +49,7 @@ xcuserdata/
 .swiftpm/
 *.ipa
 *.dSYM/
+
+# Python
+__pycache__/
+*.pyc
