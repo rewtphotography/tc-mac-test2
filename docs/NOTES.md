@@ -127,7 +127,7 @@ Bridge, Photoshop or Lightroom has it)
   folder tree, a calibration table mapping Apple's values to Camera Raw's.
 - Subject, hair and skin masks: see "Masking" below.
 
-## What is built (alpha 8)
+## What is built (alpha 9)
 
 Folder opening (button, File menu, drag and drop, recents, drives), resizable left pane,
 thumbnails with rating, label and reject marks, the large image with raw render and face
@@ -298,11 +298,14 @@ The spec's order of work, and where it stands:
    mask panel writes a folder next to the raw: the proxy, the body-box crop, the faces with
    outlines, the current first pass, and a note telling the owner how to paint the reference
    mask. The owner has to do that for 20 to 25 photos before step 2 can start.
-2. **Bake-off of subject models in Python, then stop for the owner's review. Not started.**
-   It can be run from here: this workspace reaches Hugging Face and PyPI, with 4 cores and
-   15 GB, so it will be slow and its timings will say nothing about the owner's Mac. Speed
-   on the Mac can only be measured once a model is in the app.
-3. to 6. Models in the app, refine tools, skin v2, acceptance: after the bake-off.
+2. **Bake-off of subject models. Done on eight bundles; see "The subject bake-off" below.**
+   Run here, in Python on the processor, so its timings say nothing about the owner's Mac.
+3. **Models in the app. Built (alpha 9), as a picker so the owner can test every candidate:**
+   "Subject from" in the mask panel offers BiRefNet (A, the default), SAM (B), SAM + close-up
+   (B2), Hybrid (C) and Vision (V). Not yet done from this step: caching of what the models
+   return (each Make runs them again), prewarming, unloading under memory pressure, the
+   no-face path (it falls back to Vision), the head-crop pass with the new models.
+4. to 6. Refine tools and people picker, skin v2, acceptance: not started.
 
 Done now because they don't depend on the bake-off (the spec's sections 4, 5.1, 5.2, 9, 13):
 - **The seam.** Max tiles now overlap and fade into each other, and into the High answer
@@ -339,11 +342,57 @@ there is none of ours to time); model load and compute-unit lines (no models yet
 in joules and the power-source line (left until there is something to compare); the
 `powermetrics` scripts (they need the terminal and an administrator password).
 
+### The subject bake-off (2026-11-15, eight bundles from the owner)
+
+The owner sent eight debug bundles, each with Photoshop's one-click Select Subject mask
+(`ps_mask-<number>.jpg`) as the reference: not the truth, but what they compare against. Five
+are crowd or overlap shots (`_DSC6303`, `6465`, `6957`, `7006`, `7451`), three clean (`6372`,
+`6378`, `7473`). `tools/bakeoff_subject.py` ran the models here (PyTorch, processor only) and
+applied the selection rules; the same rules are in `SubjectSelect.swift`. Every bundle has
+one face, so nothing here tests telling two people apart by their faces.
+
+Agreement with Photoshop (IoU at the proxy's size; median of all eight, then of the five
+crowd shots):
+
+| Candidate | All | Crowd | Selected extra (crowd) | Missed (crowd) |
+|---|---|---|---|---|
+| V, Vision as in alpha 8 | 0.765 | 0.706 | 41% of the subject's area | 0.5% |
+| A, BiRefNet_HR with the sharpness rules | 0.993 | 0.992 | 0.5% | 0.2% |
+| B, SAM 2.1 large, roomy box, two points | 0.941 | 0.950 | 0.1% | 4.9% |
+| B2, B plus a pass on the box crop | 0.755 | 0.757 | 0.1% | 24% |
+| C, hybrid of A and B | 0.993 | 0.992 | 0.6% | 0.2% |
+
+- **A is the choice** by the spec's rule (the simplest within 0.005 of the best). Its worst
+  photo is 0.982. It drops the people behind without any help from faces: BiRefNet goes for
+  what is in focus, and the sharpness rule removes what little else it picks up.
+- **C adds nothing over A here.** It would matter with two people in focus, which this set
+  doesn't have. SAM stays worth having for the click-to-fix tools.
+- **SAM alone is not a base.** It selects parts: on `6372` and `6378` it leaves out the
+  headpiece (a quarter of the subject). Apple's Core ML SAM always returns three answers, from
+  whole object to part, and its own favourite is often a part. Taking the largest answer it
+  rates nearly as well helped one photo and wrecked another, so it is not used.
+- **The spec's body box was too tight** (two face-widths, six and a half face-heights): it cut
+  off raised hands and, on full-length shots, the feet, and SAM inside it scored 0.10 to
+  0.86. The app now uses three widths and ten heights. B2 above still used the tight box,
+  because the crop in the bundles was cut with it; it should be re-run from new bundles.
+- **Where A and Photoshop differ** is small and goes both ways. A fills some gaps that show
+  background: between the legs (`6465`, `7451`), between arm and body (`6957`), between hair
+  and headpiece (`6372`, `6378`). Photoshop takes a fringe of background around curls
+  (`7473`) and under hems and between shoes. Neither is ahead on fine hair at this size;
+  that is the refinement tiers' job.
+- **Not measured:** speed on the owner's Mac. Here, on four processor cores, BiRefNet took
+  two minutes a run and SAM large five seconds an image. Only the app can say what Core ML
+  on the M3 Pro does; the log's `base` lines time every model call.
+- BiRefNet's close-up run used the box cut from the proxy, not from the full-size photo as
+  the app does, so the app's edges inside the box may be a little better than measured.
+
 **Where spec v2 collides with this project. To settle before step 3:**
 - It has models "downloaded on demand, never bundled". The app never uses the network and
-  the build fails if networking code is linked. Either the models ship inside the download
-  (SAM 2.1 and BiRefNet together are of the order of a gigabyte) or the rule is relaxed for
-  model downloads only. The owner's call.
+  the build fails if networking code is linked. **Taken as decided for now: the models ship
+  inside the download.** The owner asked for the candidates in the app without answering the
+  question, so the default stood. The build fetches SAM 2.1 large from Apple's Hugging Face
+  repository and converts BiRefNet itself (`tools/convert_birefnet.py`, on Linux), compiles
+  both on the Mac and copies them into the app. The download is of the order of a gigabyte.
 - Its bake-off harness assumes PyTorch on the owner's Mac. The owner doesn't use the
   terminal; it runs here instead, from the bundles they export.
 - It blends the High tier towards the first pass when unsure (9.5); here High blends towards

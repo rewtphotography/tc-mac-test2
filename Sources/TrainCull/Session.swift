@@ -118,6 +118,9 @@ final class Session: ObservableObject {
     @Published var maskTick = 0
     /// The narrower of the two edge-band widths being compared (the masking spec's 9.6).
     @Published var narrowBand = false
+    /// Where the first idea of the subject comes from: Vision, or one of the models in this build.
+    /// BiRefNet first: it agreed best with Photoshop's masks in the bake-off.
+    @Published var maskSource = [SubjectSource.birefnet, .hybrid, .sam, .vision].first { $0.available } ?? .vision
     @Published var recents: [URL] = []
     @Published var volumes: [Volume] = []
     @Published var ratedCount = 0
@@ -1013,7 +1016,7 @@ final class Session: ObservableObject {
         maskRun += 1
         maskJobs += 1
         let run = maskRun, job = maskJobs
-        let tier = maskTier
+        let tier = maskTier, source = maskSource.available ? maskSource : .vision
         let url = item.url, id = item.id, name = item.name
         let known = faces[id]
         var settings = MatteSettings()
@@ -1023,13 +1026,13 @@ final class Session: ObservableObject {
         }
         maskStatus = "Starting…"
         let requested = CFAbsoluteTimeGetCurrent()
-        Log.note("job", "#\(job) \(tier.name) \(name) · trigger: user (Make button) · band \(narrowBand ? "narrow" : "standard")")
+        Log.note("job", "#\(job) \(tier.name) \(name) · subject from \(source.name) (\(source.rawValue)) · trigger: user (Make button) · band \(narrowBand ? "narrow" : "standard")")
         maskQueue.async {
             Log.note("job", "#\(job) started · queued \(Log.seconds(since: requested))")
             let meter = JobMeter()
             let working = CFAbsoluteTimeGetCurrent()
             let result = Result { () -> MaskResult in
-                try Masking.make(url: url, tier: tier, faces: known, settings: settings, progress: { text in
+                try Masking.make(url: url, tier: tier, faces: known, settings: settings, subject: source, progress: { text in
                     DispatchQueue.main.async { if run == self.maskRun { self.maskStatus = "\(text)…" } }
                 }, cancelled: {
                     var stop = false

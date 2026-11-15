@@ -391,7 +391,7 @@ final class MatteTests: XCTestCase {
         XCTAssertLessThan(ranked[0].sharp!, ranked[1].sharp!)
 
         let box = SubjectChoice.bodyBox(face: PixelRect(x: 100, y: 100, w: 40, h: 50), w: 400, h: 300)
-        XCTAssertEqual(box, PixelRect(x: 40, y: 60, w: 160, h: 240), "two widths either side, 0.8 heights above, clamped at the bottom")
+        XCTAssertEqual(box, PixelRect(x: 0, y: 50, w: 240, h: 250), "three widths either side, one height above, clamped at the left and the bottom")
     }
 
     // MARK: Skin

@@ -183,6 +183,60 @@ final class TiffExportTests: XCTestCase {
         print("METER-CHECK \(measured.memory) | \(measured.load)")
     }
 
+    /// SAM, end to end, when its models are in the build: a plain disc on a plain background,
+    /// asked about with one point in its middle, comes back as the disc. This checks the three
+    /// Core ML models fit together and that points land where they are meant to.
+    func testSAMFindsWhatAPointIsOn() throws {
+        try XCTSkipUnless(BundledModels.hasSAM, "no SAM models in this build")
+        let w = 600, h = 400
+        func inside(_ x: Int, _ y: Int) -> Bool { (x - 420) * (x - 420) + (y - 150) * (y - 150) < 90 * 90 }
+        let picture = try flat(w, h) { x, y in inside(x, y) ? (200, 60, 50) : (40, 90, 60) }
+        let taken = try SAMModel.shared.embed(picture)
+        let answers = try SAMModel.shared.decode(taken, points: [SAMModel.Point(x: 420, y: 150, label: 1)])
+        XCTAssertEqual(answers.count, 3)
+        let best = try XCTUnwrap(SAMModel.shared.best(answers, containing: (420, 150), in: taken, w: w, h: h))
+        var both = 0, either = 0
+        for y in 0 ..< h {
+            for x in 0 ..< w {
+                let a = best.mask.v[y * w + x] >= 0.5, b = inside(x, y)
+                if a && b { both += 1 }
+                if a || b { either += 1 }
+            }
+        }
+        print("SAM-CHECK disc IoU \(Double(both) / Double(max(either, 1))) · SAM's own score \(best.score)")
+        XCTAssertGreaterThan(Double(both) / Double(max(either, 1)), 0.85)
+
+        // The same through a box alone, off-centre, to check both axes of the coordinates.
+        let boxed = try SAMModel.shared.decode(taken, points: [], box: Box(x0: 320, y0: 50, x1: 520, y1: 250))
+        let pick = try XCTUnwrap(SAMModel.shared.best(boxed, containing: (420, 150), in: taken, w: w, h: h))
+        XCTAssertGreaterThanOrEqual(pick.mask.at(420, 150), 0.5)
+        XCTAssertLessThan(pick.mask.at(100, 300), 0.5)
+    }
+
+    /// BiRefNet, converted for Core ML, still finds the thing in a picture. Only run when asked
+    /// (TRAINCULL_HEAVY_MODELS): at 2048 × 2048 it is slow and memory-hungry on a build machine.
+    func testBiRefNetFindsTheSubject() throws {
+        try XCTSkipUnless(BundledModels.hasBiRefNet, "no BiRefNet model in this build")
+        try XCTSkipUnless(ProcessInfo.processInfo.environment["TRAINCULL_HEAVY_MODELS"] != nil, "not asked to run the heavy model")
+        let w = 900, h = 600
+        func inside(_ x: Int, _ y: Int) -> Bool { (x - 500) * (x - 500) + (y - 270) * (y - 270) < 160 * 160 }
+        let picture = try flat(w, h) { x, y in
+            inside(x, y) ? (UInt8(200 + (x % 24 < 12 ? 20 : 0)), 120, 50) : (UInt8(50 + x / 9), UInt8(80 + y / 10), 120)
+        }
+        let start = CFAbsoluteTimeGetCurrent()
+        let mask = try BiRefNetModel.shared.segment(picture).resized(w: w, h: h)
+        var both = 0, either = 0
+        for y in 0 ..< h {
+            for x in 0 ..< w {
+                let a = mask.v[y * w + x] >= 0.5, b = inside(x, y)
+                if a && b { both += 1 }
+                if a || b { either += 1 }
+            }
+        }
+        print("BIREFNET-CHECK disc IoU \(Double(both) / Double(max(either, 1))) in \(CFAbsoluteTimeGetCurrent() - start) s")
+        XCTAssertGreaterThan(Double(both) / Double(max(either, 1)), 0.8)
+    }
+
     /// Apple's first-pass masks run here without failing. A made-up picture has no person in
     /// it, so what they return is only reported.
     func testVisionMasksRun() throws {

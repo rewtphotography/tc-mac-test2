@@ -21,17 +21,71 @@ jobs:
       - uses: actions/checkout@v4
       - run: swift test
 
+  # BiRefNet has no ready-made Core ML form. It is converted here, on Linux, once; the result
+  # is kept between builds and handed to the Mac job, which compiles it into the app.
+  birefnet:
+    name: Convert BiRefNet (Linux, kept between builds)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        id: kept
+        with:
+          path: BiRefNet.mlpackage
+          key: birefnet-${{ hashFiles('tools/convert_birefnet.py') }}
+      - if: steps.kept.outputs.cache-hit != 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Convert
+        if: steps.kept.outputs.cache-hit != 'true'
+        run: |
+          pip install torch==2.15.0 torchvision --index-url https://download.pytorch.org/whl/cpu
+          pip install transformers==5.23.0 timm==1.0.31 kornia==0.9.1 einops==0.8.2 coremltools==9.0
+          python -u tools/convert_birefnet.py convert BiRefNet.mlpackage
+      - uses: actions/upload-artifact@v4
+        with:
+          name: birefnet
+          path: BiRefNet.mlpackage
+          retention-days: 2
+
   mac:
     name: Mac app
     runs-on: macos-15
+    # Built even if the conversion failed: the app then simply has no BiRefNet.
+    needs: birefnet
+    if: always()
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
       - run: swift --version
+      # The segmentation models the app carries. Fetched and compiled once, then kept between
+      # builds; scripts/fetch-models.sh says which they are.
+      - name: Models (kept between builds)
+        uses: actions/cache@v4
+        id: models
+        with:
+          path: build-models
+          key: models-${{ hashFiles('scripts/fetch-models.sh', 'tools/convert_birefnet.py') }}
+      - name: BiRefNet from the Linux job
+        if: steps.models.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: birefnet
+          path: BiRefNet.mlpackage
+      - name: Fetch and compile models
+        run: scripts/fetch-models.sh build-models
       # The core library's own tests run in the Linux job. Here, the ones that need a Mac.
       - name: Tests
-        run: swift test --filter TrainCullTests
+        run: TRAINCULL_MODELS="$PWD/build-models" swift test --filter TrainCullTests
+      # BiRefNet at full size may be more than a build machine can run; a failure here is
+      # reported but does not stop the build.
+      - name: BiRefNet check
+        continue-on-error: true
+        timeout-minutes: 12
+        run: TRAINCULL_MODELS="$PWD/build-models" TRAINCULL_HEAVY_MODELS=1 swift test --filter TrainCullTests/testBiRefNetFindsTheSubject
       # Alpha numbers follow on from the last published one (alpha 4 came from the earlier
       # repository), so a failed build never uses a number up.
       - name: Build number

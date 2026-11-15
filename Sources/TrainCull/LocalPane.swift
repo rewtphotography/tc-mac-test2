@@ -25,6 +25,12 @@ struct LocalPane: View {
                     .disabled(session.maskBusy || session.current == nil)
             }
             .padding(.horizontal, 6)
+            Picker("Subject from", selection: $session.maskSource) {
+                ForEach(SubjectSource.allCases.filter { $0.available }, id: \.rawValue) { Text("\($0.name) (\($0.rawValue))").tag($0) }
+            }
+            .font(.system(size: 12))
+            .padding(.horizontal, 6)
+            .help("What makes the first, rough selection of the subject. The letters are the candidates of the comparison.")
             Toggle("Narrow edge band", isOn: $session.narrowBand)
                 .font(.system(size: 12))
                 .controlSize(.small)

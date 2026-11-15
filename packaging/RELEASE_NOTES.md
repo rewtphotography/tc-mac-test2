@@ -8,17 +8,20 @@ An alpha build of TrainCull for Mac (Apple silicon, macOS 15 or later).
    **Done**, then open **System Settings → Privacy & Security**, scroll down to the message
    about TrainCull and click **Open Anyway**. This is needed once for each new build.
 
-**New in this build**
+**New in this build: a choice of what selects the subject**
 
-- **Export Debug Bundle** (Edit → Mask (Test)): writes a folder next to the raw with what a
-  subject-selection model would be given for that photo. A note inside says how to paint the
-  reference mask. These folders are what the comparison of models will be run on.
-- **The straight seam and the glow around out-of-focus hair** at Max should be gone. Every mask
-  now checks itself for both and says so in its status line if it finds one.
-- **The subject is the large, sharp face,** not simply the largest.
-- **Narrow edge band** toggle, to compare a thinner refined strip. Make the mask again after changing it.
-- Making a mask no longer throws away the photo's finished render, and the log now says why
-  every selection, render and cache miss happened.
+In **Edit → Mask (Test)** there is now a **Subject from** menu. Each entry is one candidate
+from the comparison against Photoshop's Select Subject:
+
+- **BiRefNet (A)**: the default. It agreed with Photoshop best, including on crowd shots.
+- **SAM (B)** and **SAM + close-up (B2)**: Segment Anything, started from the face.
+- **Hybrid (C)**: SAM decides which person, BiRefNet gives the shape.
+- **Vision (V)**: what earlier builds used.
+
+Pick one, then **Make** (or **Remake**). The status line under the buttons says which was used.
+This download is much larger than before (around a gigabyte) because the models are inside it;
+the app still never uses the network. The first mask after opening the app is slower while a
+model loads.
 
 **The masking test** (from alpha 7): open **Edit** and scroll to **Mask (Test)**. Choose **Fast**,
 **High** or **Max** and click **Make**. **Show** switches between the photo, a red overlay, the mask,

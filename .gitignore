@@ -40,6 +40,9 @@ keystore*.txt
 .DS_Store
 .build/
 build/
+build-models/
+*.mlpackage/
+*.mlmodelc/
 DerivedData/
 xcuserdata/
 *.xcuserstate

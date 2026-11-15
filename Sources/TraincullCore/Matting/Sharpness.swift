@@ -213,12 +213,14 @@ public enum SubjectChoice {
         }
     }
 
-    /// The box a person's body is expected to fall in, from their face: two face-widths either
-    /// side, from a little above the head to six and a half face-heights below the chin.
+    /// The box a person's body is expected to fall in, from their face: three face-widths either
+    /// side, from one face-height above the head to ten below the chin. The masking spec had
+    /// two widths and six and a half heights; on the owner's photos that cut off raised hands
+    /// and, on full-length shots, the feet, and SAM did far worse inside it.
     public static func bodyBox(face f: PixelRect, w: Int, h: Int) -> PixelRect {
         let cx = Float(f.x) + Float(f.w) / 2
-        let x0 = Int((cx - 2 * Float(f.w)).rounded(.down)), x1 = Int((cx + 2 * Float(f.w)).rounded(.up))
-        let y0 = Int((Float(f.y) - 0.8 * Float(f.h)).rounded(.down)), y1 = Int((Float(f.maxY) + 6.5 * Float(f.h)).rounded(.up))
+        let x0 = Int((cx - 3 * Float(f.w)).rounded(.down)), x1 = Int((cx + 3 * Float(f.w)).rounded(.up))
+        let y0 = Int((Float(f.y) - Float(f.h)).rounded(.down)), y1 = Int((Float(f.maxY) + 10 * Float(f.h)).rounded(.up))
         return PixelRect(x: x0, y: y0, w: x1 - x0, h: y1 - y0).clamped(w: w, h: h)
     }
 }

@@ -114,6 +114,7 @@ final class Log {
             + "\(MemoryStats.plain(info.physicalMemory)) of memory")
         Log.note("app", "display scale \(NSScreen.main?.backingScaleFactor ?? 0) · thermal \(Log.thermal) · low power mode \(info.isLowPowerModeEnabled ? "on" : "off")"
             + " · blending \(Masking.blendsByChannel ? "per colour" : "plain")")
+        Log.note("app", "subject sources in this build: \(SubjectSource.allCases.filter { $0.available }.map { "\($0.name) (\($0.rawValue))" }.joined(separator: ", "))")
     }
 
     /// How hot the Mac says it is running.
