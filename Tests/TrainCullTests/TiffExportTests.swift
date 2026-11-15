@@ -82,17 +82,17 @@ final class TiffExportTests: XCTestCase {
     /// own area and nothing else. Also proves the small blending programs load on this macOS.
     func testLocalAdjustmentChangesOnlyItsArea() throws {
         XCTAssertTrue(Masking.blendsByChannel, "the per-channel blending program didn't load")
-        let w = 64, h = 32
-        // The mask: subject on the left half; in the right half the subject owns all of the red
-        // light, none of the green and half of the blue.
+        let w = 96, h = 32
+        // Three bands. Left: all subject. Middle: the subject owns all of the red light and
+        // none of the green or blue. Right: half of everything.
         var shares = [UInt8](repeating: 255, count: w * h * 4), alpha = [UInt8](repeating: 0, count: w * h)
         for y in 0 ..< h {
             for x in 0 ..< w {
-                let left = x < w / 2
-                alpha[y * w + x] = left ? 255 : 128
-                shares[(y * w + x) * 4] = 255
-                shares[(y * w + x) * 4 + 1] = left ? 255 : 0
-                shares[(y * w + x) * 4 + 2] = left ? 255 : 128
+                let band = x * 3 / w
+                alpha[y * w + x] = band == 0 ? 255 : 128
+                shares[(y * w + x) * 4] = band == 2 ? 128 : 255
+                shares[(y * w + x) * 4 + 1] = band == 0 ? 255 : (band == 1 ? 0 : 128)
+                shares[(y * w + x) * 4 + 2] = band == 0 ? 255 : (band == 1 ? 0 : 128)
             }
         }
         let mask = MaskResult(width: w, height: h, alpha: try XCTUnwrap(Masking.picture(gray: alpha, w: w, h: h)),
@@ -100,31 +100,40 @@ final class TiffExportTests: XCTestCase {
                               trimap: try XCTUnwrap(Masking.picture(gray: alpha, w: w, h: h)),
                               coarse: try XCTUnwrap(Masking.picture(gray: alpha, w: w, h: h)), tier: .fast, summary: "")
         let extent = CGRect(x: 0, y: 0, width: w, height: h)
-        let grey = CIImage(color: CIColor(red: 0.5, green: 0.5, blue: 0.5)).cropped(to: extent)
-        let before = try XCTUnwrap(Imaging.pixels(grey, from: extent))
+        let linear = try XCTUnwrap(CGColorSpace(name: CGColorSpace.extendedLinearSRGB))
+        func plain(_ r: CGFloat, _ g: CGFloat, _ b: CGFloat) throws -> CIImage {
+            CIImage(color: try XCTUnwrap(CIColor(red: r, green: g, blue: b, colorSpace: linear))).cropped(to: extent)
+        }
+        // A mid grey, in linear light, and the same one stop brighter.
+        let v: CGFloat = 0.2
         var edits = LocalEdits()
-        edits.layers[LocalArea.subject.rawValue].exposure = 1 // the subject one stop brighter
-        let lit = Masking.apply(LocalRender(mask: mask, edits: edits, view: .photo, area: .subject), to: grey, extent: extent)
+        edits.layers[LocalArea.subject.rawValue].exposure = 1
+        let lit = Masking.apply(LocalRender(mask: mask, edits: edits, view: .photo, area: .subject), to: try plain(v, v, v), extent: extent)
         let after = try XCTUnwrap(Imaging.pixels(lit, from: extent))
-        let (b, keepB) = try bytes(of: before), (a, keepA) = try bytes(of: after)
-        _ = (keepB, keepA)
-        let leftPixel = (h / 2) * after.bytesPerRow + (w / 4) * 4, rightPixel = (h / 2) * after.bytesPerRow + (3 * w / 4) * 4
-        // Left: all of it brighter. Right: red fully brighter, green untouched, blue in between.
-        XCTAssertGreaterThan(Int(a[leftPixel + 1]), Int(b[leftPixel + 1]) + 20)
-        XCTAssertEqual(Int(a[rightPixel]), Int(a[leftPixel]), accuracy: 2)
-        XCTAssertEqual(Int(a[rightPixel + 1]), Int(b[rightPixel + 1]), accuracy: 2)
-        XCTAssertGreaterThan(Int(a[rightPixel + 2]), Int(b[rightPixel + 2]) + 8)
-        XCTAssertLessThan(Int(a[rightPixel + 2]), Int(a[leftPixel + 2]) - 8)
+        let (a, keepA) = try bytes(of: after)
+        _ = keepA
+        // What each band should be, rendered the same way so the comparison is like for like.
+        let wanted = [try plain(2 * v, 2 * v, 2 * v), try plain(2 * v, v, v), try plain(1.5 * v, 1.5 * v, 1.5 * v)]
+        for (band, image) in wanted.enumerated() {
+            let reference = try XCTUnwrap(Imaging.pixels(image, from: extent))
+            let (r, keep) = try bytes(of: reference)
+            _ = keep
+            let p = (h / 2) * after.bytesPerRow + (band * w / 3 + w / 6) * 4
+            for channel in 0 ..< 3 {
+                XCTAssertEqual(Int(a[p + channel]), Int(r[p + channel]), accuracy: 2, "band \(band), channel \(channel)")
+            }
+        }
 
-        // The views of the mask render too, the right way up: the mask itself is white on the left.
+        // The views of the mask render too. The mask itself shows its numbers as they are:
+        // white where the subject is, mid grey where it is half.
         for view in MaskView.allCases {
-            let shown = Masking.apply(LocalRender(mask: mask, edits: LocalEdits(), view: view, area: .subject), to: grey, extent: extent)
+            let shown = Masking.apply(LocalRender(mask: mask, edits: LocalEdits(), view: view, area: .subject), to: try plain(v, v, v), extent: extent)
             let picture = try XCTUnwrap(Imaging.pixels(shown, from: extent), "\(view.name) view")
             if view == .mask {
                 let (m, keep) = try bytes(of: picture)
                 _ = keep
-                XCTAssertGreaterThan(m[leftPixel], 240)
-                XCTAssertEqual(Int(m[rightPixel]), 128, accuracy: 6)
+                XCTAssertGreaterThan(m[(h / 2) * picture.bytesPerRow + (w / 6) * 4], 240)
+                XCTAssertEqual(Int(m[(h / 2) * picture.bytesPerRow + (5 * w / 6) * 4]), 128, accuracy: 6)
             }
         }
     }

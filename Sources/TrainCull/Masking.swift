@@ -395,7 +395,9 @@ enum Masking {
         case .photo:
             return out
         case .mask:
-            return chosen
+            // The mask's numbers are amounts, not brightnesses. Shown as they are they would
+            // come out too light, so they are treated as display values for this view only.
+            return chosen.applyingFilter("CISRGBToneCurveToLinear")
         case .overlay:
             let red = CIImage(color: CIColor(red: 1, green: 0, blue: 0)).cropped(to: extent)
             let half = chosen.applyingFilter("CIColorMatrix", parameters: [
