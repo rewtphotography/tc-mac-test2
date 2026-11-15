@@ -50,6 +50,10 @@ public struct MatteSettings {
     public var tolerance = 1e-4
     public var tileCore = 896
     public var tileApron = 64
+    /// The uncertain band's width as fractions of the face's height: how far the certain
+    /// subject is pulled in, and how far the certain background is pushed out.
+    public var bandIn: Float = 0.02
+    public var bandOut: Float = 0.06
 
     public init() {}
 }
@@ -74,6 +78,8 @@ public struct MatteOutput {
     public var unknownPixels: Int
     /// What each stage did and how long it took, for the diagnostics log.
     public var log: [String]
+    /// Things that look wrong, found by the checks that run on every mask ("SEAM?", "GLOW?").
+    public var warnings: [String] = []
 }
 
 /// Refines a rough subject mask into a matte with soft, strand-level edges. The rough mask
@@ -105,17 +111,34 @@ public final class Matte {
     var bPair: Buf<UInt32>?
     var unknownCount = 0
     var log: [String] = []
+    var warnings: [String] = []
+    /// The rough mask at quarter size, for the guards that keep the result near it.
+    var m0qBuf = Buf<Float>(0, 0)
+    /// How far each part is in focus, 1 (as sharp as the subject) to 0 (well out of focus), at
+    /// quarter size. Colour arithmetic on a blurred edge only adds noise, so it is trusted less there.
+    var focusQ: Buf<Float>?
+    /// The contrast between subject and background colour at each band pixel, 0 to 255.
+    var contrast = Buf<UInt8>(0, 0)
+    /// Whether the Fast tier put each band pixel in the subject, to compare with the final answer.
+    var fastHalf = Buf<UInt8>(0, 0)
 
     /// - Parameters:
     ///   - coarse: the rough mask, any size, covering the whole photo.
     ///   - faces: face rectangles in pixels of the photo, y down.
     ///   - patches: finer masks of each head, if a second look was taken.
-    public init(photo: Photo, coarse: Gray, faces: [PixelRect], patches: [HeadPatch] = [], settings: MatteSettings = MatteSettings()) {
+    ///   - defocus: how blurred each part of the photo is (`SharpnessMap.dense`), any size.
+    ///   - subjectSharpness: the blur of the subject itself, in the same units.
+    public init(photo: Photo, coarse: Gray, faces: [PixelRect], patches: [HeadPatch] = [], settings: MatteSettings = MatteSettings(),
+                defocus: Gray? = nil, subjectSharpness: Float? = nil) {
         self.photo = photo
         self.settings = settings
         W = photo.w; H = photo.h
         qw = (W + 3) / 4; qh = (H + 3) / 4
         m0q = coarse.resized(w: qw, h: qh)
+        if let defocus = defocus, let sharp = subjectSharpness {
+            let d = defocus.resized(w: qw, h: qh)
+            focusQ = Buf(d.v.map { 1 - smoothstep(sharp + 1.0, sharp + 2.5, $0) })
+        }
         let start = Date()
         prepare(faces: faces, patches: patches)
         log.append("setup: band \(band.w)×\(band.h), \(unknownCount) uncertain pixels, edge widths \(Int(rIn))/\(Int(rOut)) px, \(Matte.seconds(start))")
@@ -183,17 +206,18 @@ public final class Matte {
 
         // Edge widths follow the size of the largest face; without one, the size of the photo.
         if let faceHeight = faces.map({ Float($0.h) }).max(), faceHeight > 0 {
-            rIn = min(max(0.02 * faceHeight, 4), 64)
-            rOut = min(max(0.06 * faceHeight, 8), 160)
+            rIn = min(max(settings.bandIn * faceHeight, 4), 64)
+            rOut = min(max(settings.bandOut * faceHeight, 8), 160)
         } else {
-            let unit = 0.006 * Float(max(W, H))
-            rIn = min(max(unit, 4), 64)
-            rOut = min(max(3 * unit, 8), 160)
+            let unit = 0.3 * Float(max(W, H))
+            rIn = min(max(settings.bandIn * unit, 4), 64)
+            rOut = min(max(settings.bandOut * unit, 8), 160)
         }
 
         // The hair zone: around each head, outside the oval of the face. Curly hair masks tend
         // to fill the gaps between curls, so the certain-subject region is pulled in further there.
-        var hair = [Bool](repeating: false, count: qw * qh)
+        // It fades in over a few pixels: a hard edge to the zone would show as a straight line in the mask.
+        var hair = [Float](repeating: 0, count: qw * qh)
         for f in faces {
             let fw = Float(f.w), fh = Float(f.h)
             let cx = Float(f.x) + fw / 2, cy = Float(f.y) + fh / 2 - 0.25 * fh
@@ -202,8 +226,12 @@ public final class Matte {
             if head.isEmpty { continue }
             for qy in (head.y / 4) ..< min((head.maxY + 3) / 4, qh) {
                 for qx in (head.x / 4) ..< min((head.maxX + 3) / 4, qw) {
-                    let dx = (Float(qx) * 4 + 2 - (Float(f.x) + fw / 2)) / a, dy = (Float(qy) * 4 + 2 - ovalY) / b
-                    if dx * dx + dy * dy > 1 { hair[qy * qw + qx] = true }
+                    let px = Float(qx) * 4 + 2, py = Float(qy) * 4 + 2
+                    let dx = (px - (Float(f.x) + fw / 2)) / a, dy = (py - ovalY) / b
+                    let outsideOval = min(max(((dx * dx + dy * dy).squareRoot() - 1) / 0.2, 0), 1)
+                    let fromEdge = min(min(px - Float(head.x), Float(head.maxX) - px), min(py - Float(head.y), Float(head.maxY) - py))
+                    let insideHead = min(max(fromEdge / max(0.15 * fw, 8), 0), 1)
+                    hair[qy * qw + qx] = max(hair[qy * qw + qx], outsideOval * insideHead)
                 }
             }
         }
@@ -245,6 +273,7 @@ public final class Matte {
 
         fq = Buf(pushPull(weightFor: 2))
         bq = Buf(pushPull(weightFor: 0))
+        m0qBuf = Buf(m0q.v)
 
         // The rough mask, sharpened against the photo: within each small neighbourhood the mask
         // is fitted as a straight-line function of brightness, and those two numbers are then
@@ -273,14 +302,14 @@ public final class Matte {
     }
 
     /// Splits the quarter-size mask three ways: certainly subject, certainly background, unknown.
-    private func classify(_ hair: [Bool]) {
+    private func classify(_ hair: [Float]) {
         let narrow = max(Int((rIn / 4).rounded()), 1), wide = max(Int((rOut / 4).rounded()), 2)
         let eroded = PlaneMath.extremum(m0q, radius: narrow, smallest: true)
         let erodedMore = PlaneMath.extremum(m0q, radius: narrow * 2, smallest: true)
         let dilated = PlaneMath.extremum(m0q, radius: wide, smallest: false)
         let t = Buf<UInt8>(qw * qh, 1)
         for i in 0 ..< qw * qh {
-            if (hair[i] ? erodedMore.v[i] : eroded.v[i]) >= settings.foregroundThreshold {
+            if eroded.v[i] + (erodedMore.v[i] - eroded.v[i]) * hair[i] >= settings.foregroundThreshold {
                 t.p[i] = 2
             } else if dilated.v[i] <= settings.backgroundThreshold {
                 t.p[i] = 0
@@ -379,6 +408,7 @@ public final class Matte {
         var result = finish()
         log.append("finish: \(Matte.seconds(start))")
         result.log = log
+        result.warnings = warnings
         return result
     }
 
@@ -401,10 +431,10 @@ public final class Matte {
     /// apart, the rough mask is kept instead.
     private func fast() {
         let band = self.band, bw = band.w, bh = band.h, qw = self.qw
-        let a = Buf<Float>(bw * bh, 0), cf = Buf<UInt8>(bw * bh, 0)
+        let a = Buf<Float>(bw * bh, 0), cf = Buf<UInt8>(bw * bh, 0), ct = Buf<UInt8>(bw * bh, 0)
         let c0 = settings.contrastLow, c1 = settings.contrastHigh
         let src = photo.p, rowBytes = photo.rowBytes, tq = triq.p
-        let fp = fq.p, bp = bq.p, ca = coefA.p, cb = coefB.p
+        let fp = fq.p, bp = bq.p, ca = coefA.p, cb = coefB.p, focus = focusQ?.p
         parallelRows(bh) { rows in
             for by in rows {
                 let y = band.y + by
@@ -426,6 +456,9 @@ public final class Matte {
                     var c = smoothstep(c0, c1, cn)
                     // Blown highlights have lost their colour; trust them less.
                     if max(I.max(), B.max()) >= 0.985 { c *= 0.5 }
+                    ct.p[by * bw + bx] = UInt8(c * 255)
+                    // Out of focus, the true edge is a blur; stay with the rough mask there.
+                    if let focus = focus { c *= sample1(focus, x, y) }
                     a.p[by * bw + bx] = base + (al - base) * c
                     cf.p[by * bw + bx] = UInt8(c * 255)
                 }
@@ -433,7 +466,11 @@ public final class Matte {
         }
         alpha = a
         conf = cf
+        contrast = ct
         guidedCleanup(alpha)
+        let half = Buf<UInt8>(bw * bh, 0)
+        for i in 0 ..< bw * bh where a.p[i] >= 0.5 { half.p[i] = 1 }
+        fastHalf = half
     }
 
     /// Smooths a mask along the photo's own edges and free of its grain: within each small
@@ -568,6 +605,7 @@ public final class Matte {
         let confHigh = Buf<UInt8>(bw * bh, 0)
         let f2 = Buf<UInt32>(bw * bh, 0), b2 = Buf<UInt32>(bw * bh, 0)
         let c0 = settings.contrastLow, c1 = settings.contrastHigh, falloff = settings.costFalloff
+        let focus = focusQ?.p
         parallelRows(bh) { rows in
             for by in rows {
                 let y = band.y + by
@@ -602,7 +640,9 @@ public final class Matte {
                     let cn = dot3(d, d) / (dot3(F, F) + dot3(B, B) + 1e-6)
                     let i = by * bw + bx
                     alphaHigh.p[i] = fit.alpha
-                    confHigh.p[i] = UInt8(min(max(exp(-falloff * fit.cost) * smoothstep(c0, c1, cn), 0), 1) * 255)
+                    var trust = exp(-falloff * fit.cost) * smoothstep(c0, c1, cn)
+                    if let focus = focus { trust *= sample1(focus, x, y) }
+                    confHigh.p[i] = UInt8(min(max(trust, 0), 1) * 255)
                     f2.p[i] = Matte.pack(F)
                     b2.p[i] = Matte.pack(B)
                 }
@@ -613,11 +653,23 @@ public final class Matte {
         guidedCleanup(alphaHigh)
         // Take the new answer as far as it can be trusted; elsewhere keep the Fast one.
         let a = alpha.p, cf = conf.p
-        for i in 0 ..< bw * bh where confHigh.p[i] > 0 {
-            a[i] += (alphaHigh.p[i] - a[i]) * (Float(confHigh.p[i]) / 255)
-            cf[i] = max(cf[i], confHigh.p[i])
+        var buckets = [Int](repeating: 0, count: 5), counted = 0
+        for by in 0 ..< bh {
+            for bx in 0 ..< bw where tq[((band.y + by) >> 2) * qw + ((band.x + bx) >> 2)] == 1 {
+                let i = by * bw + bx
+                buckets[min(Int(confHigh.p[i]) * 5 / 256, 4)] += 1
+                counted += 1
+                if confHigh.p[i] > 0 {
+                    a[i] += (alphaHigh.p[i] - a[i]) * (Float(confHigh.p[i]) / 255)
+                    cf[i] = max(cf[i], confHigh.p[i])
+                }
+            }
         }
+        let names = ["0–.2", ".2–.4", ".4–.6", ".6–.8", ".8–1"]
+        log.append("high trust " + zip(names, buckets).map { "\($0):\(Matte.percent($1, counted))" }.joined(separator: " "))
     }
+
+    static func percent(_ part: Int, _ whole: Int) -> String { "\(whole > 0 ? Int((100 * Double(part) / Double(whole)).rounded()) : 0)%" }
 
     /// How well a subject colour and a background colour explain a pixel: the mix of the two
     /// that comes closest, and how far off even that is, relative to how different they are.
@@ -634,6 +686,21 @@ public final class Matte {
     /// 8-bit display values to linear light, near enough for a ratio.
     static let toLinear = Buf<Float>((0 ..< 256).map { pow(Float($0) / 255, 2.2) })
 
+    /// What the checks on a finished mask count, over the uncertain band.
+    struct BandStats {
+        var n = 0, zero = 0, low = 0, mid = 0, high = 0, one = 0
+        var background = 0, backgroundMid = 0
+        var heldUp = 0, heldDown = 0, blurred = 0
+        var both = 0, either = 0
+
+        mutating func add(_ o: BandStats) {
+            n += o.n; zero += o.zero; low += o.low; mid += o.mid; high += o.high; one += o.one
+            background += o.background; backgroundMid += o.backgroundMid
+            heldUp += o.heldUp; heldDown += o.heldDown; blurred += o.blurred
+            both += o.both; either += o.either
+        }
+    }
+
     /// Writes the mask out for the whole photo, with the per-colour shares.
     private func finish() -> MatteOutput {
         let W = self.W, H = self.H, qw = self.qw, band = self.band, bw = band.w
@@ -642,7 +709,11 @@ public final class Matte {
         let haveBand = !band.isEmpty && alpha.count > 0
         let src = photo.p, rowBytes = photo.rowBytes, tq = triq.p, fp = fq.p, bp = bq.p
         let a = alpha.p, f = fPair?.p, b = bPair?.p, lin = Matte.toLinear.p
+        let m0 = m0qBuf.p, ct = contrast.p, focus = focusQ?.p, fastHalf = self.fastHalf.p
+        let lock = NSLock()
+        var stats = BandStats()
         parallelRows(H) { rows in
+            var local = BandStats()
             for y in rows {
                 for x in 0 ..< W {
                     let t = tq[(y >> 2) * qw + (x >> 2)]
@@ -651,7 +722,31 @@ public final class Matte {
                     if t == 1 && haveBand && band.contains(x, y) {
                         let i = (y - band.y) * bw + (x - band.x)
                         // Written so that a value that isn't a number at all comes out as 0.
-                        let al: Float = a[i] >= 0 ? min(a[i], 1) : 0
+                        var al: Float = a[i] >= 0 ? min(a[i], 1) : 0
+                        // The guards. Where the rough mask was sure, the answer may only stray
+                        // from it as far as the colours there can be told apart; and out of
+                        // focus, the background may not turn into subject at all.
+                        let rough = sample1(m0, x, y)
+                        let reach = 0.3 + 0.7 * Float(ct[i]) / 255
+                        let sharp = focus.map { sample1($0, x, y) } ?? 1
+                        if rough >= 0.9, al < rough - reach {
+                            al = rough - reach
+                            local.heldUp += 1
+                        } else if rough <= 0.1, al > rough + reach * sharp {
+                            al = rough + reach * sharp
+                            local.heldDown += 1
+                        }
+                        local.n += 1
+                        if sharp < 0.5 { local.blurred += 1 }
+                        if al <= 0.002 { local.zero += 1 } else if al < 0.2 { local.low += 1 } else if al <= 0.8 { local.mid += 1 }
+                        else if al < 0.998 { local.high += 1 } else { local.one += 1 }
+                        if rough <= 0.1 {
+                            local.background += 1
+                            if al >= 0.2 && al <= 0.8 { local.backgroundMid += 1 }
+                        }
+                        let now = al >= 0.5, before = fastHalf[i] == 1
+                        if now && before { local.both += 1 }
+                        if now || before { local.either += 1 }
                         a8 = UInt8((al * 255).rounded())
                         s = SIMD3(repeating: al)
                         if al > 0.004 && al < 0.996 {
@@ -677,10 +772,24 @@ public final class Matte {
                     shares.p[o + 2] = UInt8((s.z * 255).rounded())
                 }
             }
+            lock.lock()
+            stats.add(local)
+            lock.unlock()
+        }
+        if stats.n > 0 {
+            let p = { (v: Int) in Matte.percent(v, stats.n) }
+            let glow = stats.background > 0 ? 100 * Double(stats.backgroundMid) / Double(stats.background) : 0
+            let flagged = glow > 5
+            if flagged { warnings.append("GLOW?") }
+            log.append("band α 0:\(p(stats.zero)) · low:\(p(stats.low)) · mid:\(p(stats.mid)) · high:\(p(stats.high)) · 1:\(p(stats.one))"
+                + " · mid-in-confident-bg \(String(format: "%.1f", locale: Locale(identifier: "en_US_POSIX"), glow))%\(flagged ? " GLOW?" : "")")
+            let agreement = stats.either > 0 ? Double(stats.both) / Double(stats.either) : 1
+            log.append("guards: subject \(stats.heldUp) px · background \(stats.heldDown) px · out-of-focus \(p(stats.blurred)) of band"
+                + " · fast↔final IoU \(String(format: "%.3f", locale: Locale(identifier: "en_US_POSIX"), agreement))")
         }
         var tri8 = [UInt8](repeating: 0, count: qw * qh)
         for i in 0 ..< qw * qh { tri8[i] = tq[i] == 2 ? 255 : (tq[i] == 1 ? 128 : 0) }
         return MatteOutput(w: W, h: H, alpha: alpha8.array, shares: shares.array, trimap: tri8,
-                           trimapW: qw, trimapH: qh, band: band, unknownPixels: unknownCount, log: [])
+                           trimapW: qw, trimapH: qh, band: band, unknownPixels: unknownCount, log: [], warnings: warnings)
     }
 }

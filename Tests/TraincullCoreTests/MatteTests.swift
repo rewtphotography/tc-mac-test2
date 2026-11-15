@@ -184,8 +184,9 @@ final class MatteTests: XCTestCase {
         // And the solve really solves it: (L + Λ) x = Λ·prior.
         let prior = (0 ..< n).map { _ in random() }
         var solved = prior
-        let steps = tile.solve(&solved, prior: prior, maxIterations: 2000, tolerance: 1e-10)
-        XCTAssertGreaterThan(steps, 0)
+        let result = tile.solve(&solved, prior: prior, maxIterations: 2000, tolerance: 1e-10)
+        XCTAssertGreaterThan(result.steps, 0)
+        XCTAssertLessThanOrEqual(result.residual, 1e-10)
         for i in 0 ..< n {
             var lhs = lam[i] * solved[i]
             for j in 0 ..< n { lhs += L[i][j] * solved[j] }
@@ -294,6 +295,103 @@ final class MatteTests: XCTestCase {
         let plain = Matte(photo: scene.photo, coarse: scene.coarse, faces: [scene.face]).run(tier: .fast)
         let patched = Matte(photo: scene.photo, coarse: scene.coarse, faces: [scene.face], patches: [patch]).run(tier: .fast)
         XCTAssertLessThan(patched.unknownPixels, plain.unknownPixels)
+    }
+
+    // MARK: Refinement fixes
+
+    /// Many small tiles instead of one: where they meet must not show, and the answer must be
+    /// as good as before.
+    func testTilesMeetWithoutASeam() {
+        let scene = Scene()
+        var small = MatteSettings()
+        small.tileCore = 96
+        small.tileApron = 16
+        let whole = Matte(photo: scene.photo, coarse: scene.coarse, faces: [scene.face]).run(tier: .max)
+        let tiled = Matte(photo: scene.photo, coarse: scene.coarse, faces: [scene.face], settings: small).run(tier: .max)
+        print("MATTE tiled: \(tiled.log.filter { $0.hasPrefix("max") }.joined()) | warnings \(tiled.warnings)")
+        XCTAssertFalse(tiled.warnings.contains("SEAM?"))
+        XCTAssertTrue(tiled.log.contains { $0.contains("seam ratio") && $0.contains("OK") })
+        XCTAssertLessThan(scene.error(tiled.alpha, tiled), scene.error(whole.alpha, whole) * 1.25 + 1)
+        // Directly: across every tile boundary the mask steps no more than it does elsewhere.
+        var worstAcross = 0, worstWithin = 0
+        for y in 0 ..< scene.h {
+            for x in 1 ..< scene.w where tiled.trimap[(y / 4) * tiled.trimapW + x / 4] == 128 && tiled.trimap[(y / 4) * tiled.trimapW + (x - 1) / 4] == 128 {
+                let step = abs(Int(tiled.alpha[y * scene.w + x]) - Int(tiled.alpha[y * scene.w + x - 1]))
+                if (x - tiled.band.x) % 96 == 0 { worstAcross = max(worstAcross, step) } else { worstWithin = max(worstWithin, step) }
+            }
+        }
+        XCTAssertLessThanOrEqual(worstAcross, worstWithin)
+    }
+
+    /// Where the photo is well out of focus compared with the subject, the colour arithmetic is
+    /// not trusted: the better tiers leave the Fast answer alone, and Fast stays with the rough mask.
+    func testOutOfFocusAreasKeepTheRoughMask() {
+        let scene = Scene()
+        let blurred = Gray(w: 8, h: 8, fill: 8) // everything eight pixels out of focus
+        let sharp = Gray(w: 8, h: 8, fill: 0.5)
+        func run(_ defocus: Gray, _ tier: MatteTier) -> MatteOutput {
+            Matte(photo: scene.photo, coarse: scene.coarse, faces: [scene.face], defocus: defocus, subjectSharpness: 0.5).run(tier: tier)
+        }
+        let fastBlurred = run(blurred, .fast), maxBlurred = run(blurred, .max), maxSharp = run(sharp, .max)
+        XCTAssertEqual(maxBlurred.alpha, fastBlurred.alpha, "out of focus, High and Max add nothing")
+        XCTAssertLessThan(scene.error(maxSharp.alpha, maxSharp), scene.error(maxBlurred.alpha, maxBlurred) * 0.5, "in focus, they do their work")
+        XCTAssertTrue(maxBlurred.log.contains { $0.contains("out-of-focus 100% of band") })
+        // And nothing in the sure background has been turned into half-subject.
+        XCTAssertTrue(maxBlurred.log.contains { $0.contains("mid-in-confident-bg 0.0%") }, "\(maxBlurred.log)")
+    }
+
+    func testNarrowBandLeavesLessUncertain() {
+        let scene = Scene()
+        var narrow = MatteSettings()
+        narrow.bandIn = 0.012
+        narrow.bandOut = 0.04
+        // A face large enough for the two widths to differ once rounded to whole pixels.
+        let face = PixelRect(x: 0, y: 0, w: 320, h: 600)
+        let wide = Matte(photo: scene.photo, coarse: scene.coarse, faces: [face])
+        let thin = Matte(photo: scene.photo, coarse: scene.coarse, faces: [face], settings: narrow)
+        XCTAssertLessThan(thin.unknownCount, wide.unknownCount)
+    }
+
+    // MARK: Sharpness and choosing the subject
+
+    /// A picture of vertical edges: crisp on the left, blurred by a known amount on the right.
+    private func edges(blur: Float) -> Gray {
+        let w = 240, h = 120
+        var g = Gray(w: w, h: h)
+        for y in 0 ..< h {
+            for x in 0 ..< w {
+                let left = x < w / 2
+                let period = 24, phase = Float((x % period) - period / 2) + 0.5
+                let s: Float = left ? 0.35 : blur
+                // A step through a Gaussian blur of width s is the error function.
+                g.v[y * w + x] = 0.5 + 0.4 * erf(phase / (s * Float(2).squareRoot())) * ((x / period) % 2 == 0 ? 1 : -1)
+            }
+        }
+        return g
+    }
+
+    func testSharpnessMeasuresHowBlurredAnEdgeIs() throws {
+        let map = SharpnessMap(luma: edges(blur: 3))
+        let crisp = try XCTUnwrap(map.median(in: PixelRect(x: 6, y: 10, w: 100, h: 100)))
+        let soft = try XCTUnwrap(map.median(in: PixelRect(x: 132, y: 10, w: 100, h: 100)))
+        XCTAssertLessThan(crisp, 1.0)
+        XCTAssertEqual(soft, 3, accuracy: 0.6)
+        // Between the edges the map is filled in.
+        XCTAssertLessThan(map.dense.at(40, 60), 1.2)
+        XCTAssertGreaterThan(map.dense.at(200, 60), 2.2)
+        XCTAssertNil(map.median(in: PixelRect(x: 0, y: 0, w: 3, h: 3)), "too few edges to tell")
+    }
+
+    func testTheSubjectIsTheLargeSharpFace() {
+        let map = SharpnessMap(luma: edges(blur: 3))
+        let crisp = PixelRect(x: 20, y: 20, w: 60, h: 80), blurredBigger = PixelRect(x: 140, y: 10, w: 80, h: 100)
+        let tiny = PixelRect(x: 4, y: 4, w: 3, h: 3)
+        let ranked = SubjectChoice.rank([blurredBigger, tiny, crisp], sharpness: map)
+        XCTAssertEqual(ranked.map { $0.face }, [crisp, blurredBigger], "the tiny face is not a candidate; the sharp one wins though it is smaller")
+        XCTAssertLessThan(ranked[0].sharp!, ranked[1].sharp!)
+
+        let box = SubjectChoice.bodyBox(face: PixelRect(x: 100, y: 100, w: 40, h: 50), w: 400, h: 300)
+        XCTAssertEqual(box, PixelRect(x: 40, y: 60, w: 160, h: 240), "two widths either side, 0.8 heights above, clamped at the bottom")
     }
 
     // MARK: Skin

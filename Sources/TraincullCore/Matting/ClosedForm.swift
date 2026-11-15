@@ -144,13 +144,14 @@ final class ClosedFormTile {
 
     /// Solves (L + Λ) x = Λ·prior for the active pixels by preconditioned conjugate gradients,
     /// starting from `x`, which also gives the values of the pixels that are not solved for.
-    /// Returns how many steps it took.
-    func solve(_ x: inout [Double], prior: [Double], maxIterations: Int, tolerance: Double) -> Int {
+    /// Returns how many steps it took and how far from solved it ended, as a fraction of how
+    /// far it started (at or below `tolerance` means it converged).
+    func solve(_ x: inout [Double], prior: [Double], maxIterations: Int, tolerance: Double) -> (steps: Int, residual: Double) {
         let n = w * h
-        if acts.isEmpty { return 0 }
+        if acts.isEmpty { return (0, 0) }
         let r = Buf<Double>(n, 0), z = Buf<Double>(n, 0), p = Buf<Double>(n, 0), ap = Buf<Double>(n, 0), dg = Buf<Double>(n, 1)
         diagonal(dg.p)
-        return x.withUnsafeMutableBufferPointer { xb -> Int in
+        return x.withUnsafeMutableBufferPointer { xb -> (steps: Int, residual: Double) in
             let xp = xb.baseAddress!
             apply(xp, ap.p)
             var rz = 0.0, rr0 = 0.0
@@ -161,8 +162,8 @@ final class ClosedFormTile {
                 rz += r.p[i] * z.p[i]
                 rr0 += r.p[i] * r.p[i]
             }
-            if rr0 <= 1e-30 { return 0 }
-            var done = 0
+            if rr0 <= 1e-30 { return (0, 0) }
+            var done = 0, last = 1.0
             for it in 1 ... max(maxIterations, 1) {
                 // `p` is zero outside the active pixels and stays so, which is what keeps the
                 // other pixels fixed.
@@ -180,12 +181,13 @@ final class ClosedFormTile {
                     rr += r.p[i] * r.p[i]
                 }
                 done = it
+                last = (rr / rr0).squareRoot()
                 if rr <= tolerance * tolerance * rr0 { break }
                 let beta = rzNew / rz
                 rz = rzNew
                 for i in acts { p.p[i] = z.p[i] + beta * p.p[i] }
             }
-            return done
+            return (done, last)
         }
     }
 }
@@ -193,6 +195,10 @@ final class ClosedFormTile {
 extension Matte {
     /// The Max tier: closed-form matting over the band, one tile at a time, each solved from
     /// the High tier's answer and held loosely to it where that answer was trusted.
+    ///
+    /// Tiles overlap, and each fades out across the overlap as its neighbour fades in (a
+    /// raised cosine), so no line shows where two meet. Where a neighbour was skipped for
+    /// having almost nothing to solve, the tile fades into the High tier's answer instead.
     func closedForm(progress: (String) -> Void, cancelled: () -> Bool) -> String {
         let band = self.band, bw = band.w, bh = band.h, qw = self.qw
         let core = settings.tileCore, apron = settings.tileApron
@@ -213,12 +219,16 @@ extension Matte {
         tiles.sort { $0.unknown > $1.unknown }
 
         let before = Buf(alpha.array) // every tile starts from the same picture, whatever order they finish in
-        let out = alpha.p, cf = conf.p
+        let sum = Buf<Float>(bw * bh, 0), weight = Buf<Float>(bw * bh, 0)
+        let cf = conf.p
         let src = photo.p, rowBytes = photo.rowBytes
-        let soft = settings.softPrior, hard = settings.hardPrior
+        let soft = settings.softPrior, hard = settings.hardPrior, tolerance = settings.tolerance
         let total = tiles.count
         let lock = NSLock()
-        var finished = 0, iterations = 0, stopped = false
+        var finished = 0, iterations = 0, capped = 0, bad = 0, stopped = false
+        var worst = 0.0
+        // How much a tile counts at a distance `d` into the overlap of width twice the apron.
+        @inline(__always) func ramp(_ d: Int) -> Float { 0.5 * (1 - cos(Float.pi * (Float(d) + 0.5) / Float(2 * apron))) }
         // Each tile needs a couple of hundred megabytes while it is being solved.
         let gate = DispatchSemaphore(value: max(1, min(ProcessInfo.processInfo.activeProcessorCount / 2, 6)))
         withoutActuallyEscaping(progress) { report in
@@ -261,23 +271,81 @@ extension Matte {
                     }
                     let prior = x
                     let solver = ClosedFormTile(w: w, h: h, rgb: rgb, lam: lam, active: active, epsilon: settings.laplacianEpsilon)
-                    let steps = solver.solve(&x, prior: prior, maxIterations: settings.maxIterations, tolerance: settings.tolerance)
-                    // Keep the middle of the tile; its margin was only there to give the edges context.
-                    for ly in (tile.y - y0) ..< (tile.y - y0 + tile.h) {
-                        for lx in (tile.x - x0) ..< (tile.x - x0 + tile.w) where kind(lx, ly) == 1 {
+                    let result = solver.solve(&x, prior: prior, maxIterations: settings.maxIterations, tolerance: tolerance)
+                    // This tile's say at each pixel: full in its middle, fading across each
+                    // overlap that has a neighbouring tile's ground on the other side.
+                    var wx = [Float](repeating: 1, count: w), wy = [Float](repeating: 1, count: h)
+                    if tile.x > 0 { for d in 0 ..< min(2 * apron, w) { wx[d] = ramp(d) } }
+                    if tile.x + tile.w < bw { for d in 0 ..< min(2 * apron, w) { wx[w - 1 - d] = min(wx[w - 1 - d], ramp(d)) } }
+                    if tile.y > 0 { for d in 0 ..< min(2 * apron, h) { wy[d] = ramp(d) } }
+                    if tile.y + tile.h < bh { for d in 0 ..< min(2 * apron, h) { wy[h - 1 - d] = min(wy[h - 1 - d], ramp(d)) } }
+                    lock.lock()
+                    var broken = 0
+                    for ly in 0 ..< h {
+                        for lx in 0 ..< w where kind(lx, ly) == 1 {
                             // A solve that went wrong leaves the High tier's answer in place.
                             let v = x[ly * w + lx]
-                            if v.isFinite { out[(y0 + ly) * bw + (x0 + lx)] = Float(min(max(v, 0), 1)) }
+                            if !v.isFinite { broken += 1; continue }
+                            let k = wx[lx] * wy[ly], b = (y0 + ly) * bw + (x0 + lx)
+                            sum.p[b] += k * Float(min(max(v, 0), 1))
+                            weight.p[b] += k
                         }
                     }
-                    lock.lock()
                     finished += 1
-                    iterations += steps
+                    iterations += result.steps
+                    bad += broken
+                    if result.residual > tolerance { capped += 1 }
+                    worst = max(worst, result.residual)
                     report("Max \(finished) / \(total)")
                     lock.unlock()
                 }
             }
         }
-        return "\(finished) of \(total) tiles, \(iterations / max(finished, 1)) steps each on average\(stopped ? ", stopped early" : "")"
+        // Put the tiles together: each pixel is its tiles' answers by their say, and the High
+        // tier's answer for whatever say is left over. Out of focus, the High answer stands.
+        let out = alpha.p, focus = focusQ?.p
+        parallelRows(bh) { rows in
+            for by in rows {
+                for bx in 0 ..< bw where weight.p[by * bw + bx] > 0 {
+                    let i = by * bw + bx
+                    let k = min(weight.p[i], 1)
+                    var v = sum.p[i] / max(weight.p[i], 1) + (1 - k) * before.p[i]
+                    if let focus = focus { v = before.p[i] + (v - before.p[i]) * sample1(focus, band.x + bx, band.y + by) }
+                    out[i] = v
+                }
+            }
+        }
+
+        // A check for lines where tiles meet: the mask's steps across tile boundaries against
+        // its steps everywhere else. A boundary that shows has much larger ones.
+        var across: [Float] = [], within: [Float] = []
+        @inline(__always) func unknown(_ bx: Int, _ by: Int) -> Bool { tq[((band.y + by) >> 2) * qw + ((band.x + bx) >> 2)] == 1 }
+        for edge in stride(from: core, to: bw, by: core) {
+            for by in stride(from: 0, to: bh, by: 2) {
+                if unknown(edge - 1, by) && unknown(edge, by) { across.append(abs(out[by * bw + edge] - out[by * bw + edge - 1])) }
+                let mid = edge - core / 2
+                if unknown(mid - 1, by) && unknown(mid, by) { within.append(abs(out[by * bw + mid] - out[by * bw + mid - 1])) }
+            }
+        }
+        for edge in stride(from: core, to: bh, by: core) {
+            for bx in stride(from: 0, to: bw, by: 2) {
+                if unknown(bx, edge - 1) && unknown(bx, edge) { across.append(abs(out[edge * bw + bx] - out[(edge - 1) * bw + bx])) }
+                let mid = edge - core / 2
+                if unknown(bx, mid - 1) && unknown(bx, mid) { within.append(abs(out[mid * bw + bx] - out[(mid - 1) * bw + bx])) }
+            }
+        }
+        var seam = "seam check n/a"
+        if across.count >= 200 && within.count >= 200 {
+            across.sort(); within.sort()
+            let ratio = across[across.count * 99 / 100] / max(within[within.count * 99 / 100], 0.01)
+            let flagged = ratio > 3
+            if flagged { warnings.append("SEAM?") }
+            seam = "seam ratio \(String(format: "%.1f", locale: Locale(identifier: "en_US_POSIX"), ratio)) \(flagged ? "SEAM?" : "OK")"
+        }
+        if capped > 0 { warnings.append("\(capped) tile(s) hit the step limit") }
+        if bad > 0 { warnings.append("\(bad) pixels were not numbers after the solve") }
+        let residual = String(format: "%.1e", locale: Locale(identifier: "en_US_POSIX"), worst)
+        return "tiles \(finished) of \(total) · converged \(finished - capped) · cap \(capped) (worst residual \(residual))"
+            + " · \(iterations / max(finished, 1)) steps each · \(seam)\(stopped ? " · stopped early" : "")"
     }
 }
