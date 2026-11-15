@@ -25,6 +25,11 @@ struct LocalPane: View {
                     .disabled(session.maskBusy || session.current == nil)
             }
             .padding(.horizontal, 6)
+            Toggle("Narrow edge band", isOn: $session.narrowBand)
+                .font(.system(size: 12))
+                .controlSize(.small)
+                .padding(.horizontal, 6)
+                .help("Refine a narrower strip along the edge. Make the mask again to compare.")
             if let status = session.maskStatus {
                 Text(status)
                     .font(.system(size: 11))
@@ -32,6 +37,11 @@ struct LocalPane: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.horizontal, 6)
             }
+            Button("Export Debug Bundle") { session.exportDebugBundle() }
+                .controlSize(.small)
+                .disabled(session.current == nil)
+                .padding(.horizontal, 6)
+                .help("Writes a folder next to the raw with what a subject-selection model would be given for this photo, for comparing models")
             if let mask = mask {
                 Picker("Show", selection: Binding(get: { session.maskView }, set: { session.setMaskView($0) })) {
                     ForEach(MaskView.allCases, id: \.rawValue) { Text($0.name).tag($0) }
@@ -45,14 +55,14 @@ struct LocalPane: View {
                 .labelsHidden()
                 .padding(.horizontal, 6)
                 LocalRow(title: "Exposure", text: String(format: "%+.2f EV", layer.exposure), changed: layer.exposure != 0, range: -3 ... 3,
-                         value: Binding(get: { layer.exposure }, set: { v in session.setLocal { $0.exposure = abs(v) < 0.02 ? 0 : v } }),
-                         reset: { session.setLocal { $0.exposure = 0 } })
+                         value: Binding(get: { layer.exposure }, set: { v in session.setLocal("Exposure") { $0.exposure = abs(v) < 0.02 ? 0 : v } }),
+                         reset: { session.setLocal("Exposure") { $0.exposure = 0 } })
                 LocalRow(title: "Saturation", text: String(format: "%.2f", layer.saturation), changed: layer.saturation != 1, range: 0 ... 2,
-                         value: Binding(get: { layer.saturation }, set: { v in session.setLocal { $0.saturation = abs(v - 1) < 0.01 ? 1 : v } }),
-                         reset: { session.setLocal { $0.saturation = 1 } })
+                         value: Binding(get: { layer.saturation }, set: { v in session.setLocal("Saturation") { $0.saturation = abs(v - 1) < 0.01 ? 1 : v } }),
+                         reset: { session.setLocal("Saturation") { $0.saturation = 1 } })
                 LocalRow(title: "Warmth", text: String(format: "%+.2f", layer.warmth), changed: layer.warmth != 0, range: -1 ... 1,
-                         value: Binding(get: { layer.warmth }, set: { v in session.setLocal { $0.warmth = abs(v) < 0.01 ? 0 : v } }),
-                         reset: { session.setLocal { $0.warmth = 0 } })
+                         value: Binding(get: { layer.warmth }, set: { v in session.setLocal("Warmth") { $0.warmth = abs(v) < 0.01 ? 0 : v } }),
+                         reset: { session.setLocal("Warmth") { $0.warmth = 0 } })
                 Button("Save Mask Pictures") { session.saveMaskPictures() }
                     .controlSize(.small)
                     .padding(.horizontal, 6)

@@ -162,6 +162,27 @@ final class TiffExportTests: XCTestCase {
         }
     }
 
+    /// Choosing the subject and measuring a job both run on a Mac: the sharper of two made-up
+    /// "faces" ranks first, and a measured job reports its memory and processor use.
+    func testSubjectRankingAndJobMeasurement() throws {
+        // Crisp stripes on the left, the same stripes smeared on the right.
+        let picture = try flat(480, 240) { x, _ in
+            if x < 240 { return (x / 6) % 2 == 0 ? (30, 30, 30) : (220, 220, 220) }
+            let t = 0.5 + 0.5 * sin(Double(x) / 12 * Double.pi)
+            let v = UInt8(30 + 190 * t)
+            return (v, v, v)
+        }
+        let meter = JobMeter()
+        let left = PixelRect(x: 40, y: 20, w: 160, h: 200), right = PixelRect(x: 280, y: 20, w: 160, h: 200)
+        let ranking = Masking.rank(proxy: picture, faces: [right, left])
+        XCTAssertEqual(ranking.primary?.face, left)
+        XCTAssertEqual(ranking.candidates.count, 2)
+        let measured = meter.finish()
+        XCTAssertTrue(measured.memory.contains("peak"))
+        XCTAssertTrue(measured.load.contains("core-s"))
+        print("METER-CHECK \(measured.memory) | \(measured.load)")
+    }
+
     /// Apple's first-pass masks run here without failing. A made-up picture has no person in
     /// it, so what they return is only reported.
     func testVisionMasksRun() throws {

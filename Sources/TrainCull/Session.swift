@@ -116,6 +116,8 @@ final class Session: ObservableObject {
     @Published var maskStatus: String?
     @Published var maskBusy = false
     @Published var maskTick = 0
+    /// The narrower of the two edge-band widths being compared (the masking spec's 9.6).
+    @Published var narrowBand = false
     @Published var recents: [URL] = []
     @Published var volumes: [Volume] = []
     @Published var ratedCount = 0
@@ -147,6 +149,17 @@ final class Session: ObservableObject {
     /// The masks of the last two frames that had one made. Each is about as large as a raw render.
     private var masks: [(id: Int, mask: MaskResult)] = []
     private var maskRun = 0
+    private var maskJobs = 0
+    /// Frames whose camera settings have been written to the log this session.
+    private var introduced = Set<Int>()
+    /// The render cache: at most this many bytes of finished pictures, least recently shown out first.
+    static let renderCacheBytes = 900 << 20
+    private var evicted = Set<Int>()
+    private var evictions = 0
+    /// What the user last did that calls for a new render, and how many requests arrived
+    /// while a draft was still being made.
+    private var renderTrigger = "selection"
+    private var draftsSkipped = 0
     private let maskQueue = DispatchQueue(label: "mask", qos: .userInitiated)
     private var fullSize: [Int: CGSize] = [:]
     private var editToken = 0
@@ -199,6 +212,14 @@ final class Session: ObservableObject {
         }
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             (self?.handleKey(event) ?? false) ? nil : event
+        }
+        MemoryMonitor.shared.cacheSummary = { [weak self] in
+            guard let self = self else { return nil }
+            let renderBytes = self.rawCache.reduce(0) { $0 + $1.image.bytesPerRow * $1.image.height }
+            let maskBytes = self.masks.reduce(0) { $0 + $1.mask.width * $1.mask.height * 6 }
+            defer { self.evictions = 0 }
+            return "summary · render \(self.rawCache.count) / \(MemoryStats.plain(UInt64(renderBytes))) · masks \(self.masks.count) / "
+                + "\(MemoryStats.plain(UInt64(maskBytes))) · evictions \(self.evictions)"
         }
         // For the automated build's launch check: open a folder straight away, and optionally
         // show its first two frames side by side.
@@ -291,6 +312,9 @@ final class Session: ObservableObject {
         faces = [:]
         chosenFace = [:]
         rawCache = []
+        evicted = []
+        introduced = []
+        Masking.forgetNeutral()
         masks = []
         maskRun += 1
         maskBusy = false
@@ -342,7 +366,7 @@ final class Session: ObservableObject {
                     return
                 }
                 self.loadThumbnails(gen)
-                self.selectionChanged()
+                self.selectionChanged("programmatic (folder opened)")
                 self.show(0)
                 if UserDefaults.standard.bool(forKey: "TCCompare"), items.count > 1 { self.commandClick(1) }
                 if UserDefaults.standard.bool(forKey: "TCEdit") { self.editing = true }
@@ -412,7 +436,9 @@ final class Session: ObservableObject {
         }
         Log.note("filter", "\(new): \(visible.count) of \(frames.count) frames shown")
         // The side-by-side view keeps its two frames whatever the filter.
-        if compare == nil, !visible.contains(where: { $0.id == selected }), let first = visible.first { select(first.id) }
+        if compare == nil, !visible.contains(where: { $0.id == selected }), let first = visible.first {
+            select(first.id, cause: "programmatic (filter hid the selected frame)")
+        }
         reveal()
     }
 
@@ -491,11 +517,12 @@ final class Session: ObservableObject {
         }
     }
 
-    func select(_ index: Int) {
+    func select(_ index: Int, cause: String = "user.click") {
         guard compare == nil, frames.indices.contains(index), index != selected else { return }
         flushSave()
         selected = index
-        selectionChanged()
+        selectionChanged(cause)
+        renderTrigger = "selection"
         show(0)
     }
 
@@ -504,18 +531,21 @@ final class Session: ObservableObject {
     func step(_ by: Int) {
         guard !visible.isEmpty else { return }
         if let pair = compare {
-            if let target = pair.stepTarget(by, in: visible.map { $0.id }) { setActiveFrame(target) }
+            if let target = pair.stepTarget(by, in: visible.map { $0.id }) { setActiveFrame(target, cause: "user.key (\(by < 0 ? "←" : "→"))") }
             return
         }
+        let cause = "user.key (\(by < 0 ? "←" : "→"))"
         guard let at = visible.firstIndex(where: { $0.id == selected }) else {
-            select(visible[0].id)
+            select(visible[0].id, cause: cause)
             return
         }
-        select(visible[min(max(at + by, 0), visible.count - 1)].id)
+        select(visible[min(max(at + by, 0), visible.count - 1)].id, cause: cause)
     }
 
-    /// The selected frame changed: the editing controls follow it.
-    private func selectionChanged() {
+    /// The selected frame changed: the editing controls follow it. `cause` says who changed it,
+    /// for the log: a click, a key, or the app itself (and then which part of it). Work that
+    /// finishes in the background must never be a cause.
+    private func selectionChanged(_ cause: String) {
         editToken += 1
         valuesToken += 1
         guard let item = current else {
@@ -523,7 +553,11 @@ final class Session: ObservableObject {
             defaults = [:]
             return
         }
-        Log.note("select", "\(item.name) (\(item.id + 1) of \(frames.count))")
+        Log.note("select", "\(item.name) (\(item.id + 1) of \(frames.count)) · cause: \(cause)")
+        if !introduced.contains(item.id), let shot = item.info?.shot {
+            introduced.insert(item.id)
+            Log.note("image", "\(item.name): \(shot.label())\(shot.lens.map { " · \($0)" } ?? "")")
+        }
         values = item.adjust
         local = item.local
         if !maskBusy { maskStatus = currentMask?.summary }
@@ -550,15 +584,22 @@ final class Session: ObservableObject {
         let name = item.name
         let formats = self.formats
         let adjust = item.adjust
-        let stamp = item.localStamp
         let local = localRender(for: item)
+        let stamp = renderKey(item)
         let started = CFAbsoluteTimeGetCurrent()
 
-        if let cached = rawCache.first(where: { $0.id == id && $0.values == adjust && $0.stamp == stamp }) {
+        if let at = rawCache.firstIndex(where: { $0.id == id && $0.values == adjust && $0.stamp == stamp }) {
+            let cached = rawCache.remove(at: at)
+            rawCache.append(cached) // most recently shown last
             view.show(cached.image, space: CGSize(width: cached.image.width, height: cached.image.height), newFrame: true, keepZoom: keepZoom)
             setState(index, "Raw")
-            Log.note("image", "\(name): raw render reused")
+            Log.note("cache", "render \(name) · hit")
             return
+        }
+        if let stale = rawCache.first(where: { $0.id == id }) {
+            Log.note("cache", "render \(name) · miss: keyChanged (\(stale.values != adjust ? "edits" : "local adjustments or mask view"))")
+        } else {
+            Log.note("cache", "render \(name) · miss: \(evicted.contains(id) ? "evicted (LRU)" : "cold")")
         }
         if let t = item.thumb {
             view.show(t, space: CGSize(width: t.width, height: t.height), newFrame: true, keepZoom: keepZoom)
@@ -609,7 +650,7 @@ final class Session: ObservableObject {
                         return
                     }
                     if raw != nil { self.cache(id, adjust, stamp, image) }
-                    guard token == slot.token, item.adjust == adjust, item.localStamp == stamp else { return }
+                    guard token == slot.token, item.adjust == adjust, self.renderKey(item) == stamp else { return }
                     slot.view?.show(image, space: CGSize(width: image.width, height: image.height), newFrame: false)
                     self.setState(index, raw != nil ? "Raw" : "Embedded JPEG")
                 }
@@ -668,7 +709,7 @@ final class Session: ObservableObject {
     func commandClick(_ id: Int) {
         guard frames.indices.contains(id) else { return }
         if let pair = compare {
-            if id != pair.left && id != pair.right { setActiveFrame(id) }
+            if id != pair.left && id != pair.right { setActiveFrame(id, cause: "user.click (⌘)") }
             return
         }
         guard current != nil, id != selected else { return }
@@ -679,28 +720,28 @@ final class Session: ObservableObject {
         slots[0].view?.fit(animated: false)
         compare = ComparePair(left: selected, right: id, active: .right)
         selected = id
-        selectionChanged()
+        selectionChanged("user.click (⌘, side by side)")
         // The right-hand view shows its frame as soon as the window has made it (`attach`).
         if slots[1].view != nil { show(1) }
     }
 
     /// Puts another frame on the active side.
-    private func setActiveFrame(_ id: Int) {
+    private func setActiveFrame(_ id: Int, cause: String) {
         guard var pair = compare, frames.indices.contains(id) else { return }
         pair.activeFrame = id
         compare = pair
         selected = id
-        selectionChanged()
+        selectionChanged(cause)
         // A zoomed image stays zoomed on the same spot, to step through a burst at one zoom.
         show(pair.active.rawValue, keepZoom: true)
     }
 
-    func setActiveSide(_ side: ComparePair.Side) {
+    func setActiveSide(_ side: ComparePair.Side, cause: String = "user.click (other image)") {
         guard var pair = compare, pair.active != side else { return }
         pair.active = side
         compare = pair
         selected = pair.activeFrame
-        selectionChanged()
+        selectionChanged(cause)
     }
 
     /// Back to the single view, which then shows the active image.
@@ -719,7 +760,7 @@ final class Session: ObservableObject {
         } else {
             slots[0].view?.fit(animated: false)
         }
-        selectionChanged()
+        selectionChanged("programmatic (left side by side)")
         reveal()
     }
 
@@ -784,9 +825,20 @@ final class Session: ObservableObject {
     private func cache(_ id: Int, _ values: [String: Float], _ stamp: Int, _ image: CGImage) {
         rawCache.removeAll { $0.id == id }
         rawCache.append((id, values, stamp, image))
-        if rawCache.count > 3 { rawCache.removeFirst() }
+        evicted.remove(id)
+        var bytes = rawCache.reduce(0) { $0 + $1.image.bytesPerRow * $1.image.height }
+        while bytes > Session.renderCacheBytes && rawCache.count > 1 {
+            let out = rawCache.removeFirst()
+            bytes -= out.image.bytesPerRow * out.image.height
+            evicted.insert(out.id)
+            evictions += 1
+        }
         fullSize[id] = CGSize(width: image.width, height: image.height)
     }
+
+    /// What a kept render of a frame is filed under besides its edits: 0 when nothing local
+    /// shows in it, so that making a mask or looking at one does not throw the plain render away.
+    private func renderKey(_ item: FrameItem) -> Int { localRender(for: item) == nil ? 0 : item.localStamp }
 
     /// The value a control shows: the changed one, else the file's default.
     func value(_ control: Control) -> Float { values[control.key] ?? defaults[control.key] ?? control.neutral }
@@ -795,6 +847,7 @@ final class Session: ObservableObject {
 
     func setValue(_ control: Control, _ new: Float) {
         guard let item = current else { return }
+        renderTrigger = "\(control.title) drag"
         let span = control.range.upperBound - control.range.lowerBound
         if let d = defaults[control.key], abs(d - new) <= span * 0.0005 {
             values[control.key] = nil
@@ -833,7 +886,8 @@ final class Session: ObservableObject {
         let token = editToken
         let frame = heroToken
         let url = item.url, id = item.id, adjust = item.adjust
-        let stamp = item.localStamp, local = localRender(for: item)
+        let local = localRender(for: item), stamp = renderKey(item)
+        let trigger = renderTrigger
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
             guard token == self.editToken, frame == self.heroToken else { return }
             self.rawQueue.async {
@@ -841,7 +895,8 @@ final class Session: ObservableObject {
                 DispatchQueue.main.sync { wanted = token == self.editToken && frame == self.heroToken }
                 let start = CFAbsoluteTimeGetCurrent()
                 guard wanted, let image = Imaging.renderRaw(url, adjust, local: local) else { return }
-                if local != nil { Log.note("image", "\(item.name): render with local adjustments in \(Log.seconds(since: start))") }
+                Log.note("image", "\(item.name): render\(local != nil ? " local-adj" : "") \(image.width)×\(image.height) (full) · trigger: \(trigger) · wall \(Log.seconds(since: start))")
+                MemoryMonitor.mark("a full render of \(item.name)")
                 DispatchQueue.main.async {
                     self.cache(id, adjust, stamp, image)
                     guard token == self.editToken, frame == self.heroToken else { return }
@@ -855,8 +910,13 @@ final class Session: ObservableObject {
     /// A quick, smaller render for live feedback. One runs at a time; when it finishes and the
     /// sliders have moved on, the next one starts from the latest values.
     private func startDraft() {
+        if draftBusy { draftsSkipped += 1 }
         guard !draftBusy, let item = current, let hero = hero else { return }
         draftBusy = true
+        let coalesced = draftsSkipped
+        draftsSkipped = 0
+        let trigger = renderTrigger
+        let drafting = CFAbsoluteTimeGetCurrent()
         let token = editToken
         let frame = heroToken
         let url = item.url, adjust = item.adjust
@@ -869,6 +929,10 @@ final class Session: ObservableObject {
         }
         draftQueue.async {
             let image = Imaging.renderRaw(url, adjust, scale: scale, local: local)
+            if let image = image {
+                Log.debug("image", "\(item.name): draft\(local != nil ? " local-adj" : "") \(image.width)×\(image.height) (view, scale \(String(format: "%.2f", scale)))"
+                    + " · trigger: \(trigger) · coalesced \(coalesced) · wall \(Log.seconds(since: drafting))")
+            }
             DispatchQueue.main.async {
                 self.draftBusy = false
                 guard frame == self.heroToken else { return }
@@ -940,21 +1004,32 @@ final class Session: ObservableObject {
         return LocalRender(mask: mask, edits: item.local, view: view, area: localArea)
     }
 
-    /// Makes the current frame's masks at the chosen quality.
+    /// Makes the current frame's masks at the chosen quality. The work is a numbered job in
+    /// the log, from request to completion. Finishing never changes which frame is selected.
     func makeMask() {
         guard let item = current, !maskBusy else { return }
         if compare != nil { endCompare() }
         maskBusy = true
         maskRun += 1
-        let run = maskRun
+        maskJobs += 1
+        let run = maskRun, job = maskJobs
         let tier = maskTier
         let url = item.url, id = item.id, name = item.name
         let known = faces[id]
+        var settings = MatteSettings()
+        if narrowBand {
+            settings.bandIn = 0.012
+            settings.bandOut = 0.04
+        }
         maskStatus = "Starting…"
-        Log.note("mask", "\(name): \(tier.name) mask requested")
+        let requested = CFAbsoluteTimeGetCurrent()
+        Log.note("job", "#\(job) \(tier.name) \(name) · trigger: user (Make button) · band \(narrowBand ? "narrow" : "standard")")
         maskQueue.async {
+            Log.note("job", "#\(job) started · queued \(Log.seconds(since: requested))")
+            let meter = JobMeter()
+            let working = CFAbsoluteTimeGetCurrent()
             let result = Result { () -> MaskResult in
-                try Masking.make(url: url, tier: tier, faces: known, progress: { text in
+                try Masking.make(url: url, tier: tier, faces: known, settings: settings, progress: { text in
                     DispatchQueue.main.async { if run == self.maskRun { self.maskStatus = "\(text)…" } }
                 }, cancelled: {
                     var stop = false
@@ -962,26 +1037,55 @@ final class Session: ObservableObject {
                     return stop
                 })
             }
-            MemoryMonitor.mark("making a \(tier.name) mask")
+            let measured = meter.finish()
+            Log.note("memory", "MaskJob#\(job) · \(measured.memory)")
+            Log.note("load", "MaskJob#\(job) \(tier.name) \(name) · \(measured.load)")
+            let took = Log.seconds(since: working)
             DispatchQueue.main.async {
-                guard run == self.maskRun else { return }
+                guard run == self.maskRun else {
+                    Log.note("job", "#\(job) superseded after \(took)")
+                    return
+                }
                 self.maskBusy = false
+                let still = self.selected == id
                 switch result {
                 case let .success(mask):
+                    Log.note("job", "#\(job) completed in \(took) · image selected at completion: \(still ? "yes" : "no (\(self.current?.name ?? "none"))")")
                     self.masks.removeAll { $0.id == id }
                     self.masks.append((id, mask))
                     if self.masks.count > 2 { self.masks.removeFirst() }
                     self.maskTick += 1
                     item.localStamp += 1
-                    if self.selected == id {
+                    if still {
                         self.maskStatus = mask.summary + (Masking.blendsByChannel ? "" : " (plain blending)")
                         if self.localArea == .skin && mask.skin == nil { self.localArea = .subject }
+                        self.renderTrigger = "mask made"
                         self.refreshLocal(item)
                     }
                 case let .failure(error):
-                    Log.note("mask", "\(name): failed: \(error)")
-                    self.maskStatus = "No mask: \(error)."
+                    Log.note("job", "#\(job) failed after \(took): \(error)")
+                    if still { self.maskStatus = "No mask: \(error)." }
                 }
+            }
+        }
+    }
+
+    /// Writes the current frame's mask debug bundle (the masking spec's 2.2) next to the raw
+    /// and shows it in the Finder.
+    func exportDebugBundle() {
+        guard let item = current else { return }
+        let url = item.url, known = faces[item.id]
+        say("Writing the debug bundle for \(item.name)…")
+        exportQueue.async {
+            do {
+                let folder = try Masking.debugBundle(url: url, faces: known)
+                DispatchQueue.main.async {
+                    self.say("Saved \(folder.lastPathComponent) next to the raw.")
+                    NSWorkspace.shared.activateFileViewerSelecting([folder])
+                }
+            } catch {
+                Log.warn("\(item.name): debug bundle not written: \(error)")
+                DispatchQueue.main.async { self.say("The debug bundle couldn't be written: \(error).") }
             }
         }
     }
@@ -996,6 +1100,7 @@ final class Session: ObservableObject {
         guard view != maskView, let item = current else { return }
         maskView = view
         item.localStamp += 1
+        renderTrigger = "mask view \(view.name)"
         Log.note("mask", "view: \(view.name)")
         refreshLocal(item)
     }
@@ -1009,9 +1114,10 @@ final class Session: ObservableObject {
         }
     }
 
-    /// Changes one number of the chosen area's adjustment.
-    func setLocal(_ change: (inout LocalLayer) -> Void) {
+    /// Changes one number of the chosen area's adjustment. `control` names it for the log.
+    func setLocal(_ control: String, _ change: (inout LocalLayer) -> Void) {
         guard let item = current, currentMask != nil else { return }
+        renderTrigger = "\(localArea.name).\(control) drag"
         change(&local.layers[localArea.rawValue])
         if item.local == local { return }
         item.local = local
@@ -1020,7 +1126,7 @@ final class Session: ObservableObject {
     }
 
     func resetLocal() {
-        setLocal { $0 = LocalLayer() }
+        setLocal("reset") { $0 = LocalLayer() }
     }
 
     func saveMaskPictures() {
@@ -1233,7 +1339,7 @@ final class Session: ObservableObject {
             }
             return false
         case 48: // tab: the other image when comparing, else the next face
-            if let pair = compare { setActiveSide(pair.active.other) } else { nextFace() }
+            if let pair = compare { setActiveSide(pair.active.other, cause: "user.key (tab)") } else { nextFace() }
             return true
         case 49: NSApp.keyWindow?.toggleFullScreen(nil); return true // space
         default: break

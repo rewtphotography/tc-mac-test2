@@ -1,5 +1,6 @@
 import AppKit
 import CoreImage
+import ImageIO
 import TraincullCore
 import Vision
 
@@ -149,12 +150,26 @@ enum Masking {
     static func proxy(of image: CGImage, longEdge: Int) -> CGImage? {
         let k = min(1, Double(longEdge) / Double(max(image.width, image.height)))
         let w = max(Int((Double(image.width) * k).rounded()), 1), h = max(Int((Double(image.height) * k).rounded()), 1)
+        // In sRGB, which is what Vision and every segmentation model were trained on.
         guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
-                                  space: image.colorSpace ?? CGColorSpaceCreateDeviceRGB(),
+                                  space: CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB(),
                                   bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { return nil }
         ctx.interpolationQuality = .high
         ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
         return ctx.makeImage()
+    }
+
+    /// The brightness of a picture, 0 to 1, top row first.
+    static func luma(of image: CGImage) -> Gray? {
+        guard let photo = photo(from: image) else { return nil }
+        var out = Gray(w: photo.w, h: photo.h)
+        for y in 0 ..< photo.h {
+            for x in 0 ..< photo.w {
+                let c = photo.rgb(x, y)
+                out.v[y * photo.w + x] = 0.2126 * c.x + 0.7152 * c.y + 0.0722 * c.z
+            }
+        }
+        return out
     }
 
     // MARK: Apple's first pass
@@ -182,57 +197,127 @@ enum Masking {
         }
     }
 
-    /// Where skin must not be selected: eyes, eyebrows and lips, drawn from Apple's face
-    /// landmarks, a little enlarged and feathered. A plane the size of `image`, 1 = keep out.
-    static func featureExclusion(_ image: CGImage) -> Gray? {
+    /// One face as Apple's landmark detector sees it, in pixels of the picture with y down.
+    struct FaceMarks {
+        let rect: CGRect
+        /// Outlines by name: leftEye, rightEye, leftEyebrow, rightEyebrow, outerLips, nose, faceContour.
+        let regions: [String: [CGPoint]]
+    }
+
+    static func faceMarks(_ image: CGImage) -> [FaceMarks] {
         autoreleasepool {
             let request = VNDetectFaceLandmarksRequest()
             let handler = VNImageRequestHandler(cgImage: image, options: [:])
-            guard (try? handler.perform([request])) != nil, let faces = request.results, !faces.isEmpty else { return nil }
-            let w = image.width, h = image.height
-            guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w,
-                                      space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue) else { return nil }
-            ctx.setFillColor(gray: 0, alpha: 1)
-            ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
-            ctx.setFillColor(gray: 1, alpha: 1)
-            ctx.setStrokeColor(gray: 1, alpha: 1)
-            ctx.setLineJoin(.round)
-            var grow: CGFloat = 2
-            for face in faces {
-                guard let marks = face.landmarks else { continue }
-                grow = max(grow, 0.02 * face.boundingBox.height * CGFloat(h))
-                ctx.setLineWidth(grow)
-                for region in [marks.leftEye, marks.rightEye, marks.leftEyebrow, marks.rightEyebrow, marks.outerLips] {
-                    // Points in pixels with the origin at the bottom left, as the drawing context has it.
-                    guard let points = region?.pointsInImage(imageSize: CGSize(width: w, height: h)), points.count > 2 else { continue }
-                    ctx.beginPath()
-                    ctx.addLines(between: points)
-                    ctx.closePath()
-                    ctx.drawPath(using: .fillStroke)
+            guard (try? handler.perform([request])) != nil, let faces = request.results else { return [] }
+            let w = CGFloat(image.width), h = CGFloat(image.height)
+            return faces.map { face in
+                let box = face.boundingBox // fractions of the picture, origin at the bottom left
+                let rect = CGRect(x: box.minX * w, y: (1 - box.maxY) * h, width: box.width * w, height: box.height * h)
+                var regions: [String: [CGPoint]] = [:]
+                if let marks = face.landmarks {
+                    let named: [(String, VNFaceLandmarkRegion2D?)] = [
+                        ("leftEye", marks.leftEye), ("rightEye", marks.rightEye), ("leftEyebrow", marks.leftEyebrow),
+                        ("rightEyebrow", marks.rightEyebrow), ("outerLips", marks.outerLips), ("nose", marks.nose),
+                        ("faceContour", marks.faceContour),
+                    ]
+                    for (name, region) in named {
+                        guard let points = region?.pointsInImage(imageSize: CGSize(width: w, height: h)), !points.isEmpty else { continue }
+                        regions[name] = points.map { CGPoint(x: $0.x, y: h - $0.y) }
+                    }
                 }
+                return FaceMarks(rect: rect, regions: regions)
             }
-            guard let data = ctx.data else { return nil }
-            let bytes = data.assumingMemoryBound(to: UInt8.self)
-            var out = Gray(w: w, h: h)
-            for y in 0 ..< h { for x in 0 ..< w { out.v[y * w + x] = Float(bytes[y * ctx.bytesPerRow + x]) / 255 } }
-            return out.blurred(radius: max(Int(grow / 3), 1))
         }
+    }
+
+    /// Where skin must not be selected: eyes, eyebrows and lips, drawn from Apple's face
+    /// landmarks, a little enlarged and feathered. A plane the size of `image`, 1 = keep out.
+    static func featureExclusion(_ image: CGImage, marks: [FaceMarks]? = nil) -> Gray? {
+        let faces = marks ?? faceMarks(image)
+        if faces.isEmpty { return nil }
+        let w = image.width, h = image.height
+        guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w,
+                                  space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue) else { return nil }
+        ctx.setFillColor(gray: 0, alpha: 1)
+        ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
+        ctx.setFillColor(gray: 1, alpha: 1)
+        ctx.setStrokeColor(gray: 1, alpha: 1)
+        ctx.setLineJoin(.round)
+        var grow: CGFloat = 2
+        for face in faces {
+            grow = max(grow, 0.02 * face.rect.height)
+            ctx.setLineWidth(grow)
+            for name in ["leftEye", "rightEye", "leftEyebrow", "rightEyebrow", "outerLips"] {
+                guard let points = face.regions[name], points.count > 2 else { continue }
+                // The drawing context counts y upwards; the points count it downwards.
+                ctx.beginPath()
+                ctx.addLines(between: points.map { CGPoint(x: $0.x, y: CGFloat(h) - $0.y) })
+                ctx.closePath()
+                ctx.drawPath(using: .fillStroke)
+            }
+        }
+        guard let data = ctx.data else { return nil }
+        let bytes = data.assumingMemoryBound(to: UInt8.self)
+        var out = Gray(w: w, h: h)
+        for y in 0 ..< h { for x in 0 ..< w { out.v[y * w + x] = Float(bytes[y * ctx.bytesPerRow + x]) / 255 } }
+        return out.blurred(radius: max(Int(grow / 3), 1))
     }
 
     // MARK: Making a mask
 
     /// Makes the masks for one raw file. Runs for seconds; call it off the main thread.
-    static func make(url: URL, tier: MatteTier, faces known: DetectedFaces?, progress: (String) -> Void, cancelled: () -> Bool) throws -> MaskResult {
+    static func make(url: URL, tier: MatteTier, faces known: DetectedFaces?, settings: MatteSettings = MatteSettings(),
+                     progress: (String) -> Void, cancelled: () -> Bool) throws -> MaskResult {
+        let reference = try neutral(url)
+        return try make(reference: reference, name: url.lastPathComponent, tier: tier, faces: known, settings: settings,
+                        progress: progress, cancelled: cancelled)
+    }
+
+    /// The last neutral render, kept so that remaking a mask at another quality, or exporting
+    /// its debug bundle, doesn't develop the raw again.
+    private static var kept: (url: URL, image: CGImage)?
+    private static let keptLock = NSLock()
+
+    /// A neutral render of a raw: the camera's white balance, Apple's defaults, none of the frame's edits.
+    static func neutral(_ url: URL) throws -> CGImage {
+        keptLock.lock()
+        let hit = kept?.url == url ? kept?.image : nil
+        keptLock.unlock()
+        if let hit = hit {
+            Log.debug("cache", "neutral \(url.lastPathComponent) · hit")
+            return hit
+        }
         let started = CFAbsoluteTimeGetCurrent()
-        progress("Rendering")
-        // A neutral render: the camera's white balance, Apple's defaults, none of the frame's edits.
         guard let reference = Imaging.renderRaw(url) else { throw Failure("Apple's raw decoder can't open this file on this Mac") }
-        Log.note("mask", "\(url.lastPathComponent): neutral render \(reference.width)×\(reference.height) in \(Log.seconds(since: started))")
-        return try make(reference: reference, name: url.lastPathComponent, tier: tier, faces: known, progress: progress, cancelled: cancelled)
+        Log.note("cache", "neutral \(url.lastPathComponent) · miss: \(kept == nil ? "cold" : "another image") · rendered \(reference.width)×\(reference.height) in \(Log.seconds(since: started))")
+        keptLock.lock()
+        kept = (url, reference)
+        keptLock.unlock()
+        return reference
+    }
+
+    static func forgetNeutral() {
+        keptLock.lock()
+        kept = nil
+        keptLock.unlock()
+    }
+
+    /// The faces of a picture ranked as subjects (§5.1 of the masking spec), with what was
+    /// measured to rank them.
+    struct Ranking {
+        let sharpness: SharpnessMap?
+        let candidates: [SubjectChoice.Candidate]
+        var primary: SubjectChoice.Candidate? { candidates.first }
+    }
+
+    static func rank(proxy small: CGImage, faces: [PixelRect]) -> Ranking {
+        guard let luma = luma(of: small) else { return Ranking(sharpness: nil, candidates: []) }
+        let map = SharpnessMap(luma: luma)
+        return Ranking(sharpness: map, candidates: SubjectChoice.rank(faces, sharpness: map))
     }
 
     /// The same, from a picture already rendered.
-    static func make(reference: CGImage, name: String, tier: MatteTier, faces known: DetectedFaces?,
+    static func make(reference: CGImage, name: String, tier: MatteTier, faces known: DetectedFaces?, settings: MatteSettings = MatteSettings(),
                      coarse given: Gray? = nil, progress: (String) -> Void, cancelled: () -> Bool) throws -> MaskResult {
         let started = CFAbsoluteTimeGetCurrent()
         let W = reference.width, H = reference.height
@@ -278,10 +363,30 @@ enum Masking {
         }
         if cancelled() { throw Failure("stopped") }
 
-        let matte = Matte(photo: photo, coarse: first, faces: faces, patches: patches)
+        // Which face is the subject, and how sharp it is: the rest of the photo is judged
+        // against that, so that colour arithmetic isn't trusted where things are out of focus.
+        stage = CFAbsoluteTimeGetCurrent()
+        let toProxy = Double(small.width) / Double(W)
+        let ranking = rank(proxy: small, faces: faces.map { f in
+            PixelRect(x: Int(Double(f.x) * toProxy), y: Int(Double(f.y) * toProxy), w: max(Int(Double(f.w) * toProxy), 1), h: max(Int(Double(f.h) * toProxy), 1))
+        })
+        let number = { (v: Float?) in v.map { String(format: "%.2f px", locale: Locale(identifier: "en_US_POSIX"), $0) } ?? "unmeasured" }
+        if let primary = ranking.primary {
+            let others = ranking.candidates.dropFirst().map { number($0.sharp) }.joined(separator: ", ")
+            Log.note("base", "\(name): faces \(faces.count) → primary score \(Int(primary.score)), faceSharp \(number(primary.sharp))"
+                + (others.isEmpty ? "" : " · others' faceSharp [\(others)]") + " · sharpness map in \(Log.seconds(since: stage))")
+        } else {
+            Log.warn("\(name): no usable face; the whole photo is treated as in focus")
+        }
+        let coverage = 100 * first.v.reduce(0, +) / Float(max(first.v.count, 1))
+        Log.note("base", "\(name): candidate V (Vision \(source)) · subject area \(String(format: "%.1f", locale: Locale(identifier: "en_US_POSIX"), coverage))% of frame")
+
+        let matte = Matte(photo: photo, coarse: first, faces: faces, patches: patches, settings: settings,
+                          defocus: ranking.sharpness?.dense, subjectSharpness: ranking.primary?.sharp)
         MemoryMonitor.mark("setting up a \(tier.name) mask")
         let out = matte.run(tier: tier, progress: progress, cancelled: cancelled)
         for line in out.log { Log.note("mask", "\(name): \(line)") }
+        for warning in out.warnings { Log.warn("\(name): \(warning) (\(tier.name) mask)") }
         MemoryMonitor.mark("refining a \(tier.name) mask")
 
         // Skin: its colour is learned from the cheeks and nose of each face.
@@ -314,8 +419,107 @@ enum Masking {
               let rough = picture(gray: coarse8, w: first.w, h: first.h) else { throw Failure("the mask couldn't be stored") }
         let megapixels = String(format: "%.1f", Double(out.unknownPixels) / 1_000_000)
         let summary = "\(tier.name) mask in \(Log.seconds(since: started)): \(megapixels) MP of edge refined"
+            + (out.warnings.isEmpty ? "" : " · check: " + out.warnings.joined(separator: ", "))
         Log.note("mask", "\(name): \(summary)")
         return MaskResult(width: W, height: H, alpha: alpha, shares: shares, skin: skin, trimap: trimap, coarse: rough, tier: tier, summary: summary)
+    }
+
+    // MARK: Debug bundle
+
+    static func png(_ image: CGImage) -> Data? {
+        let data = NSMutableData()
+        guard let dest = CGImageDestinationCreateWithData(data, "public.png" as CFString, 1, nil) else { return nil }
+        CGImageDestinationAddImage(dest, image, nil)
+        return CGImageDestinationFinalize(dest) ? data as Data : nil
+    }
+
+    /// Writes what a subject-selection model would be given for this photo, and what the
+    /// current first pass makes of it, into a new folder next to the raw: the inputs for
+    /// comparing models outside the app (the masking spec's bake-off).
+    static func debugBundle(url: URL, faces known: DetectedFaces?) throws -> URL {
+        let reference = try neutral(url)
+        let W = reference.width, H = reference.height
+        guard let small = proxy(of: reference, longEdge: proxyLongEdge), let proxyData = png(small) else { throw Failure("the photo couldn't be scaled down") }
+        let scale = Double(W) / Double(small.width)
+
+        let marks = faceMarks(small)
+        var rects = marks.map { PixelRect(x: Int($0.rect.minX), y: Int($0.rect.minY), w: max(Int($0.rect.width), 1), h: max(Int($0.rect.height), 1)) }
+        if rects.isEmpty, let found = known, found.imageWidth > 0 {
+            let k = Double(small.width) / found.imageWidth
+            rects = found.subjects.map { PixelRect(x: Int($0.left * k), y: Int($0.top * k), w: max(Int($0.width * k), 1), h: max(Int($0.height * k), 1)) }
+        }
+        let ranking = rank(proxy: small, faces: rects)
+
+        let fm = FileManager.default
+        let parent = url.deletingLastPathComponent(), base = url.deletingPathExtension().lastPathComponent
+        var folder = parent.appendingPathComponent("\(base)-maskdebug", isDirectory: true)
+        var n = 2
+        while fm.fileExists(atPath: folder.path) {
+            folder = parent.appendingPathComponent("\(base)-maskdebug-\(n)", isDirectory: true)
+            n += 1
+        }
+        try fm.createDirectory(at: folder, withIntermediateDirectories: false)
+        try proxyData.write(to: folder.appendingPathComponent("proxy.png"))
+
+        // Faces, in proxy pixels with y down, best subject first.
+        func list(_ r: PixelRect) -> [Int] { [r.x, r.y, r.w, r.h] }
+        var facesJSON: [[String: Any]] = []
+        for (i, candidate) in ranking.candidates.enumerated() {
+            var entry: [String: Any] = ["rect": list(candidate.face), "primary": i == 0, "score": Double(candidate.score)]
+            if let sharp = candidate.sharp { entry["faceSharp"] = Double(sharp) }
+            if let mark = marks.first(where: { abs(Int($0.rect.minX) - candidate.face.x) <= 1 && abs(Int($0.rect.minY) - candidate.face.y) <= 1 }) {
+                entry["landmarks"] = mark.regions.mapValues { points in points.map { [Double($0.x), Double($0.y)] } }
+            }
+            facesJSON.append(entry)
+        }
+        let facesDoc: [String: Any] = ["image": url.lastPathComponent, "proxy_size": [small.width, small.height], "full_size": [W, H],
+                                       "units": "proxy pixels, origin top left, y down", "faces": facesJSON]
+        try JSONSerialization.data(withJSONObject: facesDoc, options: [.prettyPrinted, .sortedKeys]).write(to: folder.appendingPathComponent("faces.json"))
+
+        // The body box of the primary face, cut from the full-size render.
+        if let primary = ranking.primary {
+            let box = SubjectChoice.bodyBox(face: primary.face, w: small.width, h: small.height)
+            let full = PixelRect(x: Int(Double(box.x) * scale), y: Int(Double(box.y) * scale), w: Int(Double(box.w) * scale), h: Int(Double(box.h) * scale)).clamped(w: W, h: H)
+            if let crop = reference.cropping(to: CGRect(x: full.x, y: full.y, width: full.w, height: full.h)),
+               let shrunk = proxy(of: crop, longEdge: proxyLongEdge), let data = png(shrunk) {
+                try data.write(to: folder.appendingPathComponent("box_crop_hr.png"))
+                let doc: [String: Any] = ["box_proxy": list(box), "box_full": list(full), "crop_size": [shrunk.width, shrunk.height],
+                                          "units": "pixels, origin top left, y down; x, y, width, height"]
+                try JSONSerialization.data(withJSONObject: doc, options: [.prettyPrinted, .sortedKeys]).write(to: folder.appendingPathComponent("box.json"))
+            }
+        }
+
+        // The current first pass, at the proxy's size.
+        var source = "none"
+        var first = personMask(small)
+        if let people = first, people.v.reduce(0, +) / Float(people.v.count) > 0.003 { source = "people" } else {
+            first = subjectMask(small)
+            source = first == nil ? "none" : "foreground"
+        }
+        if let first = first?.resized(w: small.width, h: small.height),
+           let picture = picture(gray: first.v.map { UInt8(min(max($0, 0), 1) * 255) }, w: first.w, h: first.h), let data = png(picture) {
+            try data.write(to: folder.appendingPathComponent("current_m0.png"))
+        }
+
+        let readme = """
+        Mask debug bundle for \(url.lastPathComponent)
+
+        proxy.png         the picture a subject-selection model is given (sRGB, long edge \(proxyLongEdge))
+        box_crop_hr.png   the area around the main person, from the full-size photo; box.json says where it is
+        faces.json        the faces found, best subject first, with their outlines
+        current_m0.png    what TrainCull's current first pass selects (Vision \(source))
+
+        To make the reference mask ("ground truth") for this photo:
+          1. Open proxy.png in Photoshop.
+          2. Paint the subject pure white and everything else pure black, at the same size.
+             Include anything the subject is holding or wearing. Leave other people out.
+          3. Save it in this folder as gt_subject.png.
+          Optional: the same for skin only, saved as gt_skin.png.
+        Then compress this folder (right-click, Compress) and send the zip.
+        """
+        try Data(readme.utf8).write(to: folder.appendingPathComponent("README.txt"))
+        Log.note("mask", "\(url.lastPathComponent): debug bundle written to \(folder.path) · faces \(ranking.candidates.count) · first pass \(source)")
+        return folder
     }
 
     // MARK: Using a mask

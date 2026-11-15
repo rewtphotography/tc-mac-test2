@@ -8,21 +8,23 @@ An alpha build of TrainCull for Mac (Apple silicon, macOS 15 or later).
    **Done**, then open **System Settings → Privacy & Security**, scroll down to the message
    about TrainCull and click **Open Anyway**. This is needed once for each new build.
 
-**New in this build: a masking test**
+**New in this build**
 
-This build is a test of whether TrainCull could finish a photo, not just cull it. Open **Edit**
-and scroll to **Mask (Test)** at the bottom of the controls.
+- **Export Debug Bundle** (Edit → Mask (Test)): writes a folder next to the raw with what a
+  subject-selection model would be given for that photo. A note inside says how to paint the
+  reference mask. These folders are what the comparison of models will be run on.
+- **The straight seam and the glow around out-of-focus hair** at Max should be gone. Every mask
+  now checks itself for both and says so in its status line if it finds one.
+- **The subject is the large, sharp face,** not simply the largest.
+- **Narrow edge band** toggle, to compare a thinner refined strip. Make the mask again after changing it.
+- Making a mask no longer throws away the photo's finished render, and the log now says why
+  every selection, render and cache miss happened.
 
-1. Choose **Fast**, **High** or **Max** and click **Make**. Fast is for clean edges, High is for
-   hair over more than one background colour, Max works on every strand and takes longest.
-2. **Show** changes what the large image displays: the photo, a red overlay, the mask itself, or
-   the subject cut out on black or white, which shows any halo at once.
-3. Pick **Subject**, **Background** or **Skin** and move **Exposure**, **Saturation** or **Warmth**.
-   Darkening the background behind hair is the hard test.
-4. **Save Mask Pictures** writes the mask as PNG files next to the raw, to look at closely or send.
-
-Nothing here is saved with the photo yet: masks and local adjustments last until you close the
-folder. **Export 16-bit TIFF** does include them.
+**The masking test** (from alpha 7): open **Edit** and scroll to **Mask (Test)**. Choose **Fast**,
+**High** or **Max** and click **Make**. **Show** switches between the photo, a red overlay, the mask,
+and the subject cut out on black or white. Pick **Subject**, **Background** or **Skin** and move
+**Exposure**, **Saturation** or **Warmth**. Masks and local adjustments last until you close the
+folder; **Export 16-bit TIFF** includes them.
 
 **Since alpha 4**
 

@@ -127,7 +127,7 @@ Bridge, Photoshop or Lightroom has it)
   folder tree, a calibration table mapping Apple's values to Camera Raw's.
 - Subject, hair and skin masks: see "Masking" below.
 
-## What is built (alpha 7)
+## What is built (alpha 8)
 
 Folder opening (button, File menu, drag and drop, recents, drives), resizable left pane,
 thumbnails with rating, label and reject marks, the large image with raw render and face
@@ -180,13 +180,14 @@ Same folder and Mac, two and a half minutes of use:
 
 ## Next, in order
 
-1. Fix whatever the owner's use of alpha 6 shows; read the log and memory figures they send.
+1. The masking bake-off: once the owner has exported debug bundles and painted reference
+   masks, compare subject models here and report before integrating any (see "Masking spec v2").
 2. Soft-focus and closed-eyes flags from Apple's face landmarks.
 3. A Settings window (label names, editor choice), Undo after reject.
 
 ## Masking (a test build of phases 1 and 2)
 
-`docs/masking-plan.md` is a plan the owner brought in for subject, hair-edge and skin masks.
+`docs/specs/masking-plan.md` is a plan the owner brought in for subject, hair-edge and skin masks.
 It was written for a generic Mac raw editor, not for this app, and was audited here on
 2026-11-15. Phases 1 and 2 are built as a test; see the end of this section.
 
@@ -280,6 +281,72 @@ refined, tiles and steps for Max, memory after each stage. What only the owner's
 say: whether curls and strands hold up on real hair, whether darkening the background leaves
 a halo, whether the skin mask is usable. Ask for the saved mask pictures when it goes wrong;
 they can be looked at from here.
+
+## Masking spec v2 and the logging recommendations (in progress)
+
+After trying alpha 7 the owner brought two more documents, written by another session from
+their alpha 7 logs and screenshots (which were not seen here): `docs/specs/masking-spec-v2.md`
+and `docs/specs/logging-recommendations.md`. What alpha 7 showed, by their account: Vision's
+"all people" mask pulls in background people and misses props; the skin mask misses shadowed
+skin and highlights; Max left a glow around out-of-focus hair and a straight seam
+(`_DSC6372`, background at −3 EV). The owner shoots 85 mm at f/1.6 in crowded convention
+halls: cosplay, props, other people in similar colours behind and overlapping the subject.
+
+The spec's order of work, and where it stands:
+
+1. **Debug bundle export and ground truth. Built (alpha 8).** "Export Debug Bundle" in the
+   mask panel writes a folder next to the raw: the proxy, the body-box crop, the faces with
+   outlines, the current first pass, and a note telling the owner how to paint the reference
+   mask. The owner has to do that for 20 to 25 photos before step 2 can start.
+2. **Bake-off of subject models in Python, then stop for the owner's review. Not started.**
+   It can be run from here: this workspace reaches Hugging Face and PyPI, with 4 cores and
+   15 GB, so it will be slow and its timings will say nothing about the owner's Mac. Speed
+   on the Mac can only be measured once a model is in the app.
+3. to 6. Models in the app, refine tools, skin v2, acceptance: after the bake-off.
+
+Done now because they don't depend on the bake-off (the spec's sections 4, 5.1, 5.2, 9, 13):
+- **The seam.** Max tiles now overlap and fade into each other, and into the High answer
+  where a neighbour was skipped. A check on every Max mask compares the mask's steps across
+  tile boundaries with its steps elsewhere and logs "SEAM?" if they stand out.
+- **The glow.** A sharpness map of the photo (how blurred each edge is) and the sharpness of
+  the subject's face are measured; where the photo is well out of focus next to the subject,
+  each tier trusts its colour arithmetic less and stays with the first-pass mask. Two guards
+  keep the result near the first pass where that was sure; the background one tightens out
+  of focus. Every mask logs how much of the sure background came out half-selected and
+  flags "GLOW?" above 5%.
+- **Straight lines in the Fast mask** were most likely the hard edge of the "hair zone"
+  around each head; it now fades in. Not confirmed on the owner's photo.
+- **Which face is the subject:** the large, sharp one (size over blur), not the largest.
+- **Band width** is a setting, with a "Narrow edge band" toggle to compare.
+- **A plain render is no longer thrown away when a mask is made** (the reselect that
+  re-rendered). The render cache is capped by size (900 MB), least recently shown out first.
+- **The neutral render is kept** between a mask, a remake at another quality and a bundle.
+- **Nothing that finishes in the background selects a frame.** That was already so; the log
+  now gives the cause of every selection so the `_DSC6637` case can be told next time.
+
+Logging added (the recommendations' 1, 3, 4, 5, 6, 7 in part, 9, 10 in part): the cause of
+every selection; mask jobs numbered from request to completion, with whether their image was
+still selected; cache hits and misses with reasons, and a summary every 15 s; memory per mask
+job (read every 50 ms) and processor time; thermal state; the size, scale and trigger of
+every render; the quality checks above; a `warn` category; a `.jsonl` copy of the log; the
+camera settings of each image on first selection; twenty sessions kept.
+
+Not done from the recommendations, and why: GPU time (the matting runs on the processor, so
+there is none of ours to time); model load and compute-unit lines (no models yet); energy
+in joules and the power-source line (left until there is something to compare); the
+`powermetrics` scripts (they need the terminal and an administrator password).
+
+**Where spec v2 collides with this project. To settle before step 3:**
+- It has models "downloaded on demand, never bundled". The app never uses the network and
+  the build fails if networking code is linked. Either the models ship inside the download
+  (SAM 2.1 and BiRefNet together are of the order of a gigabyte) or the rule is relaxed for
+  model downloads only. The owner's call.
+- Its bake-off harness assumes PyTorch on the owner's Mac. The owner doesn't use the
+  terminal; it runs here instead, from the bundles they export.
+- It blends the High tier towards the first pass when unsure (9.5); here High blends towards
+  Fast, which itself falls back on the first pass. Left as it is.
+- It expects masks as sparse 16-bit tiles and work on the graphics card. Still whole-frame
+  8-bit on the processor, as in alpha 7.
 
 ## Still to design
 
