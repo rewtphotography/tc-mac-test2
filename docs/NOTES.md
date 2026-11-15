@@ -317,6 +317,9 @@ Done now because they don't depend on the bake-off (the spec's sections 4, 5.1, 
 - **Straight lines in the Fast mask** were most likely the hard edge of the "hair zone"
   around each head; it now fades in. Not confirmed on the owner's photo.
 - **Which face is the subject:** the large, sharp one (size over blur), not the largest.
+  The sharpness map departs from the spec in one thing: the bar for what counts as an edge
+  is capped at a 4% step. As specified (the steepest 15% of the picture), a photo full of
+  crisp detail would count crisp edges only and never measure what is out of focus.
 - **Band width** is a setting, with a "Narrow edge band" toggle to compare.
 - **A plain render is no longer thrown away when a mask is made** (the reselect that
   re-rendered). The render cache is capped by size (900 MB), least recently shown out first.

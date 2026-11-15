@@ -29,8 +29,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: swift --version
+      # The core library's own tests run in the Linux job. Here, the ones that need a Mac.
       - name: Tests
-        run: swift test
+        run: swift test --filter TrainCullTests
       # Alpha numbers follow on from the last published one (alpha 4 came from the earlier
       # repository), so a failed build never uses a number up.
       - name: Build number

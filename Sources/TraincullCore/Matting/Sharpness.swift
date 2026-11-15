@@ -88,12 +88,15 @@ public struct SharpnessMap {
                 }
             }
         }
-        // Edges: the steepest 15% of the picture, and at least a 2% step.
+        // Edges: the steepest 15% of the picture, at least a 2% step. The bar is never set
+        // above a 4% step, though: in a photo full of crisp detail the steepest 15% would be
+        // crisp edges only, and the soft edges of whatever is out of focus, the very thing
+        // being measured, would be left out.
         var sample: [Float] = []
         sample.reserveCapacity(n / 7 + 1)
         for i in stride(from: 0, to: n, by: 7) { sample.append(g[i]) }
         sample.sort()
-        let threshold = max(sample.isEmpty ? 0 : sample[min(Int(Float(sample.count) * 0.85), sample.count - 1)], 0.02)
+        let threshold = min(max(sample.isEmpty ? 0 : sample[min(Int(Float(sample.count) * 0.85), sample.count - 1)], 0.02), 0.04)
         var e = [Bool](repeating: false, count: n), s = [Float](repeating: SharpnessMap.most, count: n)
         var weight = [Float](repeating: 0, count: n)
         for y in 1 ..< max(h - 1, 1) {
