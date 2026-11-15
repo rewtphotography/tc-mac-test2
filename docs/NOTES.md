@@ -438,6 +438,15 @@ and changing the tier ran it again.
   0.028 (the spec's limit is 0.05); the boots and jeans edges are clean in Off, and High
   still brings the strands back in the hair zone.
 
+**Measured by the automated build (alpha 12, a 3-core virtual Mac with no graphics card):**
+the converted 1024 model finds a test disc at IoU 0.999; a pass takes 15 s there (109 s at
+2048 in alpha 11); memory during a pass peaks at **1.1 GB** and rests at about 140 MB with
+the model loaded; the whole pipeline test (whole frame, a close-up, High, a tier change with
+no model call, the debug bundle) passes; the download is 411 MB (779 MB before). The mask
+panel's new controls are compiled and exercised by those tests but are below the fold in
+the build's screenshots, so nobody has looked at them yet. Real figures (the owner's M3 Pro,
+with its graphics card) come from the owner's first log.
+
 **Adopted and built:**
 - **One model, at 1024, for everything** (2.2, 4.5): the whole frame, then square close-up
   tiles laid over the subject's box, each cut from the full-size photo. Tiles are as large
