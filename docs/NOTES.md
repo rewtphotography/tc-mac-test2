@@ -127,7 +127,7 @@ Bridge, Photoshop or Lightroom has it)
   folder tree, a calibration table mapping Apple's values to Camera Raw's.
 - Subject, hair and skin masks: see "Masking" below.
 
-## What is built (alpha 9)
+## What is built (alpha 11)
 
 Folder opening (button, File menu, drag and drop, recents, drives), resizable left pane,
 thumbnails with rating, label and reject marks, the large image with raw render and face
@@ -300,7 +300,7 @@ The spec's order of work, and where it stands:
    mask. The owner has to do that for 20 to 25 photos before step 2 can start.
 2. **Bake-off of subject models. Done on eight bundles; see "The subject bake-off" below.**
    Run here, in Python on the processor, so its timings say nothing about the owner's Mac.
-3. **Models in the app. Built (alpha 9), as a picker so the owner can test every candidate:**
+3. **Models in the app. Built (alpha 11), as a picker so the owner can test every candidate:**
    "Subject from" in the mask panel offers BiRefNet (A, the default), SAM (B), SAM + close-up
    (B2), Hybrid (C) and Vision (V). Not yet done from this step: caching of what the models
    return (each Make runs them again), prewarming, unloading under memory pressure, the
@@ -385,6 +385,20 @@ crowd shots):
   on the M3 Pro does; the log's `base` lines time every model call.
 - BiRefNet's close-up run used the box cut from the proxy, not from the full-size photo as
   the app does, so the app's edges inside the box may be a little better than measured.
+
+**In the app (alpha 11).** Both models are checked on the Mac build machine, in Core ML:
+SAM finds a test disc from one point and from a box (IoU 0.995), and the converted BiRefNet
+finds one too (IoU 0.99996), so the conversion did not damage it. On that machine, which has
+three cores and no graphics card, BiRefNet took 109 s a run and SAM's encoder 21 s; those
+say nothing about the owner's Mac. The download is 779 MB. Not yet run by anyone on a real
+photo inside the app.
+
+**How the models get into the build.** GitHub's standard Linux machine for a private
+repository has about 7 GB of memory and the conversion needs more, so the job first deletes
+tools it doesn't use and makes swap space on the disk; it then takes eight to nine minutes.
+The result is kept between builds, keyed on `tools/convert_birefnet.py`. The check that
+runs BiRefNet at full size adds two minutes to every Mac build; drop it from the workflow
+once the conversion is trusted.
 
 **Where spec v2 collides with this project. To settle before step 3:**
 - It has models "downloaded on demand, never bundled". The app never uses the network and
