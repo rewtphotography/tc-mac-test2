@@ -16,6 +16,11 @@ final class FrameItem: ObservableObject, Identifiable {
     @Published var label: String?
     @Published var thumb: CGImage?
     @Published var failed: String?
+    /// Masked adjustments. Kept for the session only while the masking test runs; not saved.
+    var local = LocalEdits()
+    /// Goes up whenever the frame's mask, its local adjustments or the mask view change, so a
+    /// kept render is known to be out of date.
+    var localStamp = 0
 
     init(id: Int, url: URL, sidecarName: String?, values: SidecarValues?, adjust: [String: Float]) {
         self.adjust = adjust
@@ -102,6 +107,15 @@ final class Session: ObservableObject {
     @Published var flashed: Int?
     /// "Exporting 3 / 12" while an export runs.
     @Published var exportStatus: String?
+    /// Masking: the chosen quality, what the large image shows, the area the sliders act on,
+    /// the current frame's local adjustments, and what is going on.
+    @Published var maskTier = MatteTier.high
+    @Published var maskView = MaskView.photo
+    @Published var localArea = LocalArea.subject
+    @Published var local = LocalEdits()
+    @Published var maskStatus: String?
+    @Published var maskBusy = false
+    @Published var maskTick = 0
     @Published var recents: [URL] = []
     @Published var volumes: [Volume] = []
     @Published var ratedCount = 0
@@ -129,7 +143,11 @@ final class Session: ObservableObject {
     private var folderOpened = CFAbsoluteTimeGetCurrent()
     private var faces: [Int: DetectedFaces] = [:]
     private var chosenFace: [Int: Int] = [:]
-    private var rawCache: [(id: Int, values: [String: Float], image: CGImage)] = []
+    private var rawCache: [(id: Int, values: [String: Float], stamp: Int, image: CGImage)] = []
+    /// The masks of the last two frames that had one made. Each is about as large as a raw render.
+    private var masks: [(id: Int, mask: MaskResult)] = []
+    private var maskRun = 0
+    private let maskQueue = DispatchQueue(label: "mask", qos: .userInitiated)
     private var fullSize: [Int: CGSize] = [:]
     private var editToken = 0
     private var valuesToken = 0
@@ -273,6 +291,11 @@ final class Session: ObservableObject {
         faces = [:]
         chosenFace = [:]
         rawCache = []
+        masks = []
+        maskRun += 1
+        maskBusy = false
+        maskStatus = nil
+        maskView = .photo
         selected = 0
         clearSlots()
         pane = .thumbnails
@@ -322,6 +345,7 @@ final class Session: ObservableObject {
                 self.selectionChanged()
                 self.show(0)
                 if UserDefaults.standard.bool(forKey: "TCCompare"), items.count > 1 { self.commandClick(1) }
+                if UserDefaults.standard.bool(forKey: "TCEdit") { self.editing = true }
             }
         }
     }
@@ -501,6 +525,8 @@ final class Session: ObservableObject {
         }
         Log.note("select", "\(item.name) (\(item.id + 1) of \(frames.count))")
         values = item.adjust
+        local = item.local
+        if !maskBusy { maskStatus = currentMask?.summary }
         defaults = [:]
         let token = valuesToken
         let url = item.url
@@ -524,9 +550,11 @@ final class Session: ObservableObject {
         let name = item.name
         let formats = self.formats
         let adjust = item.adjust
+        let stamp = item.localStamp
+        let local = localRender(for: item)
         let started = CFAbsoluteTimeGetCurrent()
 
-        if let cached = rawCache.first(where: { $0.id == id && $0.values == adjust }) {
+        if let cached = rawCache.first(where: { $0.id == id && $0.values == adjust && $0.stamp == stamp }) {
             view.show(cached.image, space: CGSize(width: cached.image.width, height: cached.image.height), newFrame: true, keepZoom: keepZoom)
             setState(index, "Raw")
             Log.note("image", "\(name): raw render reused")
@@ -567,7 +595,7 @@ final class Session: ObservableObject {
                 DispatchQueue.main.sync { stillWanted = token == slot.token }
                 guard stillWanted else { return }
                 let rendering = CFAbsoluteTimeGetCurrent()
-                let raw = Imaging.renderRaw(url, adjust)
+                let raw = Imaging.renderRaw(url, adjust, local: local)
                 let image = raw ?? Imaging.fullJpeg(url, formats)
                 if let image = image {
                     Log.note("image", "\(name): \(raw != nil ? "raw render" : "embedded JPEG (no raw render)") \(image.width)×\(image.height) in \(Log.seconds(since: rendering)), \(Log.seconds(since: started)) after selecting")
@@ -580,8 +608,8 @@ final class Session: ObservableObject {
                         if token == slot.token { self.setState(index, "Preview only") }
                         return
                     }
-                    if raw != nil { self.cache(id, adjust, image) }
-                    guard token == slot.token, item.adjust == adjust else { return }
+                    if raw != nil { self.cache(id, adjust, stamp, image) }
+                    guard token == slot.token, item.adjust == adjust, item.localStamp == stamp else { return }
                     slot.view?.show(image, space: CGSize(width: image.width, height: image.height), newFrame: false)
                     self.setState(index, raw != nil ? "Raw" : "Embedded JPEG")
                 }
@@ -753,9 +781,9 @@ final class Session: ObservableObject {
         Log.note("edit", editing ? "edit mode on" : "edit mode off")
     }
 
-    private func cache(_ id: Int, _ values: [String: Float], _ image: CGImage) {
+    private func cache(_ id: Int, _ values: [String: Float], _ stamp: Int, _ image: CGImage) {
         rawCache.removeAll { $0.id == id }
-        rawCache.append((id, values, image))
+        rawCache.append((id, values, stamp, image))
         if rawCache.count > 3 { rawCache.removeFirst() }
         fullSize[id] = CGSize(width: image.width, height: image.height)
     }
@@ -790,29 +818,38 @@ final class Session: ObservableObject {
 
     private func edited(_ item: FrameItem) {
         item.adjust = values
+        rerender(item)
+        pendingSave = item
+        saveToken += 1
+        let save = saveToken
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { if save == self.saveToken { self.flushSave() } }
+    }
+
+    /// Redraws the single view after a change to the frame's edits: a quick draft at once, the
+    /// full-size render once the sliders have been still for a moment.
+    private func rerender(_ item: FrameItem) {
         editToken += 1
         startDraft()
         let token = editToken
         let frame = heroToken
         let url = item.url, id = item.id, adjust = item.adjust
-        // The full-size render waits until the sliders have been still for a moment.
+        let stamp = item.localStamp, local = localRender(for: item)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
             guard token == self.editToken, frame == self.heroToken else { return }
             self.rawQueue.async {
                 var wanted = false
                 DispatchQueue.main.sync { wanted = token == self.editToken && frame == self.heroToken }
-                guard wanted, let image = Imaging.renderRaw(url, adjust) else { return }
+                let start = CFAbsoluteTimeGetCurrent()
+                guard wanted, let image = Imaging.renderRaw(url, adjust, local: local) else { return }
+                if local != nil { Log.note("image", "\(item.name): render with local adjustments in \(Log.seconds(since: start))") }
                 DispatchQueue.main.async {
-                    self.cache(id, adjust, image)
+                    self.cache(id, adjust, stamp, image)
                     guard token == self.editToken, frame == self.heroToken else { return }
                     self.hero?.show(image, space: CGSize(width: image.width, height: image.height), newFrame: false)
+                    self.setState(0, "Raw")
                 }
             }
         }
-        pendingSave = item
-        saveToken += 1
-        let save = saveToken
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { if save == self.saveToken { self.flushSave() } }
     }
 
     /// A quick, smaller render for live feedback. One runs at a time; when it finishes and the
@@ -823,6 +860,7 @@ final class Session: ObservableObject {
         let token = editToken
         let frame = heroToken
         let url = item.url, adjust = item.adjust
+        let local = localRender(for: item)
         let size = fullSize[item.id]
         var scale: Float = 0.25
         if let size = size, size.width > 0 {
@@ -830,7 +868,7 @@ final class Session: ObservableObject {
             scale = Float(min(1, max(0.1, pixels / max(size.width, size.height))))
         }
         draftQueue.async {
-            let image = Imaging.renderRaw(url, adjust, scale: scale)
+            let image = Imaging.renderRaw(url, adjust, scale: scale, local: local)
             DispatchQueue.main.async {
                 self.draftBusy = false
                 guard frame == self.heroToken else { return }
@@ -889,6 +927,117 @@ final class Session: ObservableObject {
         }
     }
 
+    // MARK: Masks and local adjustments (a test of TrainCull as a finishing editor)
+
+    var currentMask: MaskResult? { masks.first { $0.id == selected }?.mask }
+
+    /// What a render of this frame must add: its mask with its local adjustments, when there
+    /// is something to show.
+    private func localRender(for item: FrameItem) -> LocalRender? {
+        guard let mask = masks.first(where: { $0.id == item.id })?.mask else { return nil }
+        let view = item.id == selected && compare == nil ? maskView : .photo
+        if view == .photo && item.local.isNeutral { return nil }
+        return LocalRender(mask: mask, edits: item.local, view: view, area: localArea)
+    }
+
+    /// Makes the current frame's masks at the chosen quality.
+    func makeMask() {
+        guard let item = current, !maskBusy else { return }
+        if compare != nil { endCompare() }
+        maskBusy = true
+        maskRun += 1
+        let run = maskRun
+        let tier = maskTier
+        let url = item.url, id = item.id, name = item.name
+        let known = faces[id]
+        maskStatus = "Starting…"
+        Log.note("mask", "\(name): \(tier.name) mask requested")
+        maskQueue.async {
+            let result = Result { () -> MaskResult in
+                try Masking.make(url: url, tier: tier, faces: known, progress: { text in
+                    DispatchQueue.main.async { if run == self.maskRun { self.maskStatus = "\(text)…" } }
+                }, cancelled: {
+                    var stop = false
+                    DispatchQueue.main.sync { stop = run != self.maskRun }
+                    return stop
+                })
+            }
+            MemoryMonitor.mark("making a \(tier.name) mask")
+            DispatchQueue.main.async {
+                guard run == self.maskRun else { return }
+                self.maskBusy = false
+                switch result {
+                case let .success(mask):
+                    self.masks.removeAll { $0.id == id }
+                    self.masks.append((id, mask))
+                    if self.masks.count > 2 { self.masks.removeFirst() }
+                    self.maskTick += 1
+                    item.localStamp += 1
+                    if self.selected == id {
+                        self.maskStatus = mask.summary + (Masking.blendsByChannel ? "" : " (plain blending)")
+                        if self.localArea == .skin && mask.skin == nil { self.localArea = .subject }
+                        self.refreshLocal(item)
+                    }
+                case let .failure(error):
+                    Log.note("mask", "\(name): failed: \(error)")
+                    self.maskStatus = "No mask: \(error)."
+                }
+            }
+        }
+    }
+
+    /// Redraws the current frame after its mask, view or local adjustments changed.
+    private func refreshLocal(_ item: FrameItem) {
+        guard item.id == selected, compare == nil else { return }
+        rerender(item)
+    }
+
+    func setMaskView(_ view: MaskView) {
+        guard view != maskView, let item = current else { return }
+        maskView = view
+        item.localStamp += 1
+        Log.note("mask", "view: \(view.name)")
+        refreshLocal(item)
+    }
+
+    func setLocalArea(_ area: LocalArea) {
+        guard area != localArea, let item = current else { return }
+        localArea = area
+        if maskView != .photo {
+            item.localStamp += 1
+            refreshLocal(item)
+        }
+    }
+
+    /// Changes one number of the chosen area's adjustment.
+    func setLocal(_ change: (inout LocalLayer) -> Void) {
+        guard let item = current, currentMask != nil else { return }
+        change(&local.layers[localArea.rawValue])
+        if item.local == local { return }
+        item.local = local
+        item.localStamp += 1
+        refreshLocal(item)
+    }
+
+    func resetLocal() {
+        setLocal { $0 = LocalLayer() }
+    }
+
+    func saveMaskPictures() {
+        guard let item = current, let mask = currentMask else { return }
+        let url = item.url
+        exportQueue.async {
+            do {
+                let saved = try Export.maskPictures(mask, for: url)
+                Log.note("mask", "\(item.name): saved \(saved.map { $0.lastPathComponent }.joined(separator: ", "))")
+                DispatchQueue.main.async { self.say("Saved \(saved.count) mask pictures next to the raw.") }
+            } catch {
+                Log.note("mask", "\(item.name): mask pictures not saved: \(error)")
+                DispatchQueue.main.async { self.say("The mask pictures couldn't be saved: \(error).") }
+            }
+        }
+    }
+
     // MARK: Exports
 
     /// Extracts the embedded JPEG, or exports a developed 16-bit TIFF, for some frames: one at
@@ -905,7 +1054,11 @@ final class Session: ObservableObject {
         let total = items.count
         exportStatus = "Exporting 0 / \(total)"
         let formats = self.formats
-        let jobs = items.map { (url: $0.url, name: $0.name, adjust: $0.adjust, shot: $0.info?.shot) }
+        let jobs = items.map { item -> (url: URL, name: String, adjust: [String: Float], shot: ShotInfo?, local: LocalRender?) in
+            var local = localRender(for: item)
+            if local?.edits.isNeutral == true { local = nil }
+            return (item.url, item.name, item.adjust, item.info?.shot, local)
+        }
         Log.note("export", "\(total) \(kind.noun)(s) requested")
         exportQueue.async {
             // Let any save still on its way reach the disk first.
@@ -928,7 +1081,7 @@ final class Session: ObservableObject {
                         let out: URL
                         switch kind {
                         case .jpeg: out = try Export.embeddedJpeg(job.url, formats)
-                        case .tiff: out = try Export.developedTiff(job.url, job.adjust, shot: job.shot)
+                        case .tiff: out = try Export.developedTiff(job.url, job.adjust, shot: job.shot, local: job.local)
                         }
                         saved.append(out)
                         let size = (try? out.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0

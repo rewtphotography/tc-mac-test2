@@ -76,6 +76,13 @@ public struct Gray {
         }
     }
 
+    /// This plane with each pixel replaced by the mean of the square around it.
+    public func blurred(radius: Int) -> Gray {
+        var out = self
+        PlaneMath.boxBlur(&out.v, w: w, h: h, radius: radius)
+        return out
+    }
+
     /// This plane stretched or shrunk to another size, blending between pixels.
     public func resized(w nw: Int, h nh: Int) -> Gray {
         if nw == w && nh == h { return self }

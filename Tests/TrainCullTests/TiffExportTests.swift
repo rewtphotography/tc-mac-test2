@@ -59,6 +59,111 @@ final class TiffExportTests: XCTestCase {
         XCTAssertGreaterThan(bytes[p], bytes[p + 2]) // red, not blue
     }
 
+    // MARK: Masks
+
+    /// A flat picture as 8-bit pixels, the form a raw render has.
+    private func flat(_ w: Int, _ h: Int, _ paint: (Int, Int) -> (UInt8, UInt8, UInt8)) throws -> CGImage {
+        var bytes = [UInt8](repeating: 255, count: w * h * 4)
+        for y in 0 ..< h {
+            for x in 0 ..< w {
+                let c = paint(x, y)
+                bytes[(y * w + x) * 4] = c.0; bytes[(y * w + x) * 4 + 1] = c.1; bytes[(y * w + x) * 4 + 2] = c.2
+            }
+        }
+        return try XCTUnwrap(Masking.picture(rgbx: bytes, w: w, h: h))
+    }
+
+    private func bytes(of image: CGImage) throws -> (UnsafePointer<UInt8>, CFData) {
+        let data = try XCTUnwrap(image.dataProvider?.data)
+        return (try XCTUnwrap(CFDataGetBytePtr(data)), data)
+    }
+
+    /// Colours blend channel by channel through the mask, and a local adjustment changes its
+    /// own area and nothing else. Also proves the small blending programs load on this macOS.
+    func testLocalAdjustmentChangesOnlyItsArea() throws {
+        XCTAssertTrue(Masking.blendsByChannel, "the per-channel blending program didn't load")
+        let w = 64, h = 32
+        // The mask: subject on the left half; in the right half the subject owns all of the red
+        // light, none of the green and half of the blue.
+        var shares = [UInt8](repeating: 255, count: w * h * 4), alpha = [UInt8](repeating: 0, count: w * h)
+        for y in 0 ..< h {
+            for x in 0 ..< w {
+                let left = x < w / 2
+                alpha[y * w + x] = left ? 255 : 128
+                shares[(y * w + x) * 4] = 255
+                shares[(y * w + x) * 4 + 1] = left ? 255 : 0
+                shares[(y * w + x) * 4 + 2] = left ? 255 : 128
+            }
+        }
+        let mask = MaskResult(width: w, height: h, alpha: try XCTUnwrap(Masking.picture(gray: alpha, w: w, h: h)),
+                              shares: try XCTUnwrap(Masking.picture(rgbx: shares, w: w, h: h)), skin: nil,
+                              trimap: try XCTUnwrap(Masking.picture(gray: alpha, w: w, h: h)),
+                              coarse: try XCTUnwrap(Masking.picture(gray: alpha, w: w, h: h)), tier: .fast, summary: "")
+        let extent = CGRect(x: 0, y: 0, width: w, height: h)
+        let grey = CIImage(color: CIColor(red: 0.5, green: 0.5, blue: 0.5)).cropped(to: extent)
+        let before = try XCTUnwrap(Imaging.pixels(grey, from: extent))
+        var edits = LocalEdits()
+        edits.layers[LocalArea.subject.rawValue].exposure = 1 // the subject one stop brighter
+        let lit = Masking.apply(LocalRender(mask: mask, edits: edits, view: .photo, area: .subject), to: grey, extent: extent)
+        let after = try XCTUnwrap(Imaging.pixels(lit, from: extent))
+        let (b, keepB) = try bytes(of: before), (a, keepA) = try bytes(of: after)
+        _ = (keepB, keepA)
+        let leftPixel = (h / 2) * after.bytesPerRow + (w / 4) * 4, rightPixel = (h / 2) * after.bytesPerRow + (3 * w / 4) * 4
+        // Left: all of it brighter. Right: red fully brighter, green untouched, blue in between.
+        XCTAssertGreaterThan(Int(a[leftPixel + 1]), Int(b[leftPixel + 1]) + 20)
+        XCTAssertEqual(Int(a[rightPixel]), Int(a[leftPixel]), accuracy: 2)
+        XCTAssertEqual(Int(a[rightPixel + 1]), Int(b[rightPixel + 1]), accuracy: 2)
+        XCTAssertGreaterThan(Int(a[rightPixel + 2]), Int(b[rightPixel + 2]) + 8)
+        XCTAssertLessThan(Int(a[rightPixel + 2]), Int(a[leftPixel + 2]) - 8)
+
+        // The views of the mask render too, the right way up: the mask itself is white on the left.
+        for view in MaskView.allCases {
+            let shown = Masking.apply(LocalRender(mask: mask, edits: LocalEdits(), view: view, area: .subject), to: grey, extent: extent)
+            let picture = try XCTUnwrap(Imaging.pixels(shown, from: extent), "\(view.name) view")
+            if view == .mask {
+                let (m, keep) = try bytes(of: picture)
+                _ = keep
+                XCTAssertGreaterThan(m[leftPixel], 240)
+                XCTAssertEqual(Int(m[rightPixel]), 128, accuracy: 6)
+            }
+        }
+    }
+
+    /// The whole mask pipeline on a made-up picture, without Vision: a dark shape in the top
+    /// left of a light picture, a rough mask of it, and out comes a mask the right way up.
+    func testMaskPipelineKeepsThePictureTheRightWayUp() throws {
+        let w = 400, h = 300
+        func inside(_ x: Int, _ y: Int) -> Bool { (x - 110) * (x - 110) + (y - 90) * (y - 90) < 60 * 60 }
+        let picture = try flat(w, h) { x, y in inside(x, y) ? (40, 30, 25) : (190, 200, 215) }
+        var rough = Gray(w: w / 4, h: h / 4)
+        for y in 0 ..< h / 4 { for x in 0 ..< w / 4 { rough.v[y * (w / 4) + x] = inside(x * 4 + 2, y * 4 + 2) ? 1 : 0 } }
+        rough = rough.blurred(radius: 3)
+        for tier in MatteTier.allCases {
+            let mask = try Masking.make(reference: picture, name: "test", tier: tier, faces: DetectedFaces(subjects: [], imageWidth: Double(w)),
+                                        coarse: rough, progress: { _ in }, cancelled: { false })
+            XCTAssertEqual(mask.width, w)
+            let (a, keep) = try bytes(of: mask.alpha)
+            _ = keep
+            XCTAssertEqual(a[90 * mask.alpha.bytesPerRow + 110], 255, "\(tier.name): the middle of the shape")
+            XCTAssertEqual(a[250 * mask.alpha.bytesPerRow + 330], 0, "\(tier.name): far from it")
+            // The edge of the shape is where the photo says it is, not where the rough mask put it.
+            XCTAssertGreaterThan(a[90 * mask.alpha.bytesPerRow + 110 + 55], 200, "\(tier.name): just inside the edge")
+            XCTAssertLessThan(a[90 * mask.alpha.bytesPerRow + 110 + 65], 55, "\(tier.name): just outside the edge")
+            print("MASK-CHECK \(mask.summary)")
+        }
+    }
+
+    /// Apple's first-pass masks run here without failing. A made-up picture has no person in
+    /// it, so what they return is only reported.
+    func testVisionMasksRun() throws {
+        let picture = try flat(640, 480) { x, y in (x - 320) * (x - 320) + (y - 240) * (y - 240) < 150 * 150 ? (200, 150, 120) : (60, 80, 110) }
+        let people = Masking.personMask(picture)
+        let subject = Masking.subjectMask(picture)
+        let features = Masking.featureExclusion(picture)
+        print("VISION-CHECK people: \(people.map { "\($0.w)×\($0.h)" } ?? "none"), subject: \(subject.map { "\($0.w)×\($0.h)" } ?? "none"), features: \(features == nil ? "none" : "found")")
+        if let people = people { XCTAssertEqual(Double(people.w) / Double(people.h), 640.0 / 480.0, accuracy: 0.05) }
+    }
+
     func testExportedTiffOpensInApplesReaderWithTheRightPixels() throws {
         let w = 2000, h = 1000 // wide enough to need several strips
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("traincull-test-\(UUID().uuidString).tif")

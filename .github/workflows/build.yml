@@ -43,7 +43,7 @@ jobs:
       - name: Build the app
         run: scripts/make-app.sh "${{ steps.number.outputs.value }}"
       # Start the app on a folder of made-up frames (no photos are kept in the repository),
-      # once in the single view and once side by side, and keep a picture of each.
+      # in the single view, side by side and in edit mode, and keep a picture of each.
       - name: Launch check
         run: |
           swift scripts/make-fixture.swift "$PWD/build/fixture"
@@ -57,6 +57,7 @@ jobs:
           }
           shoot launch
           shoot launch-compare -TCCompare YES
+          shoot launch-edit -TCEdit YES
           echo "---- the app's own log ----"
           cat "$HOME/Library/Logs/TrainCull/"*.log || true
           mkdir -p build/logs && cp "$HOME/Library/Logs/TrainCull/"*.log build/logs/ || true
@@ -70,6 +71,7 @@ jobs:
           path: |
             build/launch.png
             build/launch-compare.png
+            build/launch-edit.png
             build/logs
           if-no-files-found: ignore
       # A full release, not a pre-release, so that

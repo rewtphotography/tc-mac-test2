@@ -8,12 +8,21 @@ An alpha build of TrainCull for Mac (Apple silicon, macOS 15 or later).
    **Done**, then open **System Settings → Privacy & Security**, scroll down to the message
    about TrainCull and click **Open Anyway**. This is needed once for each new build.
 
-**New in this build**
+**New in this build: a masking test**
 
-- The first zoom after a new image is now a glide like the rest. It used to jump, most of all
-  with two images side by side. Stepping through frames should also feel smoother.
-- Memory is handed back sooner after each raw render and each export.
-- The log now notes any slow redraw, to show where the app still hesitates.
+This build is a test of whether TrainCull could finish a photo, not just cull it. Open **Edit**
+and scroll to **Mask (Test)** at the bottom of the controls.
+
+1. Choose **Fast**, **High** or **Max** and click **Make**. Fast is for clean edges, High is for
+   hair over more than one background colour, Max works on every strand and takes longest.
+2. **Show** changes what the large image displays: the photo, a red overlay, the mask itself, or
+   the subject cut out on black or white, which shows any halo at once.
+3. Pick **Subject**, **Background** or **Skin** and move **Exposure**, **Saturation** or **Warmth**.
+   Darkening the background behind hair is the hard test.
+4. **Save Mask Pictures** writes the mask as PNG files next to the raw, to look at closely or send.
+
+Nothing here is saved with the photo yet: masks and local adjustments last until you close the
+folder. **Export 16-bit TIFF** does include them.
 
 **Since alpha 4**
 

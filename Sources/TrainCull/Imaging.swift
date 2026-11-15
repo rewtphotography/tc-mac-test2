@@ -103,15 +103,17 @@ enum Imaging {
 
     /// Renders the raw with Apple's built-in decoder and the frame's adjustments.
     /// `scale` below 1 gives a quick smaller render for live feedback while a slider moves.
-    static func renderRaw(_ url: URL, _ values: [String: Float] = [:], scale: Float = 1) -> CGImage? {
+    /// `local` adds the frame's masked adjustments, or a way of looking at its mask.
+    static func renderRaw(_ url: URL, _ values: [String: Float] = [:], scale: Float = 1, local: LocalRender? = nil) -> CGImage? {
         autoreleasepool {
             guard let filter = CIRAWFilter(imageURL: url) else { return nil }
             if scale < 1 { filter.scaleFactor = max(scale, 0.05) }
             Adjust.apply(values, to: filter)
             guard let decoded = filter.outputImage else { return nil }
-            let out = Adjust.finish(decoded, values)
+            var out = Adjust.finish(decoded, values)
             let e = decoded.extent
             if e.isInfinite || e.isEmpty { return nil }
+            if let local = local { out = Masking.apply(local, to: out, extent: e) }
             return pixels(out, from: e)
         }
     }
@@ -146,13 +148,18 @@ enum Imaging {
 
     /// The raw developed by Apple's decoder with the frame's adjustments, not yet turned into
     /// pixels, and the rectangle it covers. Exports render it at full quality.
-    static func developed(_ url: URL, _ values: [String: Float]) -> (image: CIImage, extent: CGRect)? {
+    static func developed(_ url: URL, _ values: [String: Float], local: LocalRender? = nil) -> (image: CIImage, extent: CGRect)? {
         guard let filter = CIRAWFilter(imageURL: url) else { return nil }
         Adjust.apply(values, to: filter)
         guard let decoded = filter.outputImage else { return nil }
         let e = decoded.extent
         if e.isInfinite || e.isEmpty { return nil }
-        return (Adjust.finish(decoded, values), e)
+        var out = Adjust.finish(decoded, values)
+        if var local = local {
+            local.view = .photo // an export is always the photo, never a view of the mask
+            out = Masking.apply(local, to: out, extent: e)
+        }
+        return (out, e)
     }
 
     /// Faces and eye centres in an upright image, using Apple's Vision framework. Faces are

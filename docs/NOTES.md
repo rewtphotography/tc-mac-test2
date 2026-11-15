@@ -127,7 +127,7 @@ Bridge, Photoshop or Lightroom has it)
   folder tree, a calibration table mapping Apple's values to Camera Raw's.
 - Subject, hair and skin masks: see "Masking" below.
 
-## What is built (alpha 6)
+## What is built (alpha 7)
 
 Folder opening (button, File menu, drag and drop, recents, drives), resizable left pane,
 thumbnails with rating, label and reject marks, the large image with raw render and face
@@ -135,7 +135,7 @@ zoom with a glide, ratings and labels, edit mode with 15 of Apple's raw controls
 sidecar, Send to Photoshop, the one-line bar under the image, click-to-filter on the counts
 at the bottom left (double-click the rated count to choose stars), side-by-side compare,
 extracting the embedded JPEG, exporting a developed 16-bit TIFF, the diagnostics log and
-memory report, an app icon.
+memory report, an app icon, and the masking test (see "Masking").
 
 Checked by tests on Linux (64): raw and recipe reading, the settings line, sidecar editing,
 crash-safe saving, face-zoom maths, the TIFF writer, JPEG orientation, compare stepping,
@@ -184,11 +184,11 @@ Same folder and Mac, two and a half minutes of use:
 2. Soft-focus and closed-eyes flags from Apple's face landmarks.
 3. A Settings window (label names, editor choice), Undo after reject.
 
-## Masking (proposed, audited, not started)
+## Masking (a test build of phases 1 and 2)
 
 `docs/masking-plan.md` is a plan the owner brought in for subject, hair-edge and skin masks.
 It was written for a generic Mac raw editor, not for this app, and was audited here on
-2026-11-15. Nothing is built. Read this section before touching it.
+2026-11-15. Phases 1 and 2 are built as a test; see the end of this section.
 
 **What it would mean for the app.** TrainCull has no local adjustments, and a mask is only
 useful with them. Masked edits cannot reach Camera Raw (the handoff is one-way and Adobe's
@@ -235,11 +235,51 @@ timing in the plan's section 10. Whether Metal compute runs on the build machine
   riskiest thing to build without seeing it, and the least lean. Defer.
 - Phase 3: blocked by the rules above and by licences. Defer.
 
-**If the owner says go, start here.** One small build that saves Apple's own masks for the
-current frame (low-resolution and full-resolution, subject and person) next to the raw, as
-the TIFF export does. The owner tries it on the hard frames (curly hair, decorations) and
-sends the results. That shows how far Apple's mask already goes before anything bespoke is
-written, and what the first real gap is.
+**Built as a test (alpha 7), at the owner's request: phases 1 and 2.** The owner wants to
+see early whether TrainCull is viable as a finishing editor. It lives in **Mask (Test)** at
+the bottom of the editing pane: make a mask (Fast, High or Max), look at it (photo, red
+overlay, mask, cut out on black or white), adjust Subject, Background or Skin (exposure,
+saturation, warmth), save the mask pictures as PNG. Nothing is saved with the photo; masks
+and local adjustments last until the folder is closed. The TIFF export includes them.
+
+How it differs from the plan, and why:
+- **Processor, not graphics card.** The whole matting engine is plain Swift in
+  `Sources/TraincullCore/Matting`, run on all cores. That is what let it be tested on Linux
+  and looked at before the owner ever saw it: on a made-up scene (dark hair strands over a
+  two-colour backdrop with a bright stripe) the first-pass mask is off by 9.1% of full scale
+  across the uncertain band, Fast by 1.5%, High by 0.95%, Max by 0.78%. The closed-form
+  operator is checked against the textbook matrix entry by entry. Moving the hot loops to
+  Metal is the plan's design and the next step only if this proves viable and too slow.
+- **Works on the displayed picture, not linear light.** Masks are made from a neutral render
+  (camera white balance, Apple's defaults, none of the frame's edits), 8-bit Display P3 as
+  shown. That is what the matting literature and Vision both use, and it settles the plan's
+  open question 3 for now.
+- **No separate full-size first-pass mask.** Vision's mask goes straight to a quarter-size
+  three-way split; the plan's edge-preserving upsample is replaced by a guided upsample used
+  only where colour contrast is too low to solve for alpha.
+- **Distances by an exact transform at quarter size,** not jump flooding at full size. The
+  rays hold back a block's worth so they still never step over a certain pixel.
+- **Max keeps each tile's middle** and discards its margin, with no cross-fade. Tiles are
+  solved only for uncertain pixels and the two pixels around them, everything else held fixed.
+- **No stored subject and background colours.** In their place each edge pixel stores how
+  much of its red, green and blue light is the subject's ("shares"), worked out in linear
+  light from the colours the High tier found. Blending by shares instead of by coverage is
+  the plan's decontaminated compositing for exposure and warmth exactly, and near enough for
+  saturation, and it survives any global edit. The plan's multi-level foreground estimation
+  is not built; a per-pixel correction of the High tier's colours stands in for it.
+- **Skin is sampled automatically** from the cheeks and nose of each face, not by clicking.
+  Eyes, brows and lips are cut out from Apple's landmarks. No face, no skin mask.
+- **Masks are 8-bit and whole-frame,** not 16-bit sparse tiles. Simpler; about 165 MB a
+  frame at 33 megapixels (the last two frames' masks are kept).
+- **Blending uses two small Core Image programs written in the old kernel language,** because
+  `swift build` cannot compile Metal ones. If they fail to load, blending falls back to one
+  number per pixel and the status line says "plain blending". A Mac test checks they load.
+
+What to look for in the owner's log (`mask` lines): time per stage, megapixels of edge
+refined, tiles and steps for Max, memory after each stage. What only the owner's eyes can
+say: whether curls and strands hold up on real hair, whether darkening the background leaves
+a halo, whether the skin mask is usable. Ask for the saved mask pictures when it goes wrong;
+they can be looked at from here.
 
 ## Still to design
 

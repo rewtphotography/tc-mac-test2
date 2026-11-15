@@ -1,6 +1,7 @@
 import CoreGraphics
 import CoreImage
 import Foundation
+import ImageIO
 import TraincullCore
 
 /// The two exports: the JPEG the camera embedded in the raw, saved as it is, and the raw
@@ -59,14 +60,31 @@ enum Export {
 
     /// Develops a raw with Apple's decoder and the frame's edits and saves it as a 16-bit TIFF
     /// in ProPhoto RGB with ZIP compression.
-    static func developedTiff(_ url: URL, _ values: [String: Float], shot: ShotInfo?) throws -> URL {
-        guard let (image, extent) = Imaging.developed(url, values) else {
+    static func developedTiff(_ url: URL, _ values: [String: Float], shot: ShotInfo?, local: LocalRender? = nil) throws -> URL {
+        guard let (image, extent) = Imaging.developed(url, values, local: local) else {
             throw Failure("Apple's raw decoder can't open this file on this Mac")
         }
         let folder = url.deletingLastPathComponent()
         return try save(in: folder, base: url.deletingPathExtension().lastPathComponent, ext: "tif") {
             try writeTiff(image, extent, to: $0, shot: shot)
         }
+    }
+
+    /// Saves a mask's pictures next to the raw, for looking at or sending on: the mask itself,
+    /// the skin mask, the first-pass mask it started from and the three-way split.
+    static func maskPictures(_ mask: MaskResult, for url: URL) throws -> [URL] {
+        let folder = url.deletingLastPathComponent(), base = url.deletingPathExtension().lastPathComponent
+        var saved: [URL] = []
+        let pictures: [(String, CGImage?)] = [("mask", mask.alpha), ("skin", mask.skin), ("firstpass", mask.coarse), ("trimap", mask.trimap)]
+        for (name, picture) in pictures {
+            guard let picture = picture else { continue }
+            let data = NSMutableData()
+            guard let dest = CGImageDestinationCreateWithData(data, "public.png" as CFString, 1, nil) else { throw Failure("PNG files can't be written") }
+            CGImageDestinationAddImage(dest, picture, nil)
+            guard CGImageDestinationFinalize(dest) else { throw Failure("the \(name) picture couldn't be encoded") }
+            saved.append(try save(in: folder, base: "\(base)-\(name)", ext: "png") { try $0.write(contentsOf: data as Data) })
+        }
+        return saved
     }
 
     /// Renders `image` to 16-bit ProPhoto RGB and writes it as a TIFF. The strips are
