@@ -309,11 +309,13 @@ enum Masking {
         let body = Box(SubjectChoice.bodyBox(face: face, w: w, h: h))
         /// A box of the proxy, cut from the full-size photo.
         func crop(_ box: Box) -> CGImage? {
-            reference.cropping(to: CGRect(x: Double(box.x0) * scale, y: Double(box.y0) * scale,
-                                          width: Double(box.x1 - box.x0) * scale, height: Double(box.y1 - box.y0) * scale))
+            let x: Double = Double(box.x0) * scale, y: Double = Double(box.y0) * scale
+            let cw: Double = Double(box.x1 - box.x0) * scale, ch: Double = Double(box.y1 - box.y0) * scale
+            return reference.cropping(to: CGRect(x: x, y: y, width: cw, height: ch))
         }
-        let centre = (x: Float(face.x) + Float(face.w) / 2, y: Float(face.y) + Float(face.h) / 2)
-        let asked = SubjectSelect.points(face: face, h: h).map { SAMModel.Point(x: $0.x, y: $0.y, label: 1) }
+        let centre: (x: Float, y: Float) = (Float(face.x) + Float(face.w) / 2, Float(face.y) + Float(face.h) / 2)
+        var asked: [SAMModel.Point] = []
+        for point in SubjectSelect.points(face: face, h: h) { asked.append(SAMModel.Point(x: point.x, y: point.y, label: 1)) }
 
         // BiRefNet's shapes: the whole proxy, then a closer look at the subject's box.
         var shape: Gray?
@@ -353,8 +355,13 @@ enum Masking {
         if source == .samCrop, let close = crop(body) {
             progress("SAM close-up")
             let k = Float(close.width) / Float(body.x1 - body.x0)
-            let inside = asked.map { SAMModel.Point(x: ($0.x - Float(body.x0)) * k, y: ($0.y - Float(body.y0)) * k, label: 1) }
-                .filter { $0.x >= 0 && $0.y >= 0 && $0.x < Float(close.width) && $0.y < Float(close.height) }
+            let closeW = Float(close.width), closeH = Float(close.height)
+            var inside: [SAMModel.Point] = []
+            for point in asked {
+                let x: Float = (point.x - Float(body.x0)) * k
+                let y: Float = (point.y - Float(body.y0)) * k
+                if x >= 0, y >= 0, x < closeW, y < closeH { inside.append(SAMModel.Point(x: x, y: y, label: 1)) }
+            }
             let again = try SAMModel.shared.embed(close)
             let all = Box(x0: 0, y0: 0, x1: close.width, y1: close.height)
             let closeAnswers = try SAMModel.shared.decode(again, points: inside, box: all)

@@ -121,21 +121,27 @@ def convert(out, side=SIDE):
     model = AutoModelForImageSegmentation.from_pretrained("ZhengPeng7/BiRefNet_HR", trust_remote_code=True).eval().float()
     net = BaseNet(model).eval()
     x = picture(side)
-    with torch.no_grad():
-        original = net(x)
+    import gc
     # Swap the operation in the module that defines the model, then check nothing changed.
+    # (Measured on 2026-11-15: largest difference 6.6e-06, the same pixels selected. Where
+    # memory is short the two full-size runs can be skipped with SKIP_PARITY=1; the
+    # replacement itself is still checked against torchvision's on small inputs.)
     module = sys.modules[type(model).__module__]
     assert hasattr(module, "deform_conv2d"), "BiRefNet's code no longer uses deform_conv2d by that name"
-    module.deform_conv2d = deform_conv2d_gs
-    with torch.no_grad():
-        patched = net(x)
-    diff = float((original - patched).abs().max())
-    a, b = original >= 0.5, patched >= 0.5
-    iou = float((a & b).sum()) / max(float((a | b).sum()), 1.0)
-    print(f"original against patched: largest difference {diff:.2e}, agreement {iou:.5f}, subject area {float(a.float().mean()):.3f}")
-    assert diff < 1e-3 and iou > 0.999, "the patched model does not match the original"
-    del original, patched
-    import gc
+    if os.environ.get("SKIP_PARITY"):
+        module.deform_conv2d = deform_conv2d_gs
+    else:
+        with torch.no_grad():
+            original = net(x)
+        module.deform_conv2d = deform_conv2d_gs
+        with torch.no_grad():
+            patched = net(x)
+        diff = float((original - patched).abs().max())
+        a, b = original >= 0.5, patched >= 0.5
+        iou = float((a & b).sum()) / max(float((a | b).sum()), 1.0)
+        print(f"original against patched: largest difference {diff:.2e}, agreement {iou:.5f}, subject area {float(a.float().mean()):.3f}")
+        assert diff < 1e-3 and iou > 0.999, "the patched model does not match the original"
+        del original, patched
     gc.collect()
     print("tracing", flush=True)
     with torch.no_grad():
