@@ -125,6 +125,7 @@ Bridge, Photoshop or Lightroom has it)
 - Subject stacks (grouping a shoot by person), true-burst stacking, companion app
   integrations, transfer and drive tools, controller support, batch rename, keywords, a
   folder tree, a calibration table mapping Apple's values to Camera Raw's.
+- Subject, hair and skin masks: see "Masking" below.
 
 ## What is built (alpha 6)
 
@@ -182,6 +183,63 @@ Same folder and Mac, two and a half minutes of use:
 1. Fix whatever the owner's use of alpha 6 shows; read the log and memory figures they send.
 2. Soft-focus and closed-eyes flags from Apple's face landmarks.
 3. A Settings window (label names, editor choice), Undo after reject.
+
+## Masking (proposed, audited, not started)
+
+`docs/masking-plan.md` is a plan the owner brought in for subject, hair-edge and skin masks.
+It was written for a generic Mac raw editor, not for this app, and was audited here on
+2026-11-15. Nothing is built. Read this section before touching it.
+
+**What it would mean for the app.** TrainCull has no local adjustments, and a mask is only
+useful with them. Masked edits cannot reach Camera Raw (the handoff is one-way and Adobe's
+masks are their own format), so they would exist only in TrainCull's own render and its TIFF
+export. Building this turns TrainCull from the step before Camera Raw into a finishing
+editor. That is the owner's decision and comes before any code.
+
+**Checked and sound.**
+- The maths: the fast alpha solve, the matrix-free matting Laplacian and its diagonal, and
+  the foreground/background system all work out as written.
+- Memory figures (482 MB for a 61 MP half-float decode, 120 MB for a full 16-bit mask).
+- Vision: `generateMask(forInstances:)` is the low-resolution accessor; `instanceMask` is a
+  label map, not a soft mask. `CIEdgePreserveUpsample` takes the guide as `inputImage` and
+  the small image as `smallImage`, as the plan has it. `boostAmount = 0` is the linear decode.
+- The macOS 27 items are real (tap-to-segment with include and exclude points, Core AI as
+  Core ML's successor, SAM 3 export recipes). Apple's documentation names the initialiser
+  `init(seedPoint:)`, not `init(seed:)`. None of it is needed: the owner is on macOS 15.
+
+**Not checked.** Whether Vision's low-resolution mask is soft. The pymatting defaults. Every
+timing in the plan's section 10. Whether Metal compute runs on the build machine.
+
+**Where it collides with this project.**
+- The app never uses the network and the owner has no Apple Developer account. Phase 3
+  (downloaded models, Background Assets) is out as written; a model would have to ship
+  inside the download.
+- `swift build` does not compile Metal shaders and has nowhere to put the Core Image kernel
+  flags. They would be compiled by `scripts/make-app.sh` on the build machine, or the
+  compute kernels compiled from source when the app starts.
+- Quality can only be judged by eye on real photos, which are never committed and which
+  cannot be seen from here. The plan's test harness (Python, ground-truth masks) assumes a
+  developer at a terminal. Tuning through build, download, try, report would be slow.
+- The plan's cameras are a Nikon Z7 and a Sony a7CR. Only Sony ARW has a recipe today.
+- "Native first" and "lean": the plan never measures what Apple already gives. Vision's own
+  full-resolution mask (`generateScaledMaskForImage`) is the thing to beat, and may be most
+  of the value.
+
+**Verdict by phase.**
+- Phase 1 (Vision mask, edge-preserving upsample, trimap, fast alpha, guided filter, skin by
+  sampled colour): viable, and in keeping with the app. About as much work as alphas 5 and 6
+  together, plus the local-adjustment feature it serves, which is the larger half.
+- Phase 2 High tier: viable, several times Phase 1, and blind to verify. Only if Phase 1
+  visibly fails on hair over decorations.
+- Phase 2 Max tier (closed-form matting on the graphics card): technically sound, the
+  riskiest thing to build without seeing it, and the least lean. Defer.
+- Phase 3: blocked by the rules above and by licences. Defer.
+
+**If the owner says go, start here.** One small build that saves Apple's own masks for the
+current frame (low-resolution and full-resolution, subject and person) next to the raw, as
+the TIFF export does. The owner tries it on the hard frames (curly hair, decorations) and
+sends the results. That shows how far Apple's mask already goes before anything bespoke is
+written, and what the first real gap is.
 
 ## Still to design
 
