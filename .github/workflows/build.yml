@@ -44,9 +44,15 @@ jobs:
         env:
           SKIP_PARITY: "1"
         run: |
+          # Make room first: tools this job never uses take most of the disk.
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost || true
+          df -h / /mnt || true
           sudo swapoff -a || true
-          sudo fallocate -l 20G /mnt/traincull-swap || sudo dd if=/dev/zero of=/mnt/traincull-swap bs=1M count=20480
-          sudo chmod 600 /mnt/traincull-swap && sudo mkswap /mnt/traincull-swap && sudo swapon /mnt/traincull-swap
+          SPARE=$(df --output=avail -BG / | tail -1 | tr -dc 0-9)
+          SWAP=$(( SPARE - 12 )); [ "$SWAP" -gt 16 ] && SWAP=16
+          echo "spare disk ${SPARE}G, swap ${SWAP}G"
+          sudo fallocate -l "${SWAP}G" /traincull-swap
+          sudo chmod 600 /traincull-swap && sudo mkswap /traincull-swap && sudo swapon /traincull-swap
           free -g
           pip install torch==2.15.0 torchvision --index-url https://download.pytorch.org/whl/cpu
           pip install transformers==5.23.0 timm==1.0.31 kornia==0.9.1 einops==0.8.2 coremltools==9.0
@@ -76,8 +82,8 @@ jobs:
         with:
           path: build-models
           key: models-${{ hashFiles('scripts/fetch-models.sh', 'tools/convert_birefnet.py') }}
+      # Fetched every time: the models kept from an earlier build may be without it.
       - name: BiRefNet from the Linux job
-        if: steps.models.outputs.cache-hit != 'true'
         continue-on-error: true
         uses: actions/download-artifact@v4
         with:
