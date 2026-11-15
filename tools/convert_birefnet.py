@@ -1,11 +1,11 @@
-"""Converts BiRefNet_HR to Core ML for TrainCull (docs/specs/masking-spec-v2.md, section 3.2).
+"""Converts BiRefNet_HR to Core ML for TrainCull (docs/specs/masking-spec-v3.md, section 2.1).
 
 BiRefNet uses deformable convolution, which Core ML has no operation for. It is replaced
 here by the same arithmetic written with bilinear resampling, which Core ML does have, and
 the replacement is checked against the original before anything is converted.
 
   convert_birefnet.py check                      the replacement against torchvision's own
-  convert_birefnet.py convert <out.mlpackage>    parity on the real model, then the conversion
+  convert_birefnet.py convert <out.mlpackage> [side]   parity on the real model, then the conversion
 
 Runs on Linux or a Mac with torch, torchvision, transformers and coremltools. Nothing from
 here ships in the app except the converted model.
@@ -16,7 +16,10 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-SIDE = 2048
+# The side of the square the model sees. 1024 since masking spec v3: on the owner's photos it
+# selects the same subject as 2048 (the two agree to 99.2-99.5%), each pass is about five
+# times quicker and needs about a quarter of the memory; detail comes from close-ups instead.
+SIDE = 1024
 
 
 def deform_conv2d_gs(input, offset, weight, bias=None, stride=(1, 1), padding=(0, 0), dilation=(1, 1), mask=None):
@@ -123,7 +126,8 @@ def convert(out, side=SIDE):
     x = picture(side)
     import gc
     # Swap the operation in the module that defines the model, then check nothing changed.
-    # (Measured on 2026-11-15: largest difference 6.6e-06, the same pixels selected. Where
+    # (Measured on 2026-11-15: largest difference 6.6e-06 at 2048 and 3.0e-06 at 1024, the
+    # same pixels selected both times. Where
     # memory is short the two full-size runs can be skipped with SKIP_PARITY=1; the
     # replacement itself is still checked against torchvision's on small inputs.)
     module = sys.modules[type(model).__module__]

@@ -127,7 +127,7 @@ Bridge, Photoshop or Lightroom has it)
   folder tree, a calibration table mapping Apple's values to Camera Raw's.
 - Subject, hair and skin masks: see "Masking" below.
 
-## What is built (alpha 11)
+## What is built (alpha 12)
 
 Folder opening (button, File menu, drag and drop, recents, drives), resizable left pane,
 thumbnails with rating, label and reject marks, the large image with raw render and face
@@ -137,7 +137,7 @@ at the bottom left (double-click the rated count to choose stars), side-by-side 
 extracting the embedded JPEG, exporting a developed 16-bit TIFF, the diagnostics log and
 memory report, an app icon, and the masking test (see "Masking").
 
-Checked by tests on Linux (64): raw and recipe reading, the settings line, sidecar editing,
+Checked by tests on Linux (91): raw and recipe reading, the settings line, sidecar editing,
 crash-safe saving, face-zoom maths, the TIFF writer, JPEG orientation, compare stepping,
 memory figures. Checked by a test on the Mac build: an exported TIFF opens in Apple's reader
 with the right pixels. Checked by the automated build's screenshots (made-up frames): the
@@ -180,10 +180,12 @@ Same folder and Mac, two and a half minutes of use:
 
 ## Next, in order
 
-1. The masking bake-off: once the owner has exported debug bundles and painted reference
-   masks, compare subject models here and report before integrating any (see "Masking spec v2").
-2. Soft-focus and closed-eyes flags from Apple's face landmarks.
-3. A Settings window (label names, editor choice), Undo after reject.
+1. The owner tries alpha 12 against the spec v3 test plan and sends logs: memory for each
+   model call, the close-up lines, the edge-quality lines, and how hard edges look in Off.
+2. What spec v3 left for the next phase (see "Masking spec v3"): growing a close-up along a
+   prop, the attached-objects pass, the box tools, the people picker.
+3. Soft-focus and closed-eyes flags from Apple's face landmarks.
+4. A Settings window (label names, editor choice), Undo after reject.
 
 ## Masking (a test build of phases 1 and 2)
 
@@ -282,7 +284,10 @@ say: whether curls and strands hold up on real hair, whether darkening the backg
 a halo, whether the skin mask is usable. Ask for the saved mask pictures when it goes wrong;
 they can be looked at from here.
 
-## Masking spec v2 and the logging recommendations (in progress)
+## Masking spec v2 and the logging recommendations (superseded by spec v3)
+
+**This section is the record of alphas 8 to 11.** Spec v3 (further down) replaced it: SAM and
+candidates B, B2 and C are no longer in the app, and the model now runs at 1024.
 
 After trying alpha 7 the owner brought two more documents, written by another session from
 their alpha 7 logs and screenshots (which were not seen here): `docs/specs/masking-spec-v2.md`
@@ -396,9 +401,8 @@ photo inside the app.
 **How the models get into the build.** GitHub's standard Linux machine for a private
 repository has about 7 GB of memory and the conversion needs more, so the job first deletes
 tools it doesn't use and makes swap space on the disk; it then takes eight to nine minutes.
-The result is kept between builds, keyed on `tools/convert_birefnet.py`. The check that
-runs BiRefNet at full size adds two minutes to every Mac build; drop it from the workflow
-once the conversion is trusted.
+The result is kept between builds, keyed on `tools/convert_birefnet.py`. Since spec v3 the
+model is converted at 1024 and its check is one of the ordinary Mac tests.
 
 **Where spec v2 collides with this project. To settle before step 3:**
 - It has models "downloaded on demand, never bundled". The app never uses the network and
@@ -414,6 +418,93 @@ once the conversion is trusted.
 - It expects masks as sparse 16-bit tiles and work on the graphics card. Still whole-frame
   8-bit on the processor, as in alpha 7.
 
+## Masking spec v3 (alpha 12)
+
+`docs/specs/masking-spec-v3.md`, written by another session from the owner's alpha 11
+testing: BiRefNet picks the right subject, but hard edges (boots on asphalt, jeans in front
+of a blue costume) had a speckled halo, the close-up pass never ran, BiRefNet held 8 to 9 GB,
+and changing the tier ran it again.
+
+**Measured here first, on the owner's eight bundles (photos stay out of the repository):**
+- BiRefNet at **1024** selects the same subject as at 2048: the two masks agree to
+  99.2–99.5%, agreement with Photoshop is 0.992 median either way, and a pass takes about a
+  fifth of the time. Its edge is softer (3.4 against 2.3 proxy pixels); close-ups bring
+  that back to 2.9 even when cut from the proxy.
+- **Squash beats letterbox** for the square input on these 2:3 frames (edge agreement 0.968
+  against 0.958, and a softer edge with letterbox). Squash stays. (Spec 12.1, answered.)
+- The spec's sharpness rule (relative to the face, scaled by face size) keeps and drops
+  exactly the same pieces as the old rule on all eight.
+- The new edge engine run on three of the proxies: halo away from hair 0.009, 0.016 and
+  0.028 (the spec's limit is 0.05); the boots and jeans edges are clean in Off, and High
+  still brings the strands back in the hair zone.
+
+**Adopted and built:**
+- **One model, at 1024, for everything** (2.2, 4.5): the whole frame, then square close-up
+  tiles laid over the subject's box, each cut from the full-size photo. Tiles are as large
+  as the box's shorter side, between 384 and 1152 proxy pixels, a quarter overlapping, at
+  most eight; a tile with no edge in it is skipped. Their answers go onto a mask kept at
+  half the photo's size and may only change it within 0.05 face heights + 6 px of the
+  existing edge, so a close-up sharpens an edge and never adds a region.
+- **The close-up bug** (3.2): the old box was the union with a roomy body box, which is why
+  it was always "most of the frame". The box is now the kept mask's own bounds plus 10%.
+  Skipped only over 80% of the frame, by area; the log gives the size, percentage and decision.
+- **Off / Fast / High / Max** (5). Off is the first-pass edge scaled up, steepened a little
+  where it is in focus and not hair, and snapped to the photo's brightness edge where the
+  photo has one. Colour matting runs **only in the hair zone**. With no face there is no
+  hair zone to go by, and the whole edge is treated as one (so the tiers still do something
+  on a photo of a thing).
+- **Adaptive band** (5): a crisp first-pass edge gets a band one to two quarter-size pixels
+  wide; the full band is kept around edges wider than four.
+- **Guards** (5): where the first pass was sure and the colours either side are not distinct
+  (contrast confidence ≤ 0.6), refinement cannot move it.
+- **Sharpness** (6): thresholds relative to the primary face's eye band; strictness from
+  face height (1.0 at ≤ 5% of the frame to 0.2 at ≥ 20%) times **Focus strictness** (Loose
+  0.6, Moderate 1.0, Strict 1.4) in the panel. The piece with the face is never cut.
+- **Body pose** (4.1, 7): Apple's detector on the proxy, matched to the primary face; mask
+  pieces along the subject's arms and legs (0.35 face heights either side) are kept however
+  soft. Joints and confidences are logged. Another person's joints inside the mask raise an
+  `OTHER-PERSON?` warning.
+- **Model lifecycle** (2.3): made ready when Edit mode is entered, kept while it lasts,
+  let go on leaving it and when macOS reports memory pressure. One call at a time.
+- **Caching** (9): what is known about a photo's subject is kept for the last three photos,
+  and the edge engine for the last one, so changing the tier only redoes the hair. Remake
+  starts from scratch. Neutral renders are kept for three photos. A tier change or Remake
+  while a job runs takes that job's place.
+- **Shown as it comes** (1): the Off mask appears first, then the hair tier.
+- **Logging** (10): each model call (size, time, memory before / peak / after, processors),
+  the close-up decision, poses, one line per mask piece, and halo / erosion in a ring 3 to
+  10 px either side of the snapped edge, split hair and elsewhere (`HALO?` over 0.05).
+- **Views**: **Background −3 EV**, and **Zones (debug)**: hair zone blue, snapped edge
+  green, matted edge pink, tiles yellow, subject box orange, poses white, face cyan.
+- **Debug bundle** (10): `m0_birefnet.png`, `m0_final.png`, `final_alpha.png`,
+  `sharpness.png`, `pose.json`, `regions.json`.
+- **Removed**: SAM and candidates B, B2, C, with their models (the download drops by about
+  330 MB). Vision's masks stay behind **Debug → Legacy Vision mask**. The build no longer
+  fetches anything except BiRefNet's weights in the conversion job.
+- **Debug → Run model on**: CPU + GPU (default), CPU + Neural Engine, All (2.2 item 2).
+
+**Changed from the spec, and why:**
+- 3.2 says one close-up of the union box merged with a 24 px feather. Tiles merged near the
+  edge instead: one squashed crop of a tall person gains little, tiles keep the detail, and
+  the near-edge rule is what kept the experiment from inventing regions.
+- 4.2 (hand and feet crops): not separate passes. The tiles already reach the mask's own
+  resolution on full-length shots (about half the photo's detail on `_DSC7451`), which is
+  what the feet crop was for. Revisit if the logs show hands or feet still soft.
+- 5 says a guided-filter snap of radius ~4. A plain guided filter blurs the edge wherever
+  the photo shows none (that was the old halo). Here the snap (radius 6, twice) is applied
+  only as far as brightness explains the mask locally; elsewhere the model's edge stands.
+- 6.3 "drop disconnected components if softer than…": pieces further than 1% of the long
+  edge from the subject are still dropped outright, sharp or not, as in alpha 11. Read
+  literally the spec would keep a sharp stranger across the frame.
+- 13 has the model downloaded on first use. **It still ships inside the download**: the app
+  never uses the network. Flagged to the owner twice; no objection so far.
+
+**Left for the next phase:** crop growth along props (4.3), the attached in-focus objects
+pass (4.4), box add / subtract and the people picker (8), removing another person from the
+primary piece (6.3, 7: only warned about), the sharpness and kept/dropped overlays, the
+50 ms drag target (9), and the checks that need the owner's Mac: memory per pass against
+3 GB, the time budget, the processors comparison, pose on heavy costumes.
+
 ## Still to design
 
 The owner will share screenshots of how they use Bridge. Until then these are open: where
@@ -422,6 +513,16 @@ shown, how several frames are selected for the editor, the font, the overall loo
 
 ## Known caveats
 
+- Masking keeps more in memory than before while a folder is open: three neutral renders
+  (131 MB each at 33 megapixels), and for the last photo masked the edge engine with its
+  own copy of the photo (roughly 300 to 400 MB). All of it is let go when another folder is
+  opened or macOS reports memory pressure.
+- The hair zone is a box around each face (2.6 face widths by 3 face heights). Long hair
+  that falls below it gets the Off edge, not strand matting. The Zones view shows the box.
+- A subject filling more than 80% of the frame gets no close-ups, so its edge comes from
+  the whole-frame pass alone (half the detail alpha 11 had there).
+- Leaving Edit mode unloads the model; entering it again loads it in the background, a few
+  seconds during which Make waits.
 - Edits in Camera Raw's fields are uncalibrated: Photoshop opens a photo close to, not
   identical to, what TrainCull showed. Whether Camera Raw honours a sidecar holding only
   exposure, temperature and tint is untested.

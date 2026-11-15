@@ -146,7 +146,8 @@ final class TiffExportTests: XCTestCase {
         let picture = try flat(w, h) { x, y in inside(x, y) ? (40, 30, 25) : (190, 200, 215) }
         var rough = Gray(w: w / 4, h: h / 4)
         for y in 0 ..< h / 4 { for x in 0 ..< w / 4 { rough.v[y * (w / 4) + x] = inside(x * 4 + 2, y * 4 + 2) ? 1 : 0 } }
-        rough = rough.blurred(radius: 3)
+        // About as soft as a model's edge is once enlarged.
+        rough = rough.blurred(radius: 1)
         for tier in MatteTier.allCases {
             let mask = try Masking.make(reference: picture, name: "test", tier: tier, faces: DetectedFaces(subjects: [], imageWidth: Double(w)),
                                         coarse: rough, progress: { _ in }, cancelled: { false })
@@ -158,7 +159,9 @@ final class TiffExportTests: XCTestCase {
             // The edge of the shape is where the photo says it is, not where the rough mask put it.
             XCTAssertGreaterThan(a[90 * mask.alpha.bytesPerRow + 110 + 55], 200, "\(tier.name): just inside the edge")
             XCTAssertLessThan(a[90 * mask.alpha.bytesPerRow + 110 + 65], 55, "\(tier.name): just outside the edge")
-            print("MASK-CHECK \(mask.summary)")
+            XCTAssertEqual(mask.tier, tier)
+            XCTAssertNotNil(mask.debug, "\(tier.name): the debug overlay")
+            print("MASK-CHECK \(mask.summary) · \(mask.edge.summary)")
         }
     }
 
@@ -183,48 +186,18 @@ final class TiffExportTests: XCTestCase {
         print("METER-CHECK \(measured.memory) | \(measured.load)")
     }
 
-    /// SAM, end to end, when its models are in the build: a plain disc on a plain background,
-    /// asked about with one point in its middle, comes back as the disc. This checks the three
-    /// Core ML models fit together and that points land where they are meant to.
-    func testSAMFindsWhatAPointIsOn() throws {
-        try XCTSkipUnless(BundledModels.hasSAM, "no SAM models in this build")
-        let w = 600, h = 400
-        func inside(_ x: Int, _ y: Int) -> Bool { (x - 420) * (x - 420) + (y - 150) * (y - 150) < 90 * 90 }
-        let picture = try flat(w, h) { x, y in inside(x, y) ? (200, 60, 50) : (40, 90, 60) }
-        let taken = try SAMModel.shared.embed(picture)
-        let answers = try SAMModel.shared.decode(taken, points: [SAMModel.Point(x: 420, y: 150, label: 1)])
-        XCTAssertEqual(answers.count, 3)
-        let best = try XCTUnwrap(SAMModel.shared.best(answers, containing: (420, 150), in: taken, w: w, h: h))
-        var both = 0, either = 0
-        for y in 0 ..< h {
-            for x in 0 ..< w {
-                let a = best.mask.v[y * w + x] >= 0.5, b = inside(x, y)
-                if a && b { both += 1 }
-                if a || b { either += 1 }
-            }
-        }
-        print("SAM-CHECK disc IoU \(Double(both) / Double(max(either, 1))) · SAM's own score \(best.score)")
-        XCTAssertGreaterThan(Double(both) / Double(max(either, 1)), 0.85)
-
-        // The same through a box alone, off-centre, to check both axes of the coordinates.
-        let boxed = try SAMModel.shared.decode(taken, points: [], box: Box(x0: 320, y0: 50, x1: 520, y1: 250))
-        let pick = try XCTUnwrap(SAMModel.shared.best(boxed, containing: (420, 150), in: taken, w: w, h: h))
-        XCTAssertGreaterThanOrEqual(pick.mask.at(420, 150), 0.5)
-        XCTAssertLessThan(pick.mask.at(100, 300), 0.5)
-    }
-
-    /// BiRefNet, converted for Core ML, still finds the thing in a picture. Only run when asked
-    /// (TRAINCULL_HEAVY_MODELS): at 2048 × 2048 it is slow and memory-hungry on a build machine.
+    /// BiRefNet, converted for Core ML, still finds the thing in a picture.
     func testBiRefNetFindsTheSubject() throws {
         try XCTSkipUnless(BundledModels.hasBiRefNet, "no BiRefNet model in this build")
-        try XCTSkipUnless(ProcessInfo.processInfo.environment["TRAINCULL_HEAVY_MODELS"] != nil, "not asked to run the heavy model")
         let w = 900, h = 600
         func inside(_ x: Int, _ y: Int) -> Bool { (x - 500) * (x - 500) + (y - 270) * (y - 270) < 160 * 160 }
         let picture = try flat(w, h) { x, y in
             inside(x, y) ? (UInt8(200 + (x % 24 < 12 ? 20 : 0)), 120, 50) : (UInt8(50 + x / 9), UInt8(80 + y / 10), 120)
         }
         let start = CFAbsoluteTimeGetCurrent()
-        let mask = try BiRefNetModel.shared.segment(picture).resized(w: w, h: h)
+        let answer = try BiRefNetModel.shared.segment(picture, what: "test disc")
+        XCTAssertEqual(answer.w, BiRefNetModel.shared.inputSide)
+        let mask = answer.resized(w: w, h: h)
         var both = 0, either = 0
         for y in 0 ..< h {
             for x in 0 ..< w {
@@ -233,8 +206,71 @@ final class TiffExportTests: XCTestCase {
                 if a || b { either += 1 }
             }
         }
-        print("BIREFNET-CHECK disc IoU \(Double(both) / Double(max(either, 1))) in \(CFAbsoluteTimeGetCurrent() - start) s")
+        print("BIREFNET-CHECK disc IoU \(Double(both) / Double(max(either, 1))) at \(BiRefNetModel.shared.inputSide)² in \(CFAbsoluteTimeGetCurrent() - start) s (the first call, loading included)")
         XCTAssertGreaterThan(Double(both) / Double(max(either, 1)), 0.8)
+        let warm = CFAbsoluteTimeGetCurrent()
+        _ = try BiRefNetModel.shared.segment(picture, what: "test disc, warm")
+        print("BIREFNET-CHECK warm call \(CFAbsoluteTimeGetCurrent() - warm) s · memory now \(MemoryStats.plain(MemoryMonitor.footprint()))")
+    }
+
+    /// The whole BiRefNet pipeline on a made-up picture, when the model is in the build: the
+    /// whole frame, selection without a face, a close-up cut from the picture, the snapped
+    /// edge, the hair tier, the debug bundle. Then again from what was kept, without the model.
+    func testBiRefNetPipelineEndToEnd() throws {
+        try XCTSkipUnless(BundledModels.hasBiRefNet, "no BiRefNet model in this build")
+        let w = 1800, h = 1200
+        func inside(_ x: Int, _ y: Int) -> Bool { (x - 1000) * (x - 1000) + (y - 540) * (y - 540) < 300 * 300 }
+        let picture = try flat(w, h) { x, y in
+            inside(x, y) ? (UInt8(200 + (x % 24 < 12 ? 20 : 0)), 120, 50) : (UInt8(50 + x / 18), UInt8(80 + y / 20), 120)
+        }
+        let none = DetectedFaces(subjects: [], imageWidth: Double(w))
+        let key = "test|\(UUID().uuidString)"
+        let before = BiRefNetModel.shared.calls
+        var firsts = 0
+        let mask = try Masking.make(reference: picture, name: "pipeline", key: key, tier: .high, faces: none, subject: .birefnet,
+                                    progress: { _ in }, partial: { _ in firsts += 1 }, cancelled: { false })
+        let calls = BiRefNetModel.shared.calls - before
+        XCTAssertGreaterThanOrEqual(calls, 2, "the whole frame and at least one close-up")
+        XCTAssertEqual(firsts, 1, "the Off mask is handed over first")
+        let (a, keep) = try bytes(of: mask.alpha)
+        _ = keep
+        let row = 540 * mask.alpha.bytesPerRow
+        XCTAssertEqual(a[row + 1000], 255, "the middle of the disc")
+        XCTAssertEqual(a[100 * mask.alpha.bytesPerRow + 100], 0, "far from it")
+        XCTAssertGreaterThan(a[row + 1000 + 290], 200, "just inside the disc's edge")
+        XCTAssertLessThan(a[row + 1000 + 310], 55, "just outside it")
+        XCTAssertNotNil(mask.debug)
+        print("PIPELINE-CHECK \(mask.summary) · model calls \(calls) · \(mask.edge.summary) · α across the edge "
+            + "\(stride(from: -6, through: 6, by: 2).map { Int(a[row + 1300 + $0]) })")
+
+        // Another tier: from what is kept, the model is not run again.
+        let again = BiRefNetModel.shared.calls
+        let off = try Masking.make(reference: picture, name: "pipeline", key: key, tier: .off, faces: none, subject: .birefnet,
+                                   progress: { _ in }, cancelled: { false })
+        XCTAssertEqual(BiRefNetModel.shared.calls, again, "changing the tier doesn't run the model")
+        XCTAssertEqual(off.tier, .off)
+
+        // The debug bundle, from the same kept base.
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("traincull-bundle-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        try Masking.writeBundle(reference: picture, name: "pipeline", key: key, into: folder, faces: none, subject: .birefnet, mask: off)
+        for file in ["proxy.png", "faces.json", "m0_birefnet.png", "m0_final.png", "final_alpha.png", "sharpness.png", "pose.json", "regions.json", "README.txt"] {
+            XCTAssertTrue(FileManager.default.fileExists(atPath: folder.appendingPathComponent(file).path), file)
+        }
+        XCTAssertEqual(BiRefNetModel.shared.calls, again, "nor does the bundle")
+        Masking.forgetAll("test")
+        BiRefNetModel.shared.unload("test")
+        XCTAssertFalse(BiRefNetModel.shared.isLoaded)
+    }
+
+    /// Apple's body-pose detector runs here without failing. A made-up picture has no person
+    /// in it, so what it returns is only reported.
+    func testBodyPoseRuns() throws {
+        let picture = try flat(640, 480) { x, y in (x - 320) * (x - 320) + (y - 240) * (y - 240) < 150 * 150 ? (200, 150, 120) : (60, 80, 110) }
+        let poses = Masking.bodyPoses(picture)
+        print("POSE-CHECK \(poses.count) pose(s) in a picture with no person")
+        XCTAssertLessThanOrEqual(poses.count, 1)
     }
 
     /// Apple's first-pass masks run here without failing. A made-up picture has no person in

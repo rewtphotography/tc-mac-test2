@@ -1,7 +1,12 @@
 import Foundation
 
-/// How far a mask's edge is refined. Each tier includes the ones before it.
+/// How far a mask's edge is refined. Each tier includes the ones before it. Off is the edge
+/// of the first-pass mask, snapped to the photo; the others add colour matting, and only in
+/// the hair zone (masking spec v3, section 5).
 public enum MatteTier: Int, CaseIterable {
+    /// No colour matting: the first-pass mask, scaled up and snapped to the photo's edges.
+    /// The reference every other tier is judged against.
+    case off
     /// One colour for the subject and one for the background near each pixel. Quick; right for
     /// clean edges such as hair on a plain backdrop.
     case fast
@@ -13,6 +18,7 @@ public enum MatteTier: Int, CaseIterable {
 
     public var name: String {
         switch self {
+        case .off: return "Off"
         case .fast: return "Fast"
         case .high: return "High"
         case .max: return "Max"
@@ -54,6 +60,30 @@ public struct MatteSettings {
     /// subject is pulled in, and how far the certain background is pushed out.
     public var bandIn: Float = 0.02
     public var bandOut: Float = 0.06
+    /// Where the first-pass mask's edge is crisp, the uncertain band is only this many
+    /// quarter-size pixels wide on each side; the full band is kept for edges that are
+    /// genuinely soft (hair). An edge counts as soft when it is wider than `softEdge`.
+    public var adaptiveBand = true
+    public var crispIn = 1
+    public var crispOut = 2
+    public var softEdge: Float = 4
+    /// Colour matting runs in the hair zone only. With no face there is no hair zone to go
+    /// by, and the whole edge is treated as one.
+    public var hairOnly = true
+    /// Outside the hair zone and in focus, the scaled-up edge is steepened by this much
+    /// around its middle: a model's edge, enlarged, is wider than the real one.
+    public var steepen: Float = 2
+    /// The snap to the photo is trusted where the photo's brightness explains the mask this
+    /// well (the squared correlation within a small window); below that the model's edge stands.
+    public var snapLow: Float = 0.3
+    public var snapHigh: Float = 0.7
+    /// The snap looks this many pixels either side, and is done this many times over: each
+    /// pass pulls a soft edge further onto the photo's.
+    public var snapRadius = 6
+    public var snapPasses = 2
+    /// Where the first-pass mask was sure and the colours either side are less distinct
+    /// than this (0 to 1), refinement may not change it (spec v3, section 5, "Guards").
+    public var guardContrast: Float = 0.6
 
     public init() {}
 }
@@ -80,6 +110,30 @@ public struct MatteOutput {
     public var log: [String]
     /// Things that look wrong, found by the checks that run on every mask ("SEAM?", "GLOW?").
     public var warnings: [String] = []
+    /// At the trimap's size: how far each part is in the hair zone, 0 to 255.
+    public var hair: [UInt8] = []
+    /// At the trimap's size: 1 where the edge was snapped to the photo, 2 where colour
+    /// matting ran as well, 0 elsewhere.
+    public var zones: [UInt8] = []
+    /// Mean alpha just outside the snapped edge (halo) and mean 1 − alpha just inside it
+    /// (erosion), in the hair zone and elsewhere; nil where there was nothing to measure.
+    public var edgeQuality = EdgeQuality()
+}
+
+/// How clean a finished edge is, measured in a ring 3 to 10 pixels either side of the
+/// snapped first-pass edge (masking spec v3, section 10).
+public struct EdgeQuality: Equatable {
+    public var haloHair: Float?
+    public var erosionHair: Float?
+    public var haloElsewhere: Float?
+    public var erosionElsewhere: Float?
+
+    public init() {}
+
+    public var summary: String {
+        func text(_ v: Float?) -> String { v.map { String(format: "%.3f", locale: Locale(identifier: "en_US_POSIX"), $0) } ?? "n/a" }
+        return "halo hair \(text(haloHair)) · elsewhere \(text(haloElsewhere)) · erosion hair \(text(erosionHair)) · elsewhere \(text(erosionElsewhere))"
+    }
 }
 
 /// Refines a rough subject mask into a matte with soft, strand-level edges. The rough mask
@@ -87,7 +141,7 @@ public struct MatteOutput {
 /// band where that is uncertain, so the cost follows the length of the edge, not the size of
 /// the photo. Everything here is plain arithmetic on the processor, tested on Linux.
 public final class Matte {
-    let photo: Photo
+    public let photo: Photo
     let settings: MatteSettings
     let W: Int, H: Int
     let qw: Int, qh: Int
@@ -95,6 +149,19 @@ public final class Matte {
     // A quarter of the photo's size.
     var qrgb = Buf<Float>(0, 0)
     var m0q: Gray
+    /// The rough mask at the size it was given, for the edge that is scaled up and snapped.
+    let m0Fine: Gray
+    /// How far each quarter-size pixel is in the hair zone, 0 to 1.
+    var hairQ = Buf<Float>(0, 0)
+    /// The three-way split and band of the whole edge. `triq` and `band` are these while the
+    /// edge is snapped, and their hair-zone part while colour matting runs.
+    var tri0 = Buf<UInt8>(0, 0)
+    var band0 = PixelRect(x: 0, y: 0, w: 0, h: 0)
+    var triM = Buf<UInt8>(0, 0)
+    var bandM = PixelRect(x: 0, y: 0, w: 0, h: 0)
+    /// The snapped edge over `band0`: the Off tier's answer.
+    var offAlpha = Buf<Float>(0, 0)
+    var mattedCount = 0
     var triq = Buf<UInt8>(0, 0) // 0 background, 1 unknown, 2 subject
     var fq = Buf<Float>(0, 0) // subject colour near each pixel
     var bq = Buf<Float>(0, 0) // background colour near each pixel
@@ -135,14 +202,21 @@ public final class Matte {
         W = photo.w; H = photo.h
         qw = (W + 3) / 4; qh = (H + 3) / 4
         m0q = coarse.resized(w: qw, h: qh)
+        m0Fine = coarse
         if let defocus = defocus, let sharp = subjectSharpness {
             let d = defocus.resized(w: qw, h: qh)
             focusQ = Buf(d.v.map { 1 - smoothstep(sharp + 1.0, sharp + 2.5, $0) })
         }
         let start = Date()
         prepare(faces: faces, patches: patches)
-        log.append("setup: band \(band.w)×\(band.h), \(unknownCount) uncertain pixels, edge widths \(Int(rIn))/\(Int(rOut)) px, \(Matte.seconds(start))")
+        log.append("setup: band \(band0.w)×\(band0.h), \(unknownCount) uncertain pixels (\(mattedCount) in the hair zone), "
+            + "edge widths \(Int(rIn))/\(Int(rOut)) px\(bandNote), \(Matte.seconds(start))")
+        let snapStart = Date()
+        snap()
+        log.append("snap: \(Matte.seconds(snapStart))")
     }
+
+    var bandNote = ""
 
     static func seconds(_ since: Date) -> String {
         String(format: "%.2f s", locale: Locale(identifier: "en_US_POSIX"), Date().timeIntervalSince(since))
@@ -236,6 +310,8 @@ public final class Matte {
             }
         }
 
+        if faces.isEmpty || !settings.hairOnly { hair = [Float](repeating: 1, count: qw * qh) }
+        hairQ = Buf(hair)
         classify(hair)
         if !patches.isEmpty {
             // A second, closer look at each head replaces the rough mask where it was uncertain,
@@ -270,6 +346,30 @@ public final class Matte {
         if x1 >= 0 {
             band = PixelRect(x: x0 * 4, y: y0 * 4, w: (x1 - x0 + 1) * 4, h: (y1 - y0 + 1) * 4).clamped(w: W, h: H)
         }
+        tri0 = triq
+        band0 = band
+
+        // Colour matting's part of the edge: the hair zone. Outside it, uncertain pixels
+        // are settled by the rough mask, so matting neither works on them nor reads them
+        // as unknown.
+        let tm = Buf(triq.array)
+        var mx0 = qw, my0 = qh, mx1 = -1, my1 = -1
+        mattedCount = 0
+        for qy in 0 ..< qh {
+            for qx in 0 ..< qw where tm.p[qy * qw + qx] == 1 {
+                let i = qy * qw + qx
+                if hair[i] > 0.004 {
+                    mx0 = min(mx0, qx); mx1 = max(mx1, qx); my0 = min(my0, qy); my1 = max(my1, qy)
+                    mattedCount += 1
+                } else {
+                    tm.p[i] = m0q.v[i] >= 0.5 ? 2 : 0
+                }
+            }
+        }
+        mattedCount *= 16
+        triM = tm
+        bandM = mx1 >= 0 ? PixelRect(x: mx0 * 4, y: my0 * 4, w: (mx1 - mx0 + 1) * 4, h: (my1 - my0 + 1) * 4).clamped(w: W, h: H)
+            : PixelRect(x: 0, y: 0, w: 0, h: 0)
 
         fq = Buf(pushPull(weightFor: 2))
         bq = Buf(pushPull(weightFor: 0))
@@ -307,8 +407,9 @@ public final class Matte {
         let eroded = PlaneMath.extremum(m0q, radius: narrow, smallest: true)
         let erodedMore = PlaneMath.extremum(m0q, radius: narrow * 2, smallest: true)
         let dilated = PlaneMath.extremum(m0q, radius: wide, smallest: false)
-        let t = Buf<UInt8>(qw * qh, 1)
-        for i in 0 ..< qw * qh {
+        let n = qw * qh
+        let t = Buf<UInt8>(n, 1)
+        for i in 0 ..< n {
             if eroded.v[i] + (erodedMore.v[i] - eroded.v[i]) * hair[i] >= settings.foregroundThreshold {
                 t.p[i] = 2
             } else if dilated.v[i] <= settings.backgroundThreshold {
@@ -316,6 +417,53 @@ public final class Matte {
             }
         }
         triq = t
+        bandNote = ""
+        let crispIn = settings.crispIn, crispOut = settings.crispOut
+        if !settings.adaptiveBand || (narrow <= crispIn && wide <= crispOut) { return }
+
+        // Where the rough mask's own edge is crisp there is little to be uncertain about,
+        // and a wide band only gives refinement room to do harm. How wide the edge is: the
+        // pixels that are neither in nor out, for each pixel of edge length, nearby.
+        var softCells = [Float](repeating: 0, count: n), edgeCells = [Float](repeating: 0, count: n)
+        for y in 0 ..< qh {
+            for x in 0 ..< qw {
+                let i = y * qw + x, m = m0q.v[i]
+                if m > 0.1 && m < 0.9 { softCells[i] = 1 }
+                if m >= 0.5 {
+                    let out = (x > 0 && m0q.v[i - 1] < 0.5) || (x < qw - 1 && m0q.v[i + 1] < 0.5)
+                        || (y > 0 && m0q.v[i - qw] < 0.5) || (y < qh - 1 && m0q.v[i + qw] < 0.5)
+                    if out { edgeCells[i] = 1 }
+                }
+            }
+        }
+        PlaneMath.boxBlur(&softCells, w: qw, h: qh, radius: 4)
+        PlaneMath.boxBlur(&edgeCells, w: qw, h: qh, radius: 4)
+        var softHere = Gray(w: qw, h: qh)
+        for i in 0 ..< n where softCells[i] > 0 {
+            let m = m0q.v[i]
+            if edgeCells[i] > 0 {
+                // Judged on the edge line itself, where the window takes in both of its sides.
+                if m >= 0.5 && softCells[i] > settings.softEdge * edgeCells[i] { softHere.v[i] = 1 }
+            } else if m > 0.1 && m < 0.9 {
+                softHere.v[i] = 1 // no edge nearby at all, yet neither in nor out: a haze
+            }
+        }
+        // The full band is kept all around anything soft, not just on top of it.
+        let soft = PlaneMath.extremum(softHere, radius: wide + 4, smallest: false)
+        let erodedCrisp = PlaneMath.extremum(m0q, radius: crispIn, smallest: true)
+        let dilatedCrisp = PlaneMath.extremum(m0q, radius: crispOut, smallest: false)
+        var full = 0, crisp = 0
+        for i in 0 ..< n where t.p[i] == 1 {
+            if soft.v[i] > 0.5 { full += 1; continue }
+            if erodedCrisp.v[i] >= settings.foregroundThreshold {
+                t.p[i] = 2
+            } else if dilatedCrisp.v[i] <= settings.backgroundThreshold {
+                t.p[i] = 0
+            } else {
+                crisp += 1
+            }
+        }
+        bandNote = " · soft edge \(Matte.percent(full, full + crisp)) of the band, crisp \(Matte.percent(crisp, full + crisp))"
     }
 
     /// The colour of the nearest certain pixels of one kind, spread smoothly across the gaps
@@ -386,7 +534,16 @@ public final class Matte {
     /// Runs the refinement up to `tier`. `progress` is told what is being done; `cancelled` is
     /// asked between stages and tiles, and stops the work with what has been done so far.
     public func run(tier: MatteTier, progress: (String) -> Void = { _ in }, cancelled: () -> Bool = { false }) -> MatteOutput {
-        if !band.isEmpty {
+        // The same object can be run again at another tier: everything a run adds is reset.
+        if setupLog.isEmpty { setupLog = log }
+        log = setupLog
+        warnings = []
+        fPair = nil
+        bPair = nil
+        var matted = false
+        if tier != .off && !bandM.isEmpty {
+            triq = triM
+            band = bandM
             var start = Date()
             progress("Fast")
             fast()
@@ -403,13 +560,123 @@ public final class Matte {
                 let note = closedForm(progress: progress, cancelled: cancelled)
                 log.append("max: \(note), \(Matte.seconds(start))")
             }
+            matted = true
+            triq = tri0
+            band = band0
+        } else if tier != .off {
+            log.append("no hair zone on the edge: nothing for colour matting to do")
         }
         let start = Date()
-        var result = finish()
+        var result = finish(matted: matted)
         log.append("finish: \(Matte.seconds(start))")
+        log.append("edge quality: \(result.edgeQuality.summary)")
         result.log = log
         result.warnings = warnings
         return result
+    }
+
+    var setupLog: [String] = []
+
+    // MARK: Off: the snapped edge
+
+    /// The first-pass mask scaled up to the photo and snapped to the photo's own edges, over
+    /// the whole uncertain band. No colour arithmetic: where the photo's brightness explains
+    /// the mask (a clear edge in the photo), the mask's edge is moved onto it; where it
+    /// doesn't (black shoes on dark asphalt), the model's edge stands, a little steepened.
+    private func snap() {
+        let band = band0, bw = band.w, bh = band.h, qw = self.qw, W = self.W, H = self.H
+        let out = Buf<Float>(bw * bh, 0)
+        offAlpha = out
+        if band.isEmpty { return }
+        let tq = tri0.p, src = photo.p, rowBytes = photo.rowBytes
+        let fine = m0Fine
+        let kx = Float(fine.w) / Float(W), ky = Float(fine.h) / Float(H)
+        let hair = hairQ.p, focus = focusQ?.p
+        let gain = max(settings.steepen, 1)
+        parallelRows(bh) { rows in
+            for by in rows {
+                let y = band.y + by
+                for bx in 0 ..< bw {
+                    let x = band.x + bx
+                    let t = tq[(y >> 2) * qw + (x >> 2)]
+                    if t != 1 {
+                        out.p[by * bw + bx] = t == 2 ? 1 : 0
+                        continue
+                    }
+                    let v = fine.sample((Float(x) + 0.5) * kx, (Float(y) + 0.5) * ky)
+                    // Hair and anything out of focus really are soft; they are left as they are.
+                    let sharp = focus.map { sample1($0, x, y) } ?? 1
+                    let g = 1 + (gain - 1) * sharp * (1 - min(max(sample1(hair, x, y), 0), 1))
+                    out.p[by * bw + bx] = min(max(0.5 + (v - 0.5) * g, 0), 1)
+                }
+            }
+        }
+
+        let r = max(settings.snapRadius, 1), eps = settings.guidedEpsilon
+        let lo = settings.snapLow, hi = settings.snapHigh
+        // Each strip of rows is worked on only across the columns that hold uncertain pixels.
+        let stripRows = 128, apron = 2 * r
+        let strips = (bh + stripRows - 1) / stripRows
+        var spans = [(lo: Int, hi: Int)](repeating: (bw, -1), count: strips)
+        for qy in 0 ..< qh {
+            let by = qy * 4 - band.y
+            if by + 3 < 0 || by >= bh { continue }
+            let strip = min(max(by, 0) / stripRows, strips - 1)
+            for qx in 0 ..< qw where tq[qy * qw + qx] == 1 {
+                let bx = qx * 4 - band.x
+                spans[strip].lo = min(spans[strip].lo, max(bx, 0))
+                spans[strip].hi = max(spans[strip].hi, min(bx + 3, bw - 1))
+            }
+        }
+        for _ in 0 ..< max(settings.snapPasses, 0) {
+            let source = Buf(out.array)
+            parallel(strips) { s in
+                let y0 = s * stripRows, y1 = min(y0 + stripRows, bh)
+                // A strip's uncertain pixels can sit in a quarter-size row that starts in the strip above.
+                var x0 = spans[s].lo, x1 = spans[s].hi
+                if s > 0 { x0 = min(x0, spans[s - 1].lo); x1 = max(x1, spans[s - 1].hi) }
+                if x1 < x0 { return }
+                x0 = max(x0 - apron, 0); x1 = min(x1 + apron, bw - 1)
+                let sw = x1 - x0 + 1
+                let ey0 = max(y0 - apron, 0), ey1 = min(y1 + apron, bh)
+                let eh = ey1 - ey0, n = sw * eh
+                var g = [Float](repeating: 0, count: n), p = [Float](repeating: 0, count: n)
+                var gg = [Float](repeating: 0, count: n), gp = [Float](repeating: 0, count: n), pp = [Float](repeating: 0, count: n)
+                for yy in 0 ..< eh {
+                    for xx in 0 ..< sw {
+                        let l = luma(rgbAt(src, rowBytes, band.x + x0 + xx, band.y + ey0 + yy))
+                        let v = source.p[(ey0 + yy) * bw + x0 + xx]
+                        let i = yy * sw + xx
+                        g[i] = l; p[i] = v; gg[i] = l * l; gp[i] = l * v; pp[i] = v * v
+                    }
+                }
+                let lumaKept = g
+                PlaneMath.boxBlur(&g, w: sw, h: eh, radius: r)
+                PlaneMath.boxBlur(&p, w: sw, h: eh, radius: r)
+                PlaneMath.boxBlur(&gg, w: sw, h: eh, radius: r)
+                PlaneMath.boxBlur(&gp, w: sw, h: eh, radius: r)
+                PlaneMath.boxBlur(&pp, w: sw, h: eh, radius: r)
+                for i in 0 ..< n {
+                    let cov = gp[i] - g[i] * p[i]
+                    let varG = max(gg[i] - g[i] * g[i], 0), varP = max(pp[i] - p[i] * p[i], 0)
+                    let k = cov / (varG + eps)
+                    gp[i] = p[i] - k * g[i] // the offset
+                    gg[i] = k // the slope
+                    pp[i] = cov * cov / ((varG + eps) * (varP + 1e-5)) // how well brightness explains the mask here
+                }
+                PlaneMath.boxBlur(&gg, w: sw, h: eh, radius: r)
+                PlaneMath.boxBlur(&gp, w: sw, h: eh, radius: r)
+                PlaneMath.boxBlur(&pp, w: sw, h: eh, radius: r)
+                for y in y0 ..< y1 {
+                    for xx in 0 ..< sw where tq[((band.y + y) >> 2) * qw + ((band.x + x0 + xx) >> 2)] == 1 {
+                        let i = (y - ey0) * sw + xx
+                        let snapped = min(max(gg[i] * lumaKept[i] + gp[i], 0), 1)
+                        let base = source.p[y * bw + x0 + xx]
+                        out.p[y * bw + x0 + xx] = base + (snapped - base) * smoothstep(lo, hi, pp[i])
+                    }
+                }
+            }
+        }
     }
 
     /// Whether each row of the band holds any uncertain pixel.
@@ -701,69 +968,83 @@ public final class Matte {
         }
     }
 
-    /// Writes the mask out for the whole photo, with the per-colour shares.
-    private func finish() -> MatteOutput {
-        let W = self.W, H = self.H, qw = self.qw, band = self.band, bw = band.w
+    /// Writes the mask out for the whole photo, with the per-colour shares: the snapped edge
+    /// everywhere, and in the hair zone the colour matting's answer, as far as each pixel is in it.
+    private func finish(matted: Bool) -> MatteOutput {
+        let W = self.W, H = self.H, qw = self.qw
+        let b0 = band0, bw0 = b0.w, bm = bandM, bwm = bm.w
         let alpha8 = Buf<UInt8>(W * H, 0)
         let shares = Buf<UInt8>(W * H * 4, 255)
-        let haveBand = !band.isEmpty && alpha.count > 0
-        let src = photo.p, rowBytes = photo.rowBytes, tq = triq.p, fp = fq.p, bp = bq.p
-        let a = alpha.p, f = fPair?.p, b = bPair?.p, lin = Matte.toLinear.p
-        let m0 = m0qBuf.p, ct = contrast.p, focus = focusQ?.p, fastHalf = self.fastHalf.p
+        let haveOff = !b0.isEmpty && offAlpha.count == b0.w * b0.h
+        let haveMatte = matted && !bm.isEmpty && alpha.count == bm.w * bm.h
+        let src = photo.p, rowBytes = photo.rowBytes, t0 = tri0.p, tm = triM.p, fp = fq.p, bp = bq.p
+        let off = offAlpha.p, a = alpha.p, f = fPair?.p, b = bPair?.p, lin = Matte.toLinear.p
+        let m0 = m0qBuf.p, ct = contrast.p, focus = focusQ?.p, fastHalf = self.fastHalf.p, hair = hairQ.p
+        let sureAbove = settings.guardContrast * 255
         let lock = NSLock()
         var stats = BandStats()
         parallelRows(H) { rows in
             var local = BandStats()
             for y in rows {
                 for x in 0 ..< W {
-                    let t = tq[(y >> 2) * qw + (x >> 2)]
+                    let cell = (y >> 2) * qw + (x >> 2)
+                    let t = t0[cell]
                     var a8: UInt8 = t == 2 ? 255 : 0
                     var s = SIMD3<Float>(repeating: t == 2 ? 1 : 0)
-                    if t == 1 && haveBand && band.contains(x, y) {
-                        let i = (y - band.y) * bw + (x - band.x)
+                    if t == 1 && haveOff && b0.contains(x, y) {
                         // Written so that a value that isn't a number at all comes out as 0.
-                        var al: Float = a[i] >= 0 ? min(a[i], 1) : 0
-                        // The guards. Where the rough mask was sure, the answer may only stray
-                        // from it as far as the colours there can be told apart; and out of
-                        // focus, the background may not turn into subject at all.
-                        let rough = sample1(m0, x, y)
-                        let reach = 0.3 + 0.7 * Float(ct[i]) / 255
-                        let sharp = focus.map { sample1($0, x, y) } ?? 1
-                        if rough >= 0.9, al < rough - reach {
-                            al = rough - reach
-                            local.heldUp += 1
-                        } else if rough <= 0.1, al > rough + reach * sharp {
-                            al = rough + reach * sharp
-                            local.heldDown += 1
-                        }
-                        local.n += 1
-                        if sharp < 0.5 { local.blurred += 1 }
-                        if al <= 0.002 { local.zero += 1 } else if al < 0.2 { local.low += 1 } else if al <= 0.8 { local.mid += 1 }
-                        else if al < 0.998 { local.high += 1 } else { local.one += 1 }
-                        if rough <= 0.1 {
-                            local.background += 1
-                            if al >= 0.2 && al <= 0.8 { local.backgroundMid += 1 }
-                        }
-                        let now = al >= 0.5, before = fastHalf[i] == 1
-                        if now && before { local.both += 1 }
-                        if now || before { local.either += 1 }
-                        a8 = UInt8((al * 255).rounded())
+                        let snapped = off[(y - b0.y) * bw0 + (x - b0.x)]
+                        var al: Float = snapped >= 0 ? min(snapped, 1) : 0
                         s = SIMD3(repeating: al)
-                        if al > 0.004 && al < 0.996 {
-                            // The subject and background colours behind this pixel, nudged so that
-                            // mixed by its alpha they give exactly the pixel's colour.
-                            let I = rgbAt(src, rowBytes, x, y)
-                            var F = f != nil ? Matte.unpack(f![i]) : sample3(fp, x, y)
-                            var B = b != nil ? Matte.unpack(b![i]) : sample3(bp, x, y)
-                            let e = (I - (F * al + B * (1 - al))) / (al * al + (1 - al) * (1 - al) + 0.05)
-                            F = (F + e * al).clamped(lowerBound: SIMD3(repeating: 0), upperBound: SIMD3(repeating: 1))
-                            B = (B + e * (1 - al)).clamped(lowerBound: SIMD3(repeating: 0), upperBound: SIMD3(repeating: 1))
-                            // In linear light, the fraction of each colour that is the subject's.
-                            for ch in 0 ..< 3 {
-                                let fl = al * lin[Int(F[ch] * 255)], bl = (1 - al) * lin[Int(B[ch] * 255)]
-                                s[ch] = fl + bl > 1e-5 ? fl / (fl + bl) : al
+                        if haveMatte && tm[cell] == 1 && bm.contains(x, y) {
+                            let i = (y - bm.y) * bwm + (x - bm.x)
+                            var m: Float = a[i] >= 0 ? min(a[i], 1) : 0
+                            // The guards. Where the rough mask was sure, the answer may only
+                            // stray from it where the colours either side are distinct enough
+                            // to go by, and then only so far; and out of focus, the background
+                            // may not turn into subject at all.
+                            let rough = sample1(m0, x, y)
+                            let sure = Float(ct[i]) > sureAbove
+                            let reach = 0.3 + 0.7 * Float(ct[i]) / 255
+                            let sharp = focus.map { sample1($0, x, y) } ?? 1
+                            if rough >= 0.9 {
+                                let least = sure ? rough - reach : rough
+                                if m < least { m = least; local.heldUp += 1 }
+                            } else if rough <= 0.1 {
+                                let most = sure ? rough + reach * sharp : rough
+                                if m > most { m = most; local.heldDown += 1 }
+                            }
+                            local.n += 1
+                            if sharp < 0.5 { local.blurred += 1 }
+                            if m <= 0.002 { local.zero += 1 } else if m < 0.2 { local.low += 1 } else if m <= 0.8 { local.mid += 1 }
+                            else if m < 0.998 { local.high += 1 } else { local.one += 1 }
+                            if rough <= 0.1 {
+                                local.background += 1
+                                if m >= 0.2 && m <= 0.8 { local.backgroundMid += 1 }
+                            }
+                            let now = m >= 0.5, before = fastHalf[i] == 1
+                            if now && before { local.both += 1 }
+                            if now || before { local.either += 1 }
+                            let weight = min(max(sample1(hair, x, y), 0), 1)
+                            al += (m - al) * weight
+                            s = SIMD3(repeating: al)
+                            if weight > 0.25 && al > 0.004 && al < 0.996 {
+                                // The subject and background colours behind this pixel, nudged so that
+                                // mixed by its alpha they give exactly the pixel's colour.
+                                let I = rgbAt(src, rowBytes, x, y)
+                                var F = f != nil ? Matte.unpack(f![i]) : sample3(fp, x, y)
+                                var B = b != nil ? Matte.unpack(b![i]) : sample3(bp, x, y)
+                                let e = (I - (F * al + B * (1 - al))) / (al * al + (1 - al) * (1 - al) + 0.05)
+                                F = (F + e * al).clamped(lowerBound: SIMD3(repeating: 0), upperBound: SIMD3(repeating: 1))
+                                B = (B + e * (1 - al)).clamped(lowerBound: SIMD3(repeating: 0), upperBound: SIMD3(repeating: 1))
+                                // In linear light, the fraction of each colour that is the subject's.
+                                for ch in 0 ..< 3 {
+                                    let fl = al * lin[Int(F[ch] * 255)], bl = (1 - al) * lin[Int(B[ch] * 255)]
+                                    s[ch] = fl + bl > 1e-5 ? fl / (fl + bl) : al
+                                }
                             }
                         }
+                        a8 = UInt8((al * 255).rounded())
                     }
                     alpha8.p[y * W + x] = a8
                     let o = (y * W + x) * 4
@@ -781,15 +1062,76 @@ public final class Matte {
             let glow = stats.background > 0 ? 100 * Double(stats.backgroundMid) / Double(stats.background) : 0
             let flagged = glow > 5
             if flagged { warnings.append("GLOW?") }
-            log.append("band α 0:\(p(stats.zero)) · low:\(p(stats.low)) · mid:\(p(stats.mid)) · high:\(p(stats.high)) · 1:\(p(stats.one))"
+            log.append("hair band α 0:\(p(stats.zero)) · low:\(p(stats.low)) · mid:\(p(stats.mid)) · high:\(p(stats.high)) · 1:\(p(stats.one))"
                 + " · mid-in-confident-bg \(String(format: "%.1f", locale: Locale(identifier: "en_US_POSIX"), glow))%\(flagged ? " GLOW?" : "")")
             let agreement = stats.either > 0 ? Double(stats.both) / Double(stats.either) : 1
             log.append("guards: subject \(stats.heldUp) px · background \(stats.heldDown) px · out-of-focus \(p(stats.blurred)) of band"
                 + " · fast↔final IoU \(String(format: "%.3f", locale: Locale(identifier: "en_US_POSIX"), agreement))")
         }
-        var tri8 = [UInt8](repeating: 0, count: qw * qh)
-        for i in 0 ..< qw * qh { tri8[i] = tq[i] == 2 ? 255 : (tq[i] == 1 ? 128 : 0) }
-        return MatteOutput(w: W, h: H, alpha: alpha8.array, shares: shares.array, trimap: tri8,
-                           trimapW: qw, trimapH: qh, band: band, unknownPixels: unknownCount, log: [], warnings: warnings)
+        let n = qw * qh
+        var tri8 = [UInt8](repeating: 0, count: n), hair8 = [UInt8](repeating: 0, count: n), zones = [UInt8](repeating: 0, count: n)
+        for i in 0 ..< n {
+            tri8[i] = t0[i] == 2 ? 255 : (t0[i] == 1 ? 128 : 0)
+            hair8[i] = UInt8(min(max(hair[i], 0), 1) * 255)
+            if t0[i] == 1 { zones[i] = matted && tm[i] == 1 ? 2 : 1 }
+        }
+        var out = MatteOutput(w: W, h: H, alpha: alpha8.array, shares: shares.array, trimap: tri8,
+                              trimapW: qw, trimapH: qh, band: b0, unknownPixels: unknownCount, log: [], warnings: warnings)
+        out.hair = hair8
+        out.zones = zones
+        out.edgeQuality = edgeQuality(alpha8)
+        return out
+    }
+
+    /// Halo and erosion (masking spec v3, section 10), measured at half size: the rings are
+    /// 2 to 5 half-size pixels either side of the snapped edge.
+    private func edgeQuality(_ alpha8: Buf<UInt8>) -> EdgeQuality {
+        var quality = EdgeQuality()
+        let b = band0, W = self.W, qw = self.qw
+        if b.isEmpty || offAlpha.count != b.w * b.h { return quality }
+        let hw = (b.w + 1) / 2, hh = (b.h + 1) / 2
+        let hard = Buf<Float>(hw * hh, 0), final = Buf<Float>(hw * hh, 0)
+        let t0 = tri0.p, off = offAlpha.p
+        parallelRows(hh) { rows in
+            for hy in rows {
+                for hx in 0 ..< hw {
+                    var so: Float = 0, sf: Float = 0, n: Float = 0
+                    for y in (b.y + hy * 2) ..< min(b.y + hy * 2 + 2, b.maxY) {
+                        for x in (b.x + hx * 2) ..< min(b.x + hx * 2 + 2, b.maxX) {
+                            let t = t0[(y >> 2) * qw + (x >> 2)]
+                            so += t == 1 ? off[(y - b.y) * b.w + (x - b.x)] : (t == 2 ? 1 : 0)
+                            sf += Float(alpha8.p[y * W + x]) / 255
+                            n += 1
+                        }
+                    }
+                    hard.p[hy * hw + hx] = so >= 0.5 * n ? 1 : 0
+                    final.p[hy * hw + hx] = sf / max(n, 1)
+                }
+            }
+        }
+        let edge = Gray(w: hw, h: hh, v: hard.array)
+        let outNear = PlaneMath.extremum(edge, radius: 1, smallest: false), outFar = PlaneMath.extremum(edge, radius: 5, smallest: false)
+        let inNear = PlaneMath.extremum(edge, radius: 1, smallest: true), inFar = PlaneMath.extremum(edge, radius: 5, smallest: true)
+        // [hair, elsewhere] × [sum, count]
+        var halo = [Double](repeating: 0, count: 4), erosion = [Double](repeating: 0, count: 4)
+        let hair = hairQ.p
+        for hy in 0 ..< hh {
+            let qy = (b.y + hy * 2) >> 2
+            for hx in 0 ..< hw {
+                let i = hy * hw + hx
+                let zone = hair[qy * qw + ((b.x + hx * 2) >> 2)] > 0.5 ? 0 : 2
+                if outFar.v[i] > 0.5 && outNear.v[i] < 0.5 {
+                    halo[zone] += Double(final.p[i]); halo[zone + 1] += 1
+                } else if inNear.v[i] > 0.5 && inFar.v[i] < 0.5 {
+                    erosion[zone] += Double(1 - final.p[i]); erosion[zone + 1] += 1
+                }
+            }
+        }
+        func mean(_ v: [Double], _ zone: Int) -> Float? { v[zone + 1] >= 50 ? Float(v[zone] / v[zone + 1]) : nil }
+        quality.haloHair = mean(halo, 0)
+        quality.haloElsewhere = mean(halo, 2)
+        quality.erosionHair = mean(erosion, 0)
+        quality.erosionElsewhere = mean(erosion, 2)
+        return quality
     }
 }

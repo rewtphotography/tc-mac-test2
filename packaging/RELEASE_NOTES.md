@@ -8,26 +8,33 @@ An alpha build of TrainCull for Mac (Apple silicon, macOS 15 or later).
    **Done**, then open **System Settings → Privacy & Security**, scroll down to the message
    about TrainCull and click **Open Anyway**. This is needed once for each new build.
 
-**New in this build: a choice of what selects the subject**
+**New in this build: cleaner hard edges, a lighter model, an Off tier**
 
-In **Edit → Mask (Test)** there is now a **Subject from** menu. Each entry is one candidate
-from the comparison against Photoshop's Select Subject:
+- **Off / Fast / High / Max.** **Off** is the subject's edge as found, snapped to the photo,
+  with no colour work: judge shoes, jeans and arms there. Fast, High and Max now refine
+  **hair only**, on top of Off.
+- **Closer looks now run.** After the whole frame, the model looks at the subject in pieces
+  cut from the full-size photo, which is what sharpens hard edges.
+- **Lighter and quicker.** The model works at half its former size (the subject it picks is
+  the same on your eight test photos). It is made ready when you enter Edit and let go when
+  you leave. The log gives memory before, at peak and after every model call.
+- **Changing the tier no longer finds the subject again**; only the hair is redone. The
+  plain edge appears first, the hair a moment later. **Remake** starts from scratch.
+- **Focus strictness** (Loose, Moderate, Strict): how readily things softer than the face
+  are left out. Arms and legs the body-pose detector confirms are kept however soft.
+- **Show** has two new views: **Background −3 EV**, and **Zones (debug)**, which draws where
+  hair was refined, where the edge was snapped, the close-up boxes and the body pose.
+- **Debug** (click to open): the old Vision mask, which processors the model runs on, and
+  **Export Debug Bundle**, which now includes the masks at each stage.
+- SAM and the Hybrid are gone, and the download is about 330 MB smaller for it.
 
-- **BiRefNet (A)**: the default. It agreed with Photoshop best, including on crowd shots.
-- **SAM (B)** and **SAM + close-up (B2)**: Segment Anything, started from the face.
-- **Hybrid (C)**: SAM decides which person, BiRefNet gives the shape.
-- **Vision (V)**: what earlier builds used.
+Not in this build yet: following a long prop out of frame, picking up detached headpiece
+parts, and the box tools for adding and removing areas.
 
-Pick one, then **Make** (or **Remake**). The status line under the buttons says which was used.
-This download is much larger than before (around a gigabyte) because the models are inside it;
-the app still never uses the network. The first mask after opening the app is slower while a
-model loads.
-
-**The masking test** (from alpha 7): open **Edit** and scroll to **Mask (Test)**. Choose **Fast**,
-**High** or **Max** and click **Make**. **Show** switches between the photo, a red overlay, the mask,
-and the subject cut out on black or white. Pick **Subject**, **Background** or **Skin** and move
-**Exposure**, **Saturation** or **Warmth**. Masks and local adjustments last until you close the
-folder; **Export 16-bit TIFF** includes them.
+**The masking test:** open **Edit** and scroll to **Mask (Test)**. Choose a tier and click
+**Make**. Pick **Subject**, **Background** or **Skin** and move **Exposure**, **Saturation** or
+**Warmth**. Masks and local adjustments last until you close the folder; **Export 16-bit TIFF**
+includes them. The app never uses the network: the model is inside the download.
 
 **Since alpha 4**
 

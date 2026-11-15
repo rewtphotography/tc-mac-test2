@@ -22,7 +22,8 @@ jobs:
       - run: swift test
 
   # BiRefNet has no ready-made Core ML form. It is converted here, on Linux, once; the result
-  # is kept between builds and handed to the Mac job, which compiles it into the app.
+  # is kept between builds and handed to the Mac job, which compiles it into the app. This is
+  # the only step that fetches anything (the model's published weights); the app never does.
   birefnet:
     name: Convert BiRefNet (Linux, kept between builds)
     runs-on: ubuntu-latest
@@ -56,7 +57,7 @@ jobs:
           free -g
           pip install torch==2.15.0 torchvision --index-url https://download.pytorch.org/whl/cpu
           pip install transformers==5.23.0 timm==1.0.31 kornia==0.9.1 einops==0.8.2 coremltools==9.0
-          python -u tools/convert_birefnet.py convert BiRefNet.mlpackage
+          python -u tools/convert_birefnet.py convert BiRefNet.mlpackage 1024
       - uses: actions/upload-artifact@v4
         with:
           name: birefnet
@@ -74,9 +75,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: swift --version
-      # The segmentation models the app carries. Fetched and compiled once, then kept between
-      # builds; scripts/fetch-models.sh says which they are.
-      - name: Models (kept between builds)
+      # The segmentation model the app carries, compiled once and kept between builds.
+      - name: Model (kept between builds)
         uses: actions/cache@v4
         id: models
         with:
@@ -89,17 +89,13 @@ jobs:
         with:
           name: birefnet
           path: BiRefNet.mlpackage
-      - name: Fetch and compile models
+      - name: Compile the model
         run: scripts/fetch-models.sh build-models
-      # The core library's own tests run in the Linux job. Here, the ones that need a Mac.
+      # The core library's own tests run in the Linux job. Here, the ones that need a Mac,
+      # the model and the whole masking pipeline among them.
       - name: Tests
+        timeout-minutes: 30
         run: TRAINCULL_MODELS="$PWD/build-models" swift test --filter TrainCullTests
-      # BiRefNet at full size may be more than a build machine can run; a failure here is
-      # reported but does not stop the build.
-      - name: BiRefNet check
-        continue-on-error: true
-        timeout-minutes: 12
-        run: TRAINCULL_MODELS="$PWD/build-models" TRAINCULL_HEAVY_MODELS=1 swift test --filter testBiRefNetFindsTheSubject
       # Alpha numbers follow on from the last published one (alpha 4 came from the earlier
       # repository), so a failed build never uses a number up.
       - name: Build number
@@ -116,17 +112,18 @@ jobs:
       - name: Launch check
         run: |
           swift scripts/make-fixture.swift "$PWD/build/fixture"
-          shoot() {
-            open -n build/TrainCull.app --args -TCOpenFolder "$PWD/build/fixture" "${@:2}"
-            sleep 12
+          shoot() { # <picture name> <seconds to wait> [arguments]
+            open -n build/TrainCull.app --args -TCOpenFolder "$PWD/build/fixture" "${@:3}"
+            sleep "$2"
             pgrep -x TrainCull
             screencapture -x "build/$1.png" || true
             pkill -x TrainCull || true
             sleep 2
           }
-          shoot launch
-          shoot launch-compare -TCCompare YES
-          shoot launch-edit -TCEdit YES
+          shoot launch 12
+          shoot launch-compare 12 -TCCompare YES
+          # Entering Edit mode makes the model ready; long enough for the log to show that.
+          shoot launch-edit 75 -TCEdit YES
           echo "---- the app's own log ----"
           cat "$HOME/Library/Logs/TrainCull/"*.log || true
           mkdir -p build/logs && cp "$HOME/Library/Logs/TrainCull/"*.log build/logs/ || true

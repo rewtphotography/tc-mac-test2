@@ -1,5 +1,9 @@
 """Subject-selection bake-off (docs/specs/masking-spec-v2.md, sections 2, 4, 5 and 6).
 
+A record of the comparison that chose BiRefNet. The app has since moved on (masking spec v3:
+SAM is gone, the sharpness rule is relative to the face, the model runs at 1024 with
+close-ups); the rules below are the ones that were compared, not the app's current ones.
+
 Compares ways of making the first-pass subject mask on TrainCull debug bundles:
   V   the app's current Vision mask (current_m0.png in each bundle)
   A   BiRefNet_HR: whole proxy, then again on the subject's box, kept by sharpness
@@ -250,7 +254,9 @@ def read_bundle(d):
         "face": [f["rect"] for f in faces if f.get("primary")][0] if faces else None,
         "others": [f["rect"] for f in faces if not f.get("primary")],
         "ref": np.asarray(Image.open(ref[0]).convert("L")) >= 128 if ref else None,
-        "vision": np.asarray(Image.open(os.path.join(d, "current_m0.png")).convert("L"), np.float32) / 255,
+        # Bundles written since masking spec v3 no longer carry the Vision first pass.
+        "vision": (np.asarray(Image.open(os.path.join(d, "current_m0.png")).convert("L"), np.float32) / 255
+                   if os.path.exists(os.path.join(d, "current_m0.png")) else None),
         "crop": Image.open(os.path.join(d, "box_crop_hr.png")).convert("RGB") if os.path.exists(os.path.join(d, "box_crop_hr.png")) else None,
         "crop_box": json.load(open(os.path.join(d, "box.json")))["box_proxy"] if os.path.exists(os.path.join(d, "box.json")) else None,
     }
@@ -338,7 +344,7 @@ def candidates(it, work, size="large"):
     rgb = np.asarray(it["proxy"])
     sigma, edges = sharpness(rgb)
     face = it["face"]
-    out, notes = {"V": it["vision"]}, {}
+    out, notes = ({"V": it["vision"]} if it["vision"] is not None else {}), {}
     sa, sb = load(work, it["name"], "SA"), load(work, it["name"], "SB")
     S = None
     if sa is not None:

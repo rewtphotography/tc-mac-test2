@@ -17,28 +17,39 @@ enum LocalArea: Int, CaseIterable {
     }
 }
 
-/// Where the first, rough idea of the subject comes from. The letters are the candidates of
-/// the masking spec's bake-off.
+/// Where the first, rough idea of the subject comes from. BiRefNet is the subject model
+/// (masking spec v3); Apple's Vision masks are kept behind a debug switch, for comparison.
 enum SubjectSource: String, CaseIterable {
-    case vision = "V", birefnet = "A", sam = "B", samCrop = "B2", hybrid = "C"
+    case vision = "V", birefnet = "A"
 
     var name: String {
         switch self {
-        case .vision: return "Vision"
+        case .vision: return "Vision (legacy)"
         case .birefnet: return "BiRefNet"
-        case .sam: return "SAM"
-        case .samCrop: return "SAM + close-up"
-        case .hybrid: return "Hybrid"
         }
     }
 
-    /// Whether this build carries the models the source needs.
+    /// Whether this build carries the model the source needs.
     var available: Bool {
         switch self {
         case .vision: return true
         case .birefnet: return BundledModels.hasBiRefNet
-        case .sam, .samCrop: return BundledModels.hasSAM
-        case .hybrid: return BundledModels.hasSAM && BundledModels.hasBiRefNet
+        }
+    }
+}
+
+/// The user's Focus strictness: how readily pieces that are softer than the subject's face
+/// are left out of the mask.
+enum FocusStrictness: String, CaseIterable {
+    case loose, moderate, strict
+
+    var name: String { rawValue.capitalized }
+
+    var factor: Float {
+        switch self {
+        case .loose: return 0.6
+        case .moderate: return 1.0
+        case .strict: return 1.4
         }
     }
 }
@@ -61,7 +72,7 @@ struct LocalEdits: Equatable {
 
 /// What the large image shows while a mask is being judged.
 enum MaskView: Int, CaseIterable {
-    case photo, overlay, mask, onBlack, onWhite
+    case photo, overlay, mask, onBlack, onWhite, dimmed, zones
 
     var name: String {
         switch self {
@@ -70,6 +81,8 @@ enum MaskView: Int, CaseIterable {
         case .mask: return "Mask"
         case .onBlack: return "On Black"
         case .onWhite: return "On White"
+        case .dimmed: return "Background −3 EV"
+        case .zones: return "Zones (debug)"
         }
     }
 }
@@ -86,17 +99,52 @@ final class MaskResult {
     /// For inspection: the three-way split and the first-pass mask the refinement started from.
     let trimap: CGImage
     let coarse: CGImage
+    /// For inspection, laid over the photo: the hair zone, where the edge was snapped and
+    /// where colour matting ran, the close-up boxes, the body pose.
+    let debug: CGImage?
     let tier: MatteTier
+    let edge: EdgeQuality
     let summary: String
 
-    init(width: Int, height: Int, alpha: CGImage, shares: CGImage, skin: CGImage?, trimap: CGImage, coarse: CGImage, tier: MatteTier, summary: String) {
+    init(width: Int, height: Int, alpha: CGImage, shares: CGImage, skin: CGImage?, trimap: CGImage, coarse: CGImage, debug: CGImage? = nil,
+         tier: MatteTier, edge: EdgeQuality = EdgeQuality(), summary: String) {
         self.width = width; self.height = height
         self.alpha = alpha; self.shares = shares; self.skin = skin
-        self.trimap = trimap; self.coarse = coarse
-        self.tier = tier; self.summary = summary
+        self.trimap = trimap; self.coarse = coarse; self.debug = debug
+        self.tier = tier; self.edge = edge; self.summary = summary
     }
 
     func picture(for area: LocalArea) -> CGImage? { area == .skin ? skin : shares }
+}
+
+/// What is known about a photo's subject before any edge is refined: the faces, the
+/// sharpness map, the body pose and the first-pass mask. Making it runs the model; it is kept
+/// for each photo so that changing the refinement tier doesn't (masking spec v3, section 9).
+final class SubjectBase {
+    let key: String
+    let source: SubjectSource
+    /// Faces in pixels of the full photo, largest first.
+    let faces: [PixelRect]
+    let proxy: CGImage
+    let ranking: Masking.Ranking
+    /// The first-pass mask after selection and close-ups, possibly finer than the proxy.
+    let coarse: Gray
+    /// The same before the close-ups, at the proxy's size; nil when it didn't come from BiRefNet.
+    let selected: Gray?
+    let patches: [HeadPatch]
+    let poses: [BodyPose]
+    let primaryPose: Int?
+    /// The close-up boxes, in proxy pixels, and whether each was used.
+    let tiles: [(box: Box, used: Bool)]
+    let subjectBox: Box?
+    let seconds: Double
+
+    init(key: String, source: SubjectSource, faces: [PixelRect], proxy: CGImage, ranking: Masking.Ranking, coarse: Gray, selected: Gray?,
+         patches: [HeadPatch], poses: [BodyPose], primaryPose: Int?, tiles: [(box: Box, used: Bool)], subjectBox: Box?, seconds: Double) {
+        self.key = key; self.source = source; self.faces = faces; self.proxy = proxy; self.ranking = ranking
+        self.coarse = coarse; self.selected = selected; self.patches = patches
+        self.poses = poses; self.primaryPose = primaryPose; self.tiles = tiles; self.subjectBox = subjectBox; self.seconds = seconds
+    }
 }
 
 /// A mask and what to do with it when a frame is rendered.
@@ -107,8 +155,8 @@ struct LocalRender {
     var area: LocalArea
 }
 
-/// Subject, hair-edge and skin masks. Apple's Vision says roughly what the subject is; the
-/// matting engine in TraincullCore works out exactly where its edge lies. Masks are made from
+/// Subject, hair-edge and skin masks. BiRefNet says what the subject is; the matting engine
+/// in TraincullCore works out exactly where its edge lies. Masks are made from
 /// a neutral render of the raw, so the frame's own edits never move them.
 enum Masking {
     struct Failure: Error, CustomStringConvertible {
@@ -289,107 +337,60 @@ enum Masking {
         return out.blurred(radius: max(Int(grow / 3), 1))
     }
 
-    // MARK: Making a mask
+    // MARK: Body pose
 
-    /// Makes the masks for one raw file. Runs for seconds; call it off the main thread.
-    static func make(url: URL, tier: MatteTier, faces known: DetectedFaces?, settings: MatteSettings = MatteSettings(),
-                     subject: SubjectSource = .vision, progress: (String) -> Void, cancelled: () -> Bool) throws -> MaskResult {
-        let reference = try neutral(url)
-        return try make(reference: reference, name: url.lastPathComponent, tier: tier, faces: known, settings: settings,
-                        subject: subject, progress: progress, cancelled: cancelled)
+    private static let jointNames: [(VNHumanBodyPoseObservation.JointName, String)] = [
+        (.nose, "nose"), (.neck, "neck"), (.root, "root"),
+        (.leftShoulder, "leftShoulder"), (.rightShoulder, "rightShoulder"), (.leftElbow, "leftElbow"), (.rightElbow, "rightElbow"),
+        (.leftWrist, "leftWrist"), (.rightWrist, "rightWrist"), (.leftHip, "leftHip"), (.rightHip, "rightHip"),
+        (.leftKnee, "leftKnee"), (.rightKnee, "rightKnee"), (.leftAnkle, "leftAnkle"), (.rightAnkle, "rightAnkle"),
+    ]
+
+    /// Every person's joints as Apple's body-pose detector finds them, in pixels of the
+    /// picture with y down.
+    static func bodyPoses(_ image: CGImage) -> [BodyPose] {
+        autoreleasepool {
+            let request = VNDetectHumanBodyPoseRequest()
+            let handler = VNImageRequestHandler(cgImage: image, options: [:])
+            guard (try? handler.perform([request])) != nil, let people = request.results else { return [] }
+            let w = Float(image.width), h = Float(image.height)
+            var poses: [BodyPose] = []
+            for person in people {
+                var joints: [String: BodyPose.Joint] = [:]
+                for (joint, name) in jointNames {
+                    guard let point = try? person.recognizedPoint(joint), point.confidence > 0 else { continue }
+                    // Vision counts from the bottom left, in fractions of the picture.
+                    joints[name] = BodyPose.Joint(x: Float(point.location.x) * w, y: (1 - Float(point.location.y)) * h, confidence: Float(point.confidence))
+                }
+                if !joints.isEmpty { poses.append(BodyPose(joints: joints)) }
+            }
+            return poses
+        }
     }
 
-    /// A first pass from the segmentation models, at the proxy's size (masking spec v2,
-    /// section 6). `face` is the subject's face in proxy pixels.
-    static func modelPass(_ source: SubjectSource, proxy small: CGImage, reference: CGImage, face: PixelRect, sharpness map: SharpnessMap,
-                          name: String, progress: (String) -> Void) throws -> Gray {
-        let w = small.width, h = small.height
-        let rules = SubjectRules()
-        let scale = Double(reference.width) / Double(w)
-        let body = Box(SubjectChoice.bodyBox(face: face, w: w, h: h))
-        /// A box of the proxy, cut from the full-size photo.
-        func crop(_ box: Box) -> CGImage? {
-            let x: Double = Double(box.x0) * scale, y: Double = Double(box.y0) * scale
-            let cw: Double = Double(box.x1 - box.x0) * scale, ch: Double = Double(box.y1 - box.y0) * scale
-            return reference.cropping(to: CGRect(x: x, y: y, width: cw, height: ch))
-        }
-        let centre: (x: Float, y: Float) = (Float(face.x) + Float(face.w) / 2, Float(face.y) + Float(face.h) / 2)
-        var asked: [SAMModel.Point] = []
-        for point in SubjectSelect.points(face: face, h: h) { asked.append(SAMModel.Point(x: point.x, y: point.y, label: 1)) }
+    // MARK: What is kept between runs
 
-        // BiRefNet's shapes: the whole proxy, then a closer look at the subject's box.
-        var shape: Gray?
-        var wide = body
-        if source == .birefnet || source == .hybrid {
-            progress("BiRefNet")
-            let whole = try BiRefNetModel.shared.segment(small).resized(w: w, h: h)
-            let (roughKept, _) = SubjectSelect.keep(whole, sharpness: map, face: face, rules: rules)
-            var x0 = w, y0 = h, x1 = 0, y1 = 0
-            for y in 0 ..< h { for x in 0 ..< w where roughKept.v[y * w + x] >= 0.5 { x0 = min(x0, x); x1 = max(x1, x + 1); y0 = min(y0, y); y1 = max(y1, y + 1) } }
-            if x1 > x0 { wide = body.union(Box(x0: x0, y0: y0, x1: x1, y1: y1)) }
-            wide = wide.expanded(by: rules.boxExpand, w: w, h: h)
-            var merged = whole
-            if wide.area * 10 <= w * h * 8, let close = crop(wide) {
-                progress("BiRefNet close-up")
-                merged = SubjectSelect.merge(whole, inside: try BiRefNetModel.shared.segment(close), box: wide, rules: rules)
-            } else {
-                Log.note("base", "\(name): BiRefNet close-up skipped (the subject's box is most of the frame)")
-            }
-            shape = merged
-        }
-        if source == .birefnet, let shape = shape {
-            let (mask, decision) = SubjectSelect.keep(shape, sharpness: map, face: face, rules: rules)
-            Log.note("base", "\(name): \(decision.summary)")
-            return mask
-        }
-
-        // SAM: which thing is the subject, from two points on them and a box around them.
-        progress("SAM")
-        let taken = try SAMModel.shared.embed(small)
-        let box = source == .hybrid ? wide : body
-        let answers = try SAMModel.shared.decode(taken, points: asked, box: box)
-        guard let which = SAMModel.shared.best(answers, containing: centre, in: taken, w: w, h: h) else { throw Failure("SAM gave no answer") }
-        var answer = which.mask
-        Log.note("base", "\(name): SAM primary IoU \(String(format: "%.2f", which.score)) · box \(box.x0),\(box.y0)–\(box.x1),\(box.y1) · points \(asked.count)")
-        if which.score < 0.85 { Log.warn("\(name): SAM is unsure of its answer (\(String(format: "%.2f", which.score)))") }
-        if source == .samCrop, let close = crop(body) {
-            progress("SAM close-up")
-            let k = Float(close.width) / Float(body.x1 - body.x0)
-            let closeW = Float(close.width), closeH = Float(close.height)
-            var inside: [SAMModel.Point] = []
-            for point in asked {
-                let x: Float = (point.x - Float(body.x0)) * k
-                let y: Float = (point.y - Float(body.y0)) * k
-                if x >= 0, y >= 0, x < closeW, y < closeH { inside.append(SAMModel.Point(x: x, y: y, label: 1)) }
-            }
-            let again = try SAMModel.shared.embed(close)
-            let all = Box(x0: 0, y0: 0, x1: close.width, y1: close.height)
-            let closeAnswers = try SAMModel.shared.decode(again, points: inside, box: all)
-            if let first = inside.first,
-               let closer = SAMModel.shared.best(closeAnswers, containing: (first.x, first.y), in: again, w: 512, h: 512) {
-                answer = SubjectSelect.merge(answer, inside: closer.mask, box: body, rules: rules)
-                Log.note("base", "\(name): SAM close-up IoU \(String(format: "%.2f", closer.score))")
-            }
-        }
-        if source == .hybrid, let shape = shape {
-            let (mask, decision) = SubjectSelect.hybrid(shape: shape, which: answer, sharpness: map, face: face, rules: rules)
-            Log.note("base", "\(name): \(decision.summary)")
-            return mask
-        }
-        let (mask, decision) = SubjectSelect.keep(answer, sharpness: map, face: face, rules: rules)
-        Log.note("base", "\(name): \(decision.summary)")
-        return mask
-    }
-
-    /// The last neutral render, kept so that remaking a mask at another quality, or exporting
-    /// its debug bundle, doesn't develop the raw again.
-    private static var kept: (url: URL, image: CGImage)?
+    static let keptNeutrals = 3
+    static let keptBases = 3
     private static let keptLock = NSLock()
+    /// Neutral renders of the last few raws: making or remaking a mask, changing its tier or
+    /// exporting its debug bundle then doesn't develop the raw again.
+    private static var neutrals: [(url: URL, image: CGImage)] = []
+    /// What is known about the subject of the last few photos masked.
+    private static var bases: [SubjectBase] = []
+    /// The edge engine set up for the last photo masked, so another tier starts from there.
+    private static var keptMatte: (base: SubjectBase, matte: Matte)?
 
     /// A neutral render of a raw: the camera's white balance, Apple's defaults, none of the frame's edits.
     static func neutral(_ url: URL) throws -> CGImage {
         keptLock.lock()
-        let hit = kept?.url == url ? kept?.image : nil
+        var hit: CGImage?
+        if let i = neutrals.firstIndex(where: { $0.url == url }) {
+            let entry = neutrals.remove(at: i)
+            neutrals.append(entry)
+            hit = entry.image
+        }
+        let had = neutrals.count
         keptLock.unlock()
         if let hit = hit {
             Log.debug("cache", "neutral \(url.lastPathComponent) · hit")
@@ -397,21 +398,57 @@ enum Masking {
         }
         let started = CFAbsoluteTimeGetCurrent()
         guard let reference = Imaging.renderRaw(url) else { throw Failure("Apple's raw decoder can't open this file on this Mac") }
-        Log.note("cache", "neutral \(url.lastPathComponent) · miss: \(kept == nil ? "cold" : "another image") · rendered \(reference.width)×\(reference.height) in \(Log.seconds(since: started))")
         keptLock.lock()
-        kept = (url, reference)
+        neutrals.removeAll { $0.url == url }
+        neutrals.append((url, reference))
+        while neutrals.count > keptNeutrals { neutrals.removeFirst() }
+        let now = neutrals.count
         keptLock.unlock()
+        let why: String = had == 0 ? "cold" : "another image"
+        Log.note("cache", "neutral \(url.lastPathComponent) · miss: \(why) · rendered \(reference.width)×\(reference.height) in \(Log.seconds(since: started)) · \(now) of \(keptNeutrals) kept")
         return reference
     }
 
-    static func forgetNeutral() {
+    /// Lets go of everything kept: another folder was opened, or the Mac is short of memory.
+    static func forgetAll(_ why: String) {
         keptLock.lock()
-        kept = nil
+        let had = neutrals.count + bases.count + (keptMatte == nil ? 0 : 1)
+        neutrals = []
+        bases = []
+        keptMatte = nil
         keptLock.unlock()
+        if had > 0 { Log.note("cache", "masking caches emptied (\(why))") }
     }
 
-    /// The faces of a picture ranked as subjects (§5.1 of the masking spec), with what was
-    /// measured to rank them.
+    /// Forgets what is known about one photo's subject, so that Remake works it out afresh.
+    static func forgetBase(_ url: URL) {
+        let prefix = url.path + "|"
+        keptLock.lock()
+        let had = bases.count
+        bases.removeAll { $0.key.hasPrefix(prefix) }
+        if let kept = keptMatte, kept.base.key.hasPrefix(prefix) { keptMatte = nil }
+        let dropped = had - bases.count
+        keptLock.unlock()
+        if dropped > 0 { Log.note("cache", "base \(url.lastPathComponent) · cleared for a remake") }
+    }
+
+    /// What a photo's base is kept under: the file, where the subject comes from, the settings
+    /// that change it, and the model.
+    static func baseKey(_ url: URL, _ subject: SubjectSource, _ rules: SubjectRules) -> String {
+        "\(url.path)|\(subject.rawValue)|\(rules.focusStrictness)|\(proxyLongEdge)|\(BiRefNetModel.version)"
+    }
+
+    /// What is kept, for the log's regular summary.
+    static var keptSummary: String {
+        keptLock.lock()
+        defer { keptLock.unlock() }
+        let bytes = neutrals.reduce(0) { $0 + $1.image.bytesPerRow * $1.image.height }
+        return "neutral renders \(neutrals.count) / \(MemoryStats.plain(UInt64(bytes))) · bases \(bases.count) · edge engine \(keptMatte == nil ? "not kept" : "kept")"
+    }
+
+    // MARK: The subject
+
+    /// The faces of a picture ranked as subjects, with what was measured to rank them.
     struct Ranking {
         let sharpness: SharpnessMap?
         let candidates: [SubjectChoice.Candidate]
@@ -424,12 +461,164 @@ enum Masking {
         return Ranking(sharpness: map, candidates: SubjectChoice.rank(faces, sharpness: map))
     }
 
-    /// The same, from a picture already rendered.
-    static func make(reference: CGImage, name: String, tier: MatteTier, faces known: DetectedFaces?, settings: MatteSettings = MatteSettings(),
-                     subject: SubjectSource = .vision, coarse given: Gray? = nil, progress: (String) -> Void, cancelled: () -> Bool) throws -> MaskResult {
+    /// A picture drawn into a square of a given side, in sRGB: what the model is shown.
+    static func square(of image: CGImage, side: Int) -> CGImage? {
+        guard let ctx = CGContext(data: nil, width: side, height: side, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { return nil }
+        ctx.interpolationQuality = .high
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: side, height: side))
+        return ctx.makeImage()
+    }
+
+    /// What BiRefNet's part of the base comes to.
+    struct ModelPass {
+        var coarse: Gray
+        var selected: Gray
+        var poses: [BodyPose] = []
+        var primaryPose: Int?
+        var tiles: [(box: Box, used: Bool)] = []
+        var subjectBox: Box?
+    }
+
+    /// The first pass from BiRefNet (masking spec v3, sections 3, 4.1, 6 and 7): the whole
+    /// frame, the pieces of its answer that are the subject, then closer looks at the subject
+    /// cut from the full-size photo. `face` is the subject's face in proxy pixels, if any.
+    static func birefnetPass(proxy small: CGImage, reference: CGImage, face: PixelRect?, sharpness map: SharpnessMap, rules: SubjectRules,
+                             name: String, progress: (String) -> Void) throws -> ModelPass {
+        let w = small.width, h = small.height
+        let posix = Locale(identifier: "en_US_POSIX")
+        let side = BundledModels.hasBiRefNet ? BiRefNetModel.shared.inputSide : 1024
+
+        // The body pose: which limbs are certainly the subject's.
+        var stage = CFAbsoluteTimeGetCurrent()
+        progress("Body pose")
+        let poses = bodyPoses(small)
+        var primaryPose: Int?
+        if let face = face { primaryPose = BodyPose.match(poses, face: face, least: rules.poseConfidence) }
+        var limbs: [Bool]?
+        if let i = primaryPose, let face = face {
+            limbs = poses[i].confirmed(radius: rules.capsule * Float(face.h), w: w, h: h, least: rules.poseConfidence)
+        }
+        var matched = "not matched"
+        if let i = primaryPose { matched = "matched (pose \(i + 1))" } else if face == nil { matched = "not matched (no face)" }
+        else if !poses.isEmpty { matched = "not matched (no pose's head is near the primary face)" }
+        Log.note("pose", "\(name): \(poses.count) pose(s) in \(Log.seconds(since: stage)) · primary person \(matched)")
+        for (i, pose) in poses.enumerated().prefix(6) {
+            let sure = pose.sure(rules.poseConfidence).count
+            var joints: [String] = []
+            for (jointName, joint) in pose.joints.sorted(by: { $0.key < $1.key }) {
+                joints.append(jointName + " " + String(format: "%.2f", locale: posix, joint.confidence))
+            }
+            let which: String = i == primaryPose ? " (primary)" : ""
+            Log.note("pose", "\(name): pose \(i + 1)\(which) · \(sure) of \(pose.joints.count) joints sure · \(joints.joined(separator: ", "))")
+        }
+
+        // The whole frame, and which pieces of the answer are the subject.
+        progress("BiRefNet")
+        guard let frame = square(of: small, side: side) else { throw Failure("the photo couldn't be prepared for the model") }
+        let whole = try BiRefNetModel.shared.segment(frame, what: "\(name) whole frame (\(w)×\(h) proxy)").resized(w: w, h: h)
+        var mustKeep: (([Bool]) -> Bool)?
+        if let limbs = limbs {
+            mustKeep = { piece in
+                var touching = 0
+                for i in 0 ..< piece.count where piece[i] && limbs[i] {
+                    touching += 1
+                    if touching >= 16 { return true }
+                }
+                return false
+            }
+        }
+        stage = CFAbsoluteTimeGetCurrent()
+        let (kept, decision) = SubjectSelect.keep(whole, sharpness: map, face: face, rules: rules, mustKeep: mustKeep)
+        Log.note("base", "\(name): \(decision.summary) · \(Log.seconds(since: stage))")
+        for line in decision.details { Log.note("base", "\(name): \(line)") }
+        if primaryPose != nil {
+            for (i, pose) in poses.enumerated() where i != primaryPose {
+                var inside = 0
+                for joint in pose.sure(rules.poseConfidence).values where kept.at(Int(joint.x), Int(joint.y)) >= 0.5 { inside += 1 }
+                if inside >= 4 { Log.warn("\(name): OTHER-PERSON? \(inside) joints of pose \(i + 1), which is not the subject's, lie inside the subject mask") }
+            }
+        }
+        var pass = ModelPass(coarse: kept, selected: kept, poses: poses, primaryPose: primaryPose)
+
+        // Closer looks at the subject, from the full-size photo.
+        var x0 = w, y0 = h, x1 = 0, y1 = 0
+        for y in 0 ..< h {
+            for x in 0 ..< w where kept.v[y * w + x] >= 0.5 {
+                x0 = min(x0, x); x1 = max(x1, x + 1); y0 = min(y0, y); y1 = max(y1, y + 1)
+            }
+        }
+        if x1 <= x0 {
+            Log.warn("\(name): BiRefNet selected nothing in this photo")
+            return pass
+        }
+        let box = Box(x0: x0, y0: y0, x1: x1, y1: y1).expanded(by: rules.boxExpand, w: w, h: h)
+        pass.subjectBox = box
+        let percent = 100 * Double(box.area) / Double(w * h)
+        let size = "\(box.x1 - box.x0)×\(box.y1 - box.y0) px of the proxy, \(String(format: "%.0f", locale: posix, percent))% of the frame"
+        if percent > 80 {
+            Log.note("base", "\(name): close-up skipped: the subject's box is \(size), over 80%, so the whole-frame pass already is the close-up")
+            return pass
+        }
+        stage = CFAbsoluteTimeGetCurrent()
+        let grid = CloseUps.tiles(covering: box, w: w, h: h, rules: rules)
+        let radius = CloseUps.mergeRadius(faceHeight: face?.h, longEdge: max(w, h), rules: rules)
+        let zone = CloseUps.edgeZone(kept, radius: radius)
+        let scale = Double(reference.width) / Double(w)
+        // The mask is kept at up to half the photo's size from here on: finer than that, a
+        // close-up has nothing to add.
+        let cw = min(reference.width, max(w, (reference.width + 1) / 2))
+        let ch = max(Int((Double(cw) * Double(reference.height) / Double(reference.width)).rounded()), 1)
+        var canvas = CloseUps.Canvas(w: cw, h: ch, scale: Float(cw) / Float(w))
+        for (n, tile) in grid.enumerated() {
+            var holdsEdge = false
+            search: for y in stride(from: tile.y0, to: tile.y1, by: 2) {
+                for x in stride(from: tile.x0, to: tile.x1, by: 2) where zone.v[y * w + x] > 0 {
+                    holdsEdge = true
+                    break search
+                }
+            }
+            let rect = CGRect(x: (Double(tile.x0) * scale).rounded(), y: (Double(tile.y0) * scale).rounded(),
+                              width: (Double(tile.x1 - tile.x0) * scale).rounded(), height: (Double(tile.y1 - tile.y0) * scale).rounded())
+            guard holdsEdge, let crop = reference.cropping(to: rect), let picture = square(of: crop, side: side) else {
+                pass.tiles.append((tile, false))
+                continue
+            }
+            progress("Close-up \(n + 1) of \(grid.count)")
+            let answer = try BiRefNetModel.shared.segment(picture, what: "\(name) close-up \(n + 1)/\(grid.count) (\(crop.width)×\(crop.height) px of the photo)")
+            canvas.add(answer, box: tile, feather: rules.feather)
+            pass.tiles.append((tile, true))
+        }
+        if canvas.tiles > 0 { pass.coarse = canvas.merged(over: kept, zone: zone) }
+        let tileSide = grid.first.map { $0.x1 - $0.x0 } ?? 0
+        let detail = tileSide > 0 ? 100 * Double(side) / (Double(tileSide) * scale) : 0
+        let wholeDetail = 100 * Double(side) / Double(max(reference.width, reference.height))
+        let detailText: String = String(format: "%.0f", locale: posix, detail)
+        let wholeText: String = String(format: "%.0f", locale: posix, wholeDetail)
+        let ran: String = "\(name): close-up run: the subject's box is \(size) → \(canvas.tiles) of \(grid.count) tile(s) of \(tileSide) px used (a tile with no edge in it is left out)"
+        let saw: String = "the model saw \(detailText)% of the photo's detail there, \(wholeText)% in the whole frame"
+        let kept2: String = "the edge may move \(Int(radius)) px · mask kept at \(pass.coarse.w)×\(pass.coarse.h) · \(Log.seconds(since: stage))"
+        Log.note("base", [ran, saw, kept2].joined(separator: " · "))
+        return pass
+    }
+
+    /// What is known about a photo's subject, from the kept copy when there is one. `key`
+    /// nil never keeps or reuses anything (tests). `given` supplies the first-pass mask itself.
+    static func base(reference: CGImage, name: String, key: String?, faces known: DetectedFaces?, rules: SubjectRules = SubjectRules(),
+                     subject: SubjectSource, coarse given: Gray? = nil, progress: (String) -> Void) throws -> SubjectBase {
+        if let key = key {
+            keptLock.lock()
+            let hit = bases.first { $0.key == key }
+            keptLock.unlock()
+            if let hit = hit {
+                Log.note("cache", "base \(name) · hit: the subject is already known, the model is not run again")
+                return hit
+            }
+            Log.note("cache", "base \(name) · miss")
+        }
         let started = CFAbsoluteTimeGetCurrent()
         let W = reference.width, H = reference.height
-        guard let photo = photo(from: reference) else { throw Failure("the rendered photo isn't in the expected 8-bit form") }
         guard let small = proxy(of: reference, longEdge: proxyLongEdge) else { throw Failure("the photo couldn't be scaled down") }
 
         // Faces, in pixels of the full photo with y down.
@@ -452,7 +641,7 @@ enum Masking {
             Log.note("base", "\(name): faces \(faces.count) → primary score \(Int(primary.score)), faceSharp \(number(primary.sharp))"
                 + (others.isEmpty ? "" : " · others' faceSharp [\(others)]") + " · sharpness map in \(Log.seconds(since: stage))")
         } else {
-            Log.warn("\(name): no usable face; the whole photo is treated as in focus")
+            Log.warn("\(name): no usable face; the largest thing the model finds is taken as the subject, and the whole edge is treated as hair")
         }
 
         // The first pass: roughly what the subject is, from the chosen source.
@@ -460,32 +649,39 @@ enum Masking {
         stage = CFAbsoluteTimeGetCurrent()
         var used = subject
         var coarse = given
-        if coarse == nil && subject != .vision {
-            if let primary = ranking.primary, let map = ranking.sharpness {
-                coarse = try modelPass(subject, proxy: small, reference: reference, face: primary.face, sharpness: map, name: name, progress: progress)
+        var pass: ModelPass?
+        if coarse == nil && subject == .birefnet {
+            if !BundledModels.hasBiRefNet {
+                Log.warn("\(name): the BiRefNet model isn't in this build; using Vision")
+                used = .vision
+            } else if let map = ranking.sharpness {
+                let made = try birefnetPass(proxy: small, reference: reference, face: ranking.primary?.face, sharpness: map, rules: rules, name: name, progress: progress)
+                pass = made
+                coarse = made.coarse
             } else {
-                Log.warn("\(name): \(subject.name) needs a face to start from and none was found; using Vision")
+                Log.warn("\(name): the photo's sharpness couldn't be measured; using Vision")
                 used = .vision
             }
         }
-        var visionKind = "given"
+        var kind = given == nil ? used.name : "given"
         if coarse == nil, let people = personMask(small), people.v.reduce(0, +) / Float(people.v.count) > 0.003 {
             coarse = people
-            visionKind = "people"
+            kind = "Vision people"
         }
         if coarse == nil, let whole = subjectMask(small) {
             coarse = whole
-            visionKind = "foreground"
+            kind = "Vision foreground"
         }
         guard let first = coarse else { throw Failure("no subject was found in this photo") }
-        let coverage = 100 * first.v.reduce(0, +) / Float(max(first.v.count, 1))
-        Log.note("base", "\(name): candidate \(used.rawValue) (\(used == .vision ? "Vision \(visionKind)" : used.name)) · subject area "
+        var area: Float = 0
+        for v in first.v where v >= 0.5 { area += 1 }
+        let coverage = 100 * area / Float(max(first.v.count, 1))
+        Log.note("base", "\(name): candidate \(used.rawValue) (\(kind)) · subject area "
             + "\(String(format: "%.1f", locale: Locale(identifier: "en_US_POSIX"), coverage))% of frame · first pass \(Log.seconds(since: stage))")
 
-        // A second, closer look at each head, at full size, for the better tiers. Vision's
-        // look, so only when Vision made the first pass.
+        // Vision's masks are coarse around hair: a second, closer look at each head, at full size.
         var patches: [HeadPatch] = []
-        if tier != .fast && given == nil && used == .vision {
+        if given == nil && used == .vision {
             stage = CFAbsoluteTimeGetCurrent()
             for f in faces.prefix(4) {
                 let cx = Double(f.x) + Double(f.w) / 2, cy = Double(f.y) + Double(f.h) / 2 - 0.25 * Double(f.h)
@@ -497,49 +693,193 @@ enum Masking {
             }
             Log.note("mask", "\(name): \(patches.count) head close-up(s) of \(faces.count) face(s) in \(Log.seconds(since: stage))")
         }
+
+        let seconds = CFAbsoluteTimeGetCurrent() - started
+        let made = SubjectBase(key: key ?? "", source: used, faces: faces, proxy: small, ranking: ranking, coarse: first, selected: pass?.selected,
+                               patches: patches, poses: pass?.poses ?? [], primaryPose: pass?.primaryPose, tiles: pass?.tiles ?? [],
+                               subjectBox: pass?.subjectBox, seconds: seconds)
+        if key != nil {
+            keptLock.lock()
+            bases.removeAll { $0.key == made.key }
+            bases.append(made)
+            while bases.count > keptBases { bases.removeFirst() }
+            keptLock.unlock()
+        }
+        Log.note("base", "\(name): base ready in \(Log.seconds(since: started))")
+        MemoryMonitor.mark("finding the subject of \(name)")
+        return made
+    }
+
+    // MARK: Making a mask
+
+    /// Makes the masks for one raw file. Runs for seconds; call it off the main thread.
+    /// What is known about the photo's subject is kept, so making it again at another tier
+    /// only refines the edge again. `partial` is handed the Off mask as soon as it is ready.
+    static func make(url: URL, tier: MatteTier, faces known: DetectedFaces?, settings: MatteSettings = MatteSettings(), rules: SubjectRules = SubjectRules(),
+                     subject: SubjectSource = .birefnet, progress: (String) -> Void, partial: ((MaskResult) -> Void)? = nil,
+                     cancelled: () -> Bool) throws -> MaskResult {
+        let reference = try neutral(url)
+        return try make(reference: reference, name: url.lastPathComponent, key: baseKey(url, subject, rules), tier: tier, faces: known,
+                        settings: settings, rules: rules, subject: subject, progress: progress, partial: partial, cancelled: cancelled)
+    }
+
+    /// The same, from a picture already rendered.
+    static func make(reference: CGImage, name: String, key: String? = nil, tier: MatteTier, faces known: DetectedFaces?,
+                     settings: MatteSettings = MatteSettings(), rules: SubjectRules = SubjectRules(), subject: SubjectSource = .vision,
+                     coarse given: Gray? = nil, progress: (String) -> Void, partial: ((MaskResult) -> Void)? = nil,
+                     cancelled: () -> Bool) throws -> MaskResult {
+        let started = CFAbsoluteTimeGetCurrent()
+        let found = try base(reference: reference, name: name, key: key, faces: known, rules: rules, subject: subject, coarse: given, progress: progress)
         if cancelled() { throw Failure("stopped") }
 
-        let matte = Matte(photo: photo, coarse: first, faces: faces, patches: patches, settings: settings,
-                          defocus: ranking.sharpness?.dense, subjectSharpness: ranking.primary?.sharp)
-        MemoryMonitor.mark("setting up a \(tier.name) mask")
+        // The edge engine, set up once for each base: the snapped edge (Off) is part of the setup.
+        var ready: Matte?
+        keptLock.lock()
+        if let kept = keptMatte, kept.base === found { ready = kept.matte }
+        keptLock.unlock()
+        if ready != nil {
+            Log.note("cache", "edge \(name) · hit: only the \(tier.name) refinement runs")
+        } else {
+            progress("Preparing the edge")
+            guard let photo = photo(from: reference) else { throw Failure("the rendered photo isn't in the expected 8-bit form") }
+            let fresh = Matte(photo: photo, coarse: found.coarse, faces: found.faces, patches: found.patches, settings: settings,
+                              defocus: found.ranking.sharpness?.dense, subjectSharpness: found.ranking.primary?.sharp)
+            if key != nil {
+                keptLock.lock()
+                keptMatte = (found, fresh)
+                keptLock.unlock()
+            }
+            ready = fresh
+            MemoryMonitor.mark("setting up the edge of \(name)")
+        }
+        guard let matte = ready else { throw Failure("the edge couldn't be set up") }
+        if cancelled() { throw Failure("stopped") }
+
+        // Shown as it comes: the snapped edge first, then the hair.
+        if tier != .off, let partial = partial {
+            let first = matte.run(tier: .off)
+            if let shown = try? result(first, base: found, photo: matte.photo, name: name, tier: .off, started: started, final: false) { partial(shown) }
+            if cancelled() { throw Failure("stopped") }
+        }
         let out = matte.run(tier: tier, progress: progress, cancelled: cancelled)
         for line in out.log { Log.note("mask", "\(name): \(line)") }
         for warning in out.warnings { Log.warn("\(name): \(warning) (\(tier.name) mask)") }
         MemoryMonitor.mark("refining a \(tier.name) mask")
+        return try result(out, base: found, photo: matte.photo, name: name, tier: tier, started: started, final: true)
+    }
 
-        // Skin: its colour is learned from the cheeks and nose of each face.
+    /// The engine's answer as pictures, with the skin mask when this is the finished mask.
+    private static func result(_ out: MatteOutput, base: SubjectBase, photo: Photo, name: String, tier: MatteTier,
+                               started: CFAbsoluteTime, final: Bool) throws -> MaskResult {
+        let W = out.w, H = out.h
         var skin: CGImage?
-        stage = CFAbsoluteTimeGetCurrent()
-        var samples: [SIMD3<Float>] = []
-        for f in faces.prefix(4) {
-            let spots: [(Double, Double)] = [(0.28, 0.58), (0.72, 0.58), (0.5, 0.52)]
-            let r = max(f.w / 40, 3)
-            for (u, v) in spots {
-                let sx = f.x + Int(Double(f.w) * u), sy = f.y + Int(Double(f.h) * v)
-                for y in (sy - r) ... (sy + r) {
-                    for x in (sx - r) ... (sx + r) where x >= 0 && y >= 0 && x < W && y < H && out.alpha[y * W + x] == 255 {
-                        samples.append(photo.rgb(x, y))
+        if final {
+            // Skin: its colour is learned from the cheeks and nose of each face.
+            let stage = CFAbsoluteTimeGetCurrent()
+            var samples: [SIMD3<Float>] = []
+            for f in base.faces.prefix(4) {
+                let spots: [(Double, Double)] = [(0.28, 0.58), (0.72, 0.58), (0.5, 0.52)]
+                let r = max(f.w / 40, 3)
+                for (u, v) in spots {
+                    let sx = f.x + Int(Double(f.w) * u), sy = f.y + Int(Double(f.h) * v)
+                    for y in (sy - r) ... (sy + r) {
+                        for x in (sx - r) ... (sx + r) where x >= 0 && y >= 0 && x < W && y < H && out.alpha[y * W + x] == 255 {
+                            samples.append(photo.rgb(x, y))
+                        }
                     }
                 }
             }
-        }
-        if let model = SkinModel(samples: samples) {
-            let bytes = SkinMask.make(photo: photo, alpha: out.alpha, model: model, exclusion: featureExclusion(small))
-            skin = picture(gray: bytes, w: W, h: H)
-            Log.note("mask", "\(name): skin from \(samples.count) samples in \(Log.seconds(since: stage))")
-        } else {
-            Log.note("mask", "\(name): no skin mask (\(faces.isEmpty ? "no face found" : "too few skin samples"))")
+            if let model = SkinModel(samples: samples) {
+                let bytes = SkinMask.make(photo: photo, alpha: out.alpha, model: model, exclusion: featureExclusion(base.proxy))
+                skin = picture(gray: bytes, w: W, h: H)
+                Log.note("mask", "\(name): skin from \(samples.count) samples in \(Log.seconds(since: stage))")
+            } else {
+                Log.note("mask", "\(name): no skin mask (\(base.faces.isEmpty ? "no face found" : "too few skin samples"))")
+            }
         }
 
+        let first = base.coarse
         let coarse8 = first.v.map { UInt8(min(max($0, 0), 1) * 255) }
         guard let alpha = picture(gray: out.alpha, w: W, h: H), let shares = picture(rgbx: out.shares, w: W, h: H),
               let trimap = picture(gray: out.trimap, w: out.trimapW, h: out.trimapH),
               let rough = picture(gray: coarse8, w: first.w, h: first.h) else { throw Failure("the mask couldn't be stored") }
-        let megapixels = String(format: "%.1f", Double(out.unknownPixels) / 1_000_000)
-        let summary = "\(tier.name) mask from \(used.name) in \(Log.seconds(since: started)): \(megapixels) MP of edge refined"
-            + (out.warnings.isEmpty ? "" : " · check: " + out.warnings.joined(separator: ", "))
-        Log.note("mask", "\(name): \(summary)")
-        return MaskResult(width: W, height: H, alpha: alpha, shares: shares, skin: skin, trimap: trimap, coarse: rough, tier: tier, summary: summary)
+        let megapixels = String(format: "%.1f", locale: Locale(identifier: "en_US_POSIX"), Double(out.unknownPixels) / 1_000_000)
+        var summary: String = "\(tier.name) mask from \(base.source.name) in \(Log.seconds(since: started)): \(megapixels) MP of edge snapped"
+        if tier != .off { summary += ", hair refined" }
+        if let halo = out.edgeQuality.haloElsewhere {
+            let haloText: String = String(format: "%.3f", locale: Locale(identifier: "en_US_POSIX"), halo)
+            summary += " · halo away from hair \(haloText)"
+            if final && halo > 0.05 { Log.warn("\(name): HALO? mean alpha \(haloText) just outside the edge, away from hair (\(tier.name) mask)") }
+        }
+        if !out.warnings.isEmpty { summary += " · check: " + out.warnings.joined(separator: ", ") }
+        if final { Log.note("mask", "\(name): \(summary)") }
+        return MaskResult(width: W, height: H, alpha: alpha, shares: shares, skin: skin, trimap: trimap, coarse: rough,
+                          debug: overlay(out, base: base), tier: tier, edge: out.edgeQuality, summary: summary)
+    }
+
+    /// A see-through picture of what was done where, a quarter of the photo's size: the hair
+    /// zone (blue), the edge that was snapped (green) and where colour matting ran as well
+    /// (pink), the close-up boxes (yellow), the body poses (white) and the subject's face (cyan).
+    static func overlay(_ out: MatteOutput, base: SubjectBase) -> CGImage? {
+        let w = out.trimapW, h = out.trimapH
+        guard w > 0, h > 0, out.hair.count == w * h, out.zones.count == w * h,
+              let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+                                  space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        ctx.clear(CGRect(x: 0, y: 0, width: w, height: h))
+        guard let data = ctx.data else { return nil }
+        let p = data.assumingMemoryBound(to: UInt8.self)
+        let rowBytes = ctx.bytesPerRow
+        for y in 0 ..< h {
+            for x in 0 ..< w {
+                let i = y * w + x
+                var r: Float = 0, g: Float = 0, b: Float = 0, a: Float = 0
+                if out.zones[i] == 1 {
+                    r = 0.1; g = 1; b = 0.3; a = 0.7
+                } else if out.zones[i] == 2 {
+                    r = 1; g = 0.2; b = 0.9; a = 0.7
+                } else if out.hair[i] > 0 {
+                    r = 0.2; g = 0.5; b = 1; a = 0.3 * Float(out.hair[i]) / 255
+                }
+                if a == 0 { continue }
+                let o = y * rowBytes + x * 4
+                p[o] = UInt8(r * a * 255); p[o + 1] = UInt8(g * a * 255); p[o + 2] = UInt8(b * a * 255); p[o + 3] = UInt8(a * 255)
+            }
+        }
+        // Lines are given with y down; the drawing context counts it upwards.
+        ctx.translateBy(x: 0, y: CGFloat(h))
+        ctx.scaleBy(x: 1, y: -1)
+        let k = CGFloat(w) / CGFloat(max(base.proxy.width, 1))
+        let line = max(CGFloat(w) / 700, 1.5)
+        func rect(_ b: Box) -> CGRect { CGRect(x: CGFloat(b.x0) * k, y: CGFloat(b.y0) * k, width: CGFloat(b.x1 - b.x0) * k, height: CGFloat(b.y1 - b.y0) * k) }
+        ctx.setLineWidth(line)
+        for tile in base.tiles {
+            ctx.setStrokeColor(red: 1, green: 0.85, blue: 0, alpha: tile.used ? 1 : 0.35)
+            ctx.stroke(rect(tile.box).insetBy(dx: line, dy: line))
+        }
+        if let box = base.subjectBox {
+            ctx.setStrokeColor(red: 1, green: 0.5, blue: 0, alpha: 1)
+            ctx.setLineDash(phase: 0, lengths: [6 * line, 4 * line])
+            ctx.stroke(rect(box))
+            ctx.setLineDash(phase: 0, lengths: [])
+        }
+        let bones = BodyPose.limbs + [("leftShoulder", "rightShoulder"), ("leftHip", "rightHip"), ("neck", "nose")]
+        for (i, pose) in base.poses.enumerated() {
+            let sure = pose.sure(0.3)
+            ctx.setStrokeColor(red: 1, green: 1, blue: 1, alpha: i == base.primaryPose ? 1 : 0.45)
+            ctx.setLineWidth(i == base.primaryPose ? 2 * line : line)
+            for (from, to) in bones {
+                guard let a = sure[from], let b = sure[to] else { continue }
+                ctx.move(to: CGPoint(x: CGFloat(a.x) * k, y: CGFloat(a.y) * k))
+                ctx.addLine(to: CGPoint(x: CGFloat(b.x) * k, y: CGFloat(b.y) * k))
+                ctx.strokePath()
+            }
+        }
+        if let face = base.ranking.primary?.face {
+            ctx.setLineWidth(line)
+            ctx.setStrokeColor(red: 0, green: 1, blue: 1, alpha: 1)
+            ctx.stroke(rect(Box(face)))
+        }
+        return ctx.makeImage()
     }
 
     // MARK: Debug bundle
@@ -551,94 +891,107 @@ enum Masking {
         return CGImageDestinationFinalize(dest) ? data as Data : nil
     }
 
-    /// Writes what a subject-selection model would be given for this photo, and what the
-    /// current first pass makes of it, into a new folder next to the raw: the inputs for
-    /// comparing models outside the app (the masking spec's bake-off).
-    static func debugBundle(url: URL, faces known: DetectedFaces?) throws -> URL {
+    private static func png(_ plane: Gray) -> Data? {
+        picture(gray: plane.v.map { UInt8(($0 >= 0 ? min($0, 1) : 0) * 255) }, w: plane.w, h: plane.h).flatMap { png($0) }
+    }
+
+    /// Writes what the masking pipeline saw and decided for this photo into a new folder next
+    /// to the raw, for looking into a mask outside the app.
+    static func debugBundle(url: URL, faces known: DetectedFaces?, rules: SubjectRules = SubjectRules(), subject: SubjectSource = .birefnet,
+                            mask: MaskResult?) throws -> URL {
         let reference = try neutral(url)
-        let W = reference.width, H = reference.height
-        guard let small = proxy(of: reference, longEdge: proxyLongEdge), let proxyData = png(small) else { throw Failure("the photo couldn't be scaled down") }
-        let scale = Double(W) / Double(small.width)
-
-        let marks = faceMarks(small)
-        var rects = marks.map { PixelRect(x: Int($0.rect.minX), y: Int($0.rect.minY), w: max(Int($0.rect.width), 1), h: max(Int($0.rect.height), 1)) }
-        if rects.isEmpty, let found = known, found.imageWidth > 0 {
-            let k = Double(small.width) / found.imageWidth
-            rects = found.subjects.map { PixelRect(x: Int($0.left * k), y: Int($0.top * k), w: max(Int($0.width * k), 1), h: max(Int($0.height * k), 1)) }
-        }
-        let ranking = rank(proxy: small, faces: rects)
-
         let fm = FileManager.default
-        let parent = url.deletingLastPathComponent(), base = url.deletingPathExtension().lastPathComponent
-        var folder = parent.appendingPathComponent("\(base)-maskdebug", isDirectory: true)
+        let parent = url.deletingLastPathComponent(), stem = url.deletingPathExtension().lastPathComponent
+        var folder = parent.appendingPathComponent("\(stem)-maskdebug", isDirectory: true)
         var n = 2
         while fm.fileExists(atPath: folder.path) {
-            folder = parent.appendingPathComponent("\(base)-maskdebug-\(n)", isDirectory: true)
+            folder = parent.appendingPathComponent("\(stem)-maskdebug-\(n)", isDirectory: true)
             n += 1
         }
         try fm.createDirectory(at: folder, withIntermediateDirectories: false)
+        try writeBundle(reference: reference, name: url.lastPathComponent, key: baseKey(url, subject, rules), into: folder,
+                        faces: known, rules: rules, subject: subject, mask: mask)
+        return folder
+    }
+
+    /// The bundle's files, into a folder that exists.
+    static func writeBundle(reference: CGImage, name: String, key: String?, into folder: URL, faces known: DetectedFaces?,
+                            rules: SubjectRules = SubjectRules(), subject: SubjectSource, mask: MaskResult?) throws {
+        let found = try base(reference: reference, name: name, key: key, faces: known, rules: rules, subject: subject, progress: { _ in })
+        let small = found.proxy
+        guard let proxyData = png(small) else { throw Failure("the proxy couldn't be encoded") }
         try proxyData.write(to: folder.appendingPathComponent("proxy.png"))
+        var written = ["proxy.png"]
+        func write(_ data: Data?, _ file: String) throws {
+            guard let data = data else { return }
+            try data.write(to: folder.appendingPathComponent(file))
+            written.append(file)
+        }
+        func json(_ object: [String: Any], _ file: String) throws {
+            try write(try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys]), file)
+        }
 
         // Faces, in proxy pixels with y down, best subject first.
         func list(_ r: PixelRect) -> [Int] { [r.x, r.y, r.w, r.h] }
+        func list(_ b: Box) -> [Int] { [b.x0, b.y0, b.x1, b.y1] }
+        let marks = faceMarks(small)
         var facesJSON: [[String: Any]] = []
-        for (i, candidate) in ranking.candidates.enumerated() {
+        for (i, candidate) in found.ranking.candidates.enumerated() {
             var entry: [String: Any] = ["rect": list(candidate.face), "primary": i == 0, "score": Double(candidate.score)]
             if let sharp = candidate.sharp { entry["faceSharp"] = Double(sharp) }
-            if let mark = marks.first(where: { abs(Int($0.rect.minX) - candidate.face.x) <= 1 && abs(Int($0.rect.minY) - candidate.face.y) <= 1 }) {
+            let cx = CGFloat(candidate.face.x) + CGFloat(candidate.face.w) / 2, cy = CGFloat(candidate.face.y) + CGFloat(candidate.face.h) / 2
+            if let mark = marks.first(where: { $0.rect.contains(CGPoint(x: cx, y: cy)) }) {
                 entry["landmarks"] = mark.regions.mapValues { points in points.map { [Double($0.x), Double($0.y)] } }
             }
             facesJSON.append(entry)
         }
-        let facesDoc: [String: Any] = ["image": url.lastPathComponent, "proxy_size": [small.width, small.height], "full_size": [W, H],
+        let facesDoc: [String: Any] = ["image": name, "proxy_size": [small.width, small.height], "full_size": [reference.width, reference.height],
                                        "units": "proxy pixels, origin top left, y down", "faces": facesJSON]
-        try JSONSerialization.data(withJSONObject: facesDoc, options: [.prettyPrinted, .sortedKeys]).write(to: folder.appendingPathComponent("faces.json"))
+        try json(facesDoc, "faces.json")
 
-        // The body box of the primary face, cut from the full-size render.
-        if let primary = ranking.primary {
-            let box = SubjectChoice.bodyBox(face: primary.face, w: small.width, h: small.height)
-            let full = PixelRect(x: Int(Double(box.x) * scale), y: Int(Double(box.y) * scale), w: Int(Double(box.w) * scale), h: Int(Double(box.h) * scale)).clamped(w: W, h: H)
-            if let crop = reference.cropping(to: CGRect(x: full.x, y: full.y, width: full.w, height: full.h)),
-               let shrunk = proxy(of: crop, longEdge: proxyLongEdge), let data = png(shrunk) {
-                try data.write(to: folder.appendingPathComponent("box_crop_hr.png"))
-                let doc: [String: Any] = ["box_proxy": list(box), "box_full": list(full), "crop_size": [shrunk.width, shrunk.height],
-                                          "units": "pixels, origin top left, y down; x, y, width, height"]
-                try JSONSerialization.data(withJSONObject: doc, options: [.prettyPrinted, .sortedKeys]).write(to: folder.appendingPathComponent("box.json"))
-            }
+        try write(found.selected.flatMap { png($0) }, "m0_birefnet.png")
+        try write(png(found.coarse), "m0_final.png")
+        try write(mask.flatMap { png($0.alpha) }, "final_alpha.png")
+        if let dense = found.ranking.sharpness?.dense {
+            try write(png(Gray(w: dense.w, h: dense.h, v: dense.v.map { $0 / SharpnessMap.most })), "sharpness.png")
         }
+        var posesJSON: [[String: Any]] = []
+        for (i, pose) in found.poses.enumerated() {
+            let joints: [String: [Double]] = pose.joints.mapValues { [Double($0.x), Double($0.y), Double($0.confidence)] }
+            let entry: [String: Any] = ["primary": i == found.primaryPose, "joints": joints]
+            posesJSON.append(entry)
+        }
+        let posesDoc: [String: Any] = ["units": "proxy pixels, origin top left, y down; each joint is x, y, confidence", "poses": posesJSON]
+        try json(posesDoc, "pose.json")
+        var regions: [String: Any] = [
+            "units": "proxy pixels, origin top left, y down; boxes are x0, y0, x1, y1",
+            "tiles": found.tiles.map { tile -> [String: Any] in ["box": list(tile.box), "used": tile.used] },
+            "growth": [],
+            "mask_size": [found.coarse.w, found.coarse.h],
+        ]
+        if let box = found.subjectBox { regions["subject_box"] = list(box) }
+        try json(regions, "regions.json")
 
-        // The current first pass, at the proxy's size.
-        var source = "none"
-        var first = personMask(small)
-        if let people = first, people.v.reduce(0, +) / Float(people.v.count) > 0.003 { source = "people" } else {
-            first = subjectMask(small)
-            source = first == nil ? "none" : "foreground"
-        }
-        if let first = first?.resized(w: small.width, h: small.height),
-           let picture = picture(gray: first.v.map { UInt8(min(max($0, 0), 1) * 255) }, w: first.w, h: first.h), let data = png(picture) {
-            try data.write(to: folder.appendingPathComponent("current_m0.png"))
-        }
-
+        var alphaNote = " (not written: no mask had been made)"
+        if let mask = mask { alphaNote = " (\(mask.tier.name) tier)" }
         let readme = """
-        Mask debug bundle for \(url.lastPathComponent)
+        Mask debug bundle for \(name)
 
-        proxy.png         the picture a subject-selection model is given (sRGB, long edge \(proxyLongEdge))
-        box_crop_hr.png   the area around the main person, from the full-size photo; box.json says where it is
+        proxy.png         the picture the pipeline works from (sRGB, long edge \(proxyLongEdge))
         faces.json        the faces found, best subject first, with their outlines
-        current_m0.png    what TrainCull's current first pass selects (Vision \(source))
+        m0_birefnet.png   the subject after the whole-frame pass and the selection rules (from \(found.source.name))
+        m0_final.png      the same after the close-ups: what the edge refinement starts from
+        final_alpha.png   the finished mask, at the photo's size\(alphaNote)
+        sharpness.png     how out of focus each part is: black is sharp, white is \(Int(SharpnessMap.most)) px of blur or more
+        pose.json         the body poses found
+        regions.json      the subject's box and the close-up tiles
 
-        To make the reference mask ("ground truth") for this photo:
-          1. Open proxy.png in Photoshop.
-          2. Paint the subject pure white and everything else pure black, at the same size.
-             Include anything the subject is holding or wearing. Leave other people out.
-          3. Save it in this folder as gt_subject.png. (A Photoshop Select Subject mask saved as
-             ps_mask-<number>.jpg is also understood, as a reference rather than the truth.)
-          Optional: the same for skin only, saved as gt_skin.png.
-        Then compress this folder (right-click, Compress) and send the zip.
+        To compare against Photoshop: open proxy.png, Select Subject, and save the mask at the same
+        size in this folder as ps_mask-<number>.jpg. Then compress this folder (right-click,
+        Compress) and send the zip.
         """
-        try Data(readme.utf8).write(to: folder.appendingPathComponent("README.txt"))
-        Log.note("mask", "\(url.lastPathComponent): debug bundle written to \(folder.path) · faces \(ranking.candidates.count) · first pass \(source)")
-        return folder
+        try write(Data(readme.utf8), "README.txt")
+        Log.note("mask", "\(name): debug bundle written to \(folder.path) · \(written.joined(separator: ", "))")
     }
 
     // MARK: Using a mask
@@ -717,6 +1070,13 @@ enum Masking {
         switch local.view {
         case .photo:
             return out
+        case .dimmed:
+            // Everything but the chosen area three stops darker: a halo shows as a bright rim.
+            let dark = out.applyingFilter("CIExposureAdjust", parameters: [kCIInputEVKey: -3])
+            return mix(out, dark, mask: chosenShares, extent: extent)
+        case .zones:
+            guard let debug = local.mask.debug else { return out }
+            return data(debug, over: extent).applyingFilter("CISourceOverCompositing", parameters: [kCIInputBackgroundImageKey: out]).cropped(to: extent)
         case .mask:
             // The mask's numbers are amounts, not brightnesses. Shown as they are they would
             // come out too light, so they are treated as display values for this view only.

@@ -7,6 +7,7 @@ import TraincullCore
 /// design; nothing in it is saved with the photo yet.
 struct LocalPane: View {
     @ObservedObject var session: Session
+    @State private var showDebug = false
 
     private var mask: MaskResult? { session.currentMask }
     private var layer: LocalLayer { session.local.layers[session.localArea.rawValue] }
@@ -20,22 +21,18 @@ struct LocalPane: View {
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
-                .help("Fast: clean edges. High: hair over several background colours. Max: every strand, slowly.")
+                .help("Off: the subject's edge as found, snapped to the photo. Fast, High and Max refine hair on top of that: Fast for clean backdrops, High for hair over several colours, Max for every strand, slowly. Changing this on a photo that has a mask only redoes the hair.")
                 Button(mask == nil ? "Make" : "Remake") { session.makeMask() }
                     .disabled(session.maskBusy || session.current == nil)
+                    .help(mask == nil ? "Find the subject and make its mask" : "Find the subject again from scratch")
             }
             .padding(.horizontal, 6)
-            Picker("Subject from", selection: $session.maskSource) {
-                ForEach(SubjectSource.allCases.filter { $0.available }, id: \.rawValue) { Text("\($0.name) (\($0.rawValue))").tag($0) }
+            Picker("Focus strictness", selection: $session.focusStrictness) {
+                ForEach(FocusStrictness.allCases, id: \.rawValue) { Text($0.name).tag($0) }
             }
             .font(.system(size: 12))
             .padding(.horizontal, 6)
-            .help("What makes the first, rough selection of the subject. The letters are the candidates of the comparison.")
-            Toggle("Narrow edge band", isOn: $session.narrowBand)
-                .font(.system(size: 12))
-                .controlSize(.small)
-                .padding(.horizontal, 6)
-                .help("Refine a narrower strip along the edge. Make the mask again to compare.")
+            .help("How readily things softer than the subject's face are left out of the mask. Takes effect on Remake.")
             if let status = session.maskStatus {
                 Text(status)
                     .font(.system(size: 11))
@@ -43,11 +40,24 @@ struct LocalPane: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.horizontal, 6)
             }
-            Button("Export Debug Bundle") { session.exportDebugBundle() }
-                .controlSize(.small)
-                .disabled(session.current == nil)
-                .padding(.horizontal, 6)
-                .help("Writes a folder next to the raw with what a subject-selection model would be given for this photo, for comparing models")
+            DisclosureGroup("Debug", isExpanded: $showDebug) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Toggle("Legacy Vision mask", isOn: $session.legacyVision)
+                        .controlSize(.small)
+                        .help("Apple's Vision finds the subject instead of BiRefNet, as before alpha 9. Takes effect on Remake.")
+                    Picker("Run model on", selection: $session.modelUnits) {
+                        ForEach(ModelUnits.allCases, id: \.rawValue) { Text($0.name).tag($0) }
+                    }
+                    .help("Which processors BiRefNet runs on, for comparing memory and speed in the log. The first run on the Neural Engine can take minutes while the Mac prepares the model for it.")
+                    Button("Export Debug Bundle") { session.exportDebugBundle() }
+                        .controlSize(.small)
+                        .disabled(session.current == nil)
+                        .help("Writes a folder next to the raw with what the masking saw and decided for this photo")
+                }
+                .padding(.top, 4)
+            }
+            .font(.system(size: 12))
+            .padding(.horizontal, 6)
             if let mask = mask {
                 Picker("Show", selection: Binding(get: { session.maskView }, set: { session.setMaskView($0) })) {
                     ForEach(MaskView.allCases, id: \.rawValue) { Text($0.name).tag($0) }

@@ -242,10 +242,11 @@ final class MatteTests: XCTestCase {
         let coarse = scene.error(coarseOver: out)
         print("MATTE coarse: error \(coarse) per mille over \(out.unknownPixels) uncertain pixels")
         XCTAssertGreaterThan(out.unknownPixels, 2000)
-        XCTAssertLessThan(errors[0], coarse * 0.5, "Fast should at least halve the first pass's error")
-        XCTAssertLessThan(errors[1], errors[0], "High should beat Fast where strands cross two backgrounds")
-        XCTAssertLessThan(errors[2], errors[1] * 1.02, "Max should not be worse than High")
-        XCTAssertLessThan(errors[2], 60)
+        XCTAssertLessThan(errors[0], coarse, "Off, the snapped first pass, is already nearer than the first pass scaled up")
+        XCTAssertLessThan(errors[1], coarse * 0.5, "Fast should at least halve the first pass's error")
+        XCTAssertLessThan(errors[2], errors[1], "High should beat Fast where strands cross two backgrounds")
+        XCTAssertLessThan(errors[3], errors[2] * 1.02, "Max should not be worse than High")
+        XCTAssertLessThan(errors[3], 60)
 
         // Certain areas are exact, and the mask covers the whole photo.
         XCTAssertEqual(out.alpha[(scene.h / 2) * scene.w + scene.w / 2], 255)
@@ -268,7 +269,9 @@ final class MatteTests: XCTestCase {
                     XCTAssertEqual(out.shares[i * 4], out.alpha[i])
                     continue
                 }
-                if out.alpha[i] > 60 && out.alpha[i] < 200 {
+                // Only where colour matting ran: well inside the hair zone.
+                let cell = (y / 4) * out.trimapW + x / 4
+                if out.zones[cell] == 2 && out.hair[cell] > 128 && out.alpha[i] > 60 && out.alpha[i] < 200 {
                     total += 1
                     if out.shares[i * 4 + 1] < out.alpha[i] { lower += 1 }
                 }
@@ -338,6 +341,142 @@ final class MatteTests: XCTestCase {
         XCTAssertTrue(maxBlurred.log.contains { $0.contains("out-of-focus 100% of band") })
         // And nothing in the sure background has been turned into half-subject.
         XCTAssertTrue(maxBlurred.log.contains { $0.contains("mid-in-confident-bg 0.0%") }, "\(maxBlurred.log)")
+    }
+
+    // MARK: Spec v3: Off, and matting in the hair zone only
+
+    /// A dark disc on a light ground with a soft rough mask: no face, so no hair zone.
+    private func disc(size: Int = 240, light: SIMD3<Float> = SIMD3(0.75, 0.78, 0.84), dark: SIMD3<Float> = SIMD3(0.16, 0.12, 0.10),
+                      grain: Float = 0, blur: Int = 3) -> (photo: Photo, coarse: Gray, inside: (Int, Int) -> Float) {
+        let w = size, h = size
+        let cx = Float(size) * 0.5, cy = Float(size) * 0.5, r = Float(size) * 0.28
+        func inside(_ x: Int, _ y: Int) -> Float {
+            let dx = Float(x) + 0.5 - cx, dy = Float(y) + 0.5 - cy
+            return min(max(r - (dx * dx + dy * dy).squareRoot() + 0.5, 0), 1)
+        }
+        var seed: UInt64 = 0x1234_5678_9ABC_DEF1
+        func random() -> Float {
+            seed = seed &* 6364136223846793005 &+ 1442695040888963407
+            return Float((seed >> 40) & 0xFFFF) / 65535 - 0.5
+        }
+        var px = [UInt8](repeating: 255, count: w * h * 4)
+        var truth = [Float](repeating: 0, count: w * h)
+        for y in 0 ..< h {
+            for x in 0 ..< w {
+                let a = inside(x, y)
+                truth[y * w + x] = a
+                let v = dark * a + light * (1 - a) + SIMD3(repeating: grain * random())
+                for ch in 0 ..< 3 { px[(y * w + x) * 4 + ch] = UInt8(min(max(v[ch], 0), 1) * 255 + 0.5) }
+            }
+        }
+        PlaneMath.boxBlur(&truth, w: w, h: h, radius: blur * 4)
+        return (Photo(w: w, h: h, rowBytes: w * 4, px: px), Gray(w: w, h: h, v: truth).resized(w: w / 4, h: h / 4), inside)
+    }
+
+    /// Off on a hard edge the photo shows clearly: the edge lands where the photo has it,
+    /// and there is no halo around it.
+    func testOffSnapsAHardEdgeToThePhoto() {
+        // The first pass is about as soft as a model's edge is once enlarged: a few pixels.
+        let scene = disc(blur: 1)
+        let face = PixelRect(x: 2, y: 2, w: 8, h: 8) // far from the disc: its edge is not hair
+        let out = Matte(photo: scene.photo, coarse: scene.coarse, faces: [face]).run(tier: .off)
+        let w = 240, y = 120, edge = 120 + 67 // the disc's right-hand edge along the middle row
+        XCTAssertEqual(out.alpha[y * w + 120], 255)
+        XCTAssertGreaterThan(out.alpha[y * w + edge - 3], 230, "just inside the edge")
+        XCTAssertLessThan(out.alpha[y * w + edge + 3], 25, "just outside the edge")
+        XCTAssertEqual(out.alpha[y * w + edge + 30], 0)
+        XCTAssertFalse(out.log.contains { $0.hasPrefix("fast") }, "Off runs no colour matting")
+        XCTAssertTrue(out.zones.contains(1))
+        XCTAssertFalse(out.zones.contains(2))
+        XCTAssertLessThan(try! XCTUnwrap(out.edgeQuality.haloElsewhere), 0.02)
+        XCTAssertLessThan(try! XCTUnwrap(out.edgeQuality.erosionElsewhere), 0.02)
+        print("MATTE off, hard edge: \(out.edgeQuality.summary) · α at −3…+3 px: \((-3 ... 3).map { Int(out.alpha[y * w + edge + $0]) })")
+
+        // Without the snap the edge is where the first pass left it: wider.
+        var plain = MatteSettings()
+        plain.snapPasses = 0
+        plain.steepen = 1
+        let unsnapped = Matte(photo: scene.photo, coarse: scene.coarse, faces: [face], settings: plain).run(tier: .off)
+        var width = 0, plainWidth = 0
+        for x in 0 ..< w {
+            if out.alpha[y * w + x] > 25 && out.alpha[y * w + x] < 230 { width += 1 }
+            if unsnapped.alpha[y * w + x] > 25 && unsnapped.alpha[y * w + x] < 230 { plainWidth += 1 }
+        }
+        XCTAssertLessThan(width * 2, plainWidth, "snapped: \(width) soft pixels across the row; as given: \(plainWidth)")
+    }
+
+    /// Off on an edge the photo barely shows (dark on dark, with grain): the model's edge
+    /// stands, clean, where colour arithmetic would only make speckle.
+    func testOffKeepsTheModelsEdgeWhereThePhotoShowsNone() {
+        let scene = disc(light: SIMD3(0.13, 0.13, 0.14), dark: SIMD3(0.11, 0.11, 0.11), grain: 0.05, blur: 1)
+        // A face far from the disc, so the disc's edge is outside the hair zone.
+        let face = PixelRect(x: 2, y: 2, w: 8, h: 8)
+        let off = Matte(photo: scene.photo, coarse: scene.coarse, faces: [face]).run(tier: .off)
+        let w = 240
+        var speckle = 0, edgePixels = 0
+        for y in 0 ..< 240 {
+            for x in 0 ..< 240 {
+                let a = scene.inside(x, y), v = off.alpha[y * w + x]
+                let dx = Float(x) + 0.5 - 120, dy = Float(y) + 0.5 - 120
+                let r = (dx * dx + dy * dy).squareRoot()
+                if r > 67.2 + 10 && v > 12 { speckle += 1 }
+                if r < 67.2 - 10 && v < 243 { speckle += 1 }
+                if a > 0 && a < 1 { edgePixels += 1 }
+            }
+        }
+        XCTAssertGreaterThan(edgePixels, 100)
+        XCTAssertEqual(speckle, 0, "nothing stray further than 10 px from the edge")
+        XCTAssertLessThan(try! XCTUnwrap(off.edgeQuality.haloElsewhere), 0.05)
+        XCTAssertNil(off.edgeQuality.haloHair, "no edge in the hair zone to measure")
+
+        // The better tiers change nothing here: there is no hair zone on this edge.
+        let high = Matte(photo: scene.photo, coarse: scene.coarse, faces: [face]).run(tier: .high)
+        XCTAssertEqual(high.alpha, off.alpha)
+        XCTAssertEqual(high.shares, off.shares)
+        XCTAssertTrue(high.log.contains { $0.contains("nothing for colour matting to do") })
+    }
+
+    /// Outside the hair zone every tier gives Off's answer; inside it they differ. And one
+    /// Matte run at several tiers in turn gives what a fresh one gives for each.
+    func testMattingStaysInTheHairZoneAndTiersCanBeRerun() {
+        let scene = Scene()
+        let kept = Matte(photo: scene.photo, coarse: scene.coarse, faces: [scene.face])
+        let max = kept.run(tier: .max), off = kept.run(tier: .off), high = kept.run(tier: .high)
+        let freshHigh = Matte(photo: scene.photo, coarse: scene.coarse, faces: [scene.face]).run(tier: .high)
+        XCTAssertEqual(high.alpha, freshHigh.alpha)
+        XCTAssertEqual(high.shares, freshHigh.shares)
+        var outside = 0, differInside = 0
+        for y in 0 ..< scene.h {
+            for x in 0 ..< scene.w {
+                let cell = (y / 4) * off.trimapW + x / 4, i = y * scene.w + x
+                if off.zones[cell] == 0 { continue }
+                if off.hair[cell] == 0 {
+                    outside += 1
+                    XCTAssertEqual(max.alpha[i], off.alpha[i], "outside the hair zone at \(x),\(y)")
+                } else if max.alpha[i] != off.alpha[i] {
+                    differInside += 1
+                }
+            }
+        }
+        XCTAssertGreaterThan(outside, 500)
+        XCTAssertGreaterThan(differInside, 500)
+        XCTAssertTrue(max.zones.contains(2))
+        XCTAssertFalse(off.zones.contains(2))
+    }
+
+    /// A crisp first-pass edge gets a thin band; a soft one keeps the full band.
+    func testCrispEdgesGetAThinBand() {
+        let crisp = disc(size: 480, blur: 0), soft = disc(size: 480, blur: 3)
+        let face = PixelRect(x: 140, y: 100, w: 200, h: 280) // large enough for a wide full band
+        var fixed = MatteSettings()
+        fixed.adaptiveBand = false
+        let thin = Matte(photo: crisp.photo, coarse: crisp.coarse, faces: [face])
+        let full = Matte(photo: crisp.photo, coarse: crisp.coarse, faces: [face], settings: fixed)
+        XCTAssertLessThan(Double(thin.unknownCount), 0.7 * Double(full.unknownCount), "the crisp edge's band is much thinner")
+        let softAdaptive = Matte(photo: soft.photo, coarse: soft.coarse, faces: [face])
+        let softFixed = Matte(photo: soft.photo, coarse: soft.coarse, faces: [face], settings: fixed)
+        XCTAssertEqual(softAdaptive.unknownCount, softFixed.unknownCount, "a soft edge keeps the full band")
+        XCTAssertTrue(thin.log.contains { $0.contains("crisp 100%") }, "\(thin.log)")
     }
 
     func testNarrowBandLeavesLessUncertain() {

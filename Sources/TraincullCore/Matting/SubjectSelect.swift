@@ -23,21 +23,45 @@ public struct Box: Equatable {
 }
 
 /// The rules that turn a model's raw answer into the subject: which connected pieces of it to
-/// keep (masking spec v2, section 6). The same rules run in `tools/bakeoff_subject.py`, where
-/// they were compared against Photoshop's masks; `SubjectRules` holds the numbers both use.
+/// keep (masking spec v3, sections 3, 6 and 7). They were checked against Photoshop's masks
+/// of the owner's photos with `tools/bakeoff_subject.py`.
 public struct SubjectRules {
     public var feather = 24
     public var speckle: Float = 0.0002
     public var hole: Float = 0.0001
     public var attachDistance: Float = 0.01
-    public var sharpRatio: Float = 1.6
-    public var sharpPlus: Float = 0.8
+    /// How much more blurred than the subject's face a separate piece may be, in pixels of
+    /// blur width, at strictness 1. The allowance is divided by the strictness.
+    public var sharpAllowance: Float = 1.0
+    /// The user's Focus strictness: loose 0.6, moderate 1.0, strict 1.4.
+    public var focusStrictness: Float = 1.0
     public var unmeasuredArea: Float = 0.02
-    public var hybridOverlap: Float = 0.3
-    public var hybridDilate: Float = 0.005
     public var boxExpand: Float = 0.10
+    /// Close-ups may only move the edge that is already there: within this fraction of the
+    /// face's height of it, plus a few pixels.
+    public var mergeFraction: Float = 0.05
+    public var mergePlus: Float = 6
+    /// Close-up tiles: square, no larger than `tileCap` and no smaller than `tileLeast`
+    /// pixels of the proxy, overlapping by a quarter, at most `tilesMost` of them.
+    public var tileCap = 1152
+    public var tileLeast = 384
+    public var tileOverlap: Float = 0.25
+    public var tilesMost = 8
+    /// How far either side of a limb's line counts as that limb, in face heights.
+    public var capsule: Float = 0.35
+    public var poseConfidence: Float = 0.3
 
     public init() {}
+
+    /// How strictly sharpness is applied (spec v3, 6.2): 1 for a small face (a twentieth of
+    /// the frame's height or less), down to 0.2 for a large one (a fifth or more), times the
+    /// user's setting. A large, close subject falls out of focus quickly front to back, and
+    /// dropping parts of it for softness is rarely wanted.
+    public func strictness(faceHeight: Int, frameHeight: Int) -> Float {
+        let fh = Float(faceHeight) / Float(max(frameHeight, 1))
+        let t = min(max((fh - 0.05) / 0.15, 0), 1)
+        return (1.0 - 0.8 * t) * focusStrictness
+    }
 }
 
 public enum SubjectSelect {
@@ -47,13 +71,20 @@ public enum SubjectSelect {
         public var kept: [String] = []
         public var dropped: [String: Int] = [:]
         public var subjectSharpness: Float = 1
+        /// The strictness used, and the most blurred a separate piece could be and stay.
+        public var strictness: Float = 1
+        public var limit: Float = 0
+        /// One line for each piece big enough to matter: what was measured and what was decided.
+        public var details: [String] = []
 
         public var summary: String {
             var k: [String: Int] = [:]
             for name in kept { k[name, default: 0] += 1 }
             let keptText = k.sorted { $0.key < $1.key }.map { "\($0.key) \($0.value)" }.joined(separator: ", ")
             let droppedText = dropped.sorted { $0.key < $1.key }.map { "\($0.key) \($0.value)" }.joined(separator: ", ")
+            let numbers = String(format: "face blur %.2f px · strictness %.2f · limit %.2f px", locale: Locale(identifier: "en_US_POSIX"), subjectSharpness, strictness, limit)
             return "components \(components) → kept \(kept.count) (\(keptText))" + (dropped.isEmpty ? "" : " · dropped \(dropped.values.reduce(0, +)) (\(droppedText))")
+                + " · \(numbers)"
         }
     }
 
@@ -122,13 +153,16 @@ public enum SubjectSelect {
     // MARK: Keeping the subject
 
     /// Keeps the piece of a soft mask that holds the face, and the pieces attached to it that
-    /// are about as sharp: a prop in the hand stays, a person behind does not.
+    /// are about as sharp: a prop in the hand stays, a person behind does not. The piece with
+    /// the face is never cut for softness.
     ///
     /// - Parameters:
     ///   - soft: a model's answer, 0 to 1, the size of the sharpness map.
-    ///   - face: the subject's face, in the same pixels.
-    ///   - mustKeep: pieces this says yes to are kept whatever the other rules say.
-    public static func keep(_ soft: Gray, sharpness map: SharpnessMap, face: PixelRect, rules: SubjectRules = SubjectRules(),
+    ///   - face: the subject's face, in the same pixels; nil when no face was found, and the
+    ///     largest piece is then taken as the subject.
+    ///   - mustKeep: pieces this says yes to are kept whatever the other rules say (limbs the
+    ///     body pose confirms).
+    public static func keep(_ soft: Gray, sharpness map: SharpnessMap, face: PixelRect?, rules: SubjectRules = SubjectRules(),
                             mustKeep: (([Bool]) -> Bool)? = nil) -> (mask: Gray, decision: Decision) {
         let w = soft.w, h = soft.h, n = w * h
         precondition(map.w == w && map.h == h)
@@ -138,33 +172,49 @@ public enum SubjectSelect {
         decision.components = count
         if count == 0 { return (Gray(w: w, h: h), decision) }
         var areas = [Int](repeating: 0, count: count + 1)
-        for l in lab where l > 0 { areas[Int(l)] += 1 }
+        var sumX = [Double](repeating: 0, count: count + 1), sumY = [Double](repeating: 0, count: count + 1)
+        for i in 0 ..< n where lab[i] > 0 {
+            let l = Int(lab[i])
+            areas[l] += 1
+            sumX[l] += Double(i % w); sumY[l] += Double(i / w)
+        }
+        let largest = areas.indices.dropFirst().max { areas[$0] < areas[$1] } ?? 1
 
         // The piece with the face in it: under the face's centre, else the one that covers most of the face.
-        let cx = min(max(face.x + face.w / 2, 0), w - 1), cy = min(max(face.y + face.h / 2, 0), h - 1)
-        var primary = Int(lab[cy * w + cx])
-        if primary == 0 {
-            var inFace = [Int](repeating: 0, count: count + 1)
-            let f = face.clamped(w: w, h: h)
-            for y in f.y ..< f.maxY { for x in f.x ..< f.maxX where lab[y * w + x] > 0 { inFace[Int(lab[y * w + x])] += 1 } }
-            primary = inFace.indices.max { inFace[$0] < inFace[$1] } ?? 0
-            if primary == 0 || inFace[primary] == 0 { primary = areas.indices.dropFirst().max { areas[$0] < areas[$1] } ?? 1 }
+        var primary = largest
+        if let face = face {
+            let cx = min(max(face.x + face.w / 2, 0), w - 1), cy = min(max(face.y + face.h / 2, 0), h - 1)
+            primary = Int(lab[cy * w + cx])
+            if primary == 0 {
+                var inFace = [Int](repeating: 0, count: count + 1)
+                let f = face.clamped(w: w, h: h)
+                for y in f.y ..< f.maxY { for x in f.x ..< f.maxX where lab[y * w + x] > 0 { inFace[Int(lab[y * w + x])] += 1 } }
+                primary = inFace.indices.max { inFace[$0] < inFace[$1] } ?? 0
+                if primary == 0 || inFace[primary] == 0 { primary = largest }
+            }
         }
         func piece(_ i: Int) -> [Bool] { lab.map { Int($0) == i } }
-        let sp = edgeSharp(piece(primary), map) ?? map.faceSharp(face) ?? 1
+        // Everything is judged against the subject's own face (its eyes), not a fixed number.
+        let sp = face.flatMap { map.faceSharp($0) } ?? edgeSharp(piece(primary), map) ?? 1
+        let strict = max(face.map { rules.strictness(faceHeight: $0.h, frameHeight: h) } ?? rules.focusStrictness, 0.05)
+        let limit = sp + rules.sharpAllowance / strict
         decision.subjectSharpness = sp
-        let limit = max(rules.sharpRatio * sp, sp + rules.sharpPlus)
+        decision.strictness = strict
+        decision.limit = limit
 
         var kept = Set([primary])
         decision.kept.append("primary")
+        var confirmed = Set<Int>()
         if let mustKeep = mustKeep {
             for i in 1 ... count where !kept.contains(i) && Float(areas[i]) >= rules.speckle * Float(n) && mustKeep(piece(i)) {
                 kept.insert(i)
-                decision.kept.append("overlap")
+                confirmed.insert(i)
+                decision.kept.append("confirmed body")
             }
         }
         let reach = rules.attachDistance * Float(max(w, h))
         var why = [Int: String]()
+        var measured = [Int: Float](), gaps = [Int: Float]()
         for _ in 0 ..< 3 {
             let distance = PlaneMath.distance(to: lab.map { kept.contains(Int($0)) }, w: w, h: h)
             var nearest = [Float](repeating: .infinity, count: count + 1)
@@ -172,8 +222,10 @@ public enum SubjectSelect {
             var added = false
             for i in 1 ... count where !kept.contains(i) {
                 if Float(areas[i]) < rules.speckle * Float(n) { why[i] = "speckle"; continue }
+                gaps[i] = nearest[i]
                 if nearest[i] > reach { why[i] = "disconnected"; continue }
                 let sharp = edgeSharp(piece(i), map)
+                measured[i] = sharp
                 if let sharp = sharp, sharp <= limit {
                     kept.insert(i)
                 } else if sharp == nil, Float(areas[i]) < rules.unmeasuredArea * Float(n) {
@@ -189,6 +241,23 @@ public enum SubjectSelect {
             if !added { break }
         }
         for reason in why.values { decision.dropped[reason, default: 0] += 1 }
+
+        // For the log: every piece that is more than a speck, largest first, at most a dozen.
+        let faceCentre: (x: Double, y: Double)? = face.map { (Double($0.x) + Double($0.w) / 2, Double($0.y) + Double($0.h) / 2) }
+        let worth = (1 ... count).filter { Float(areas[$0]) >= rules.speckle * Float(n) }.sorted { areas[$0] > areas[$1] }
+        for i in worth.prefix(12) {
+            var parts: [String] = [String(format: "piece %d: %.2f%% of frame", locale: Locale(identifier: "en_US_POSIX"), i, 100 * Double(areas[i]) / Double(n))]
+            if let c = faceCentre, let face = face {
+                let dx = sumX[i] / Double(areas[i]) - c.x, dy = sumY[i] / Double(areas[i]) - c.y
+                parts.append(String(format: "%.1f face heights from the face", locale: Locale(identifier: "en_US_POSIX"), (dx * dx + dy * dy).squareRoot() / Double(max(face.h, 1))))
+            }
+            if let gap = gaps[i] { parts.append(String(format: "gap %.0f px", locale: Locale(identifier: "en_US_POSIX"), gap)) }
+            if let m = measured[i] { parts.append(String(format: "edge blur %.2f px (limit %.2f)", locale: Locale(identifier: "en_US_POSIX"), m, limit)) }
+            else if i != primary && gaps[i] != nil && (gaps[i] ?? 0) <= reach { parts.append("edge blur unmeasured") }
+            if confirmed.contains(i) { parts.append("confirmed body") }
+            parts.append(i == primary ? "kept: primary" : (kept.contains(i) ? "kept" : "dropped: \(why[i] ?? "unknown")"))
+            decision.details.append(parts.joined(separator: " · "))
+        }
 
         let keepMask = tidy(lab.map { kept.contains(Int($0)) }, w: w, h: h, rules: rules)
         // The soft fringe just outside the kept pieces stays; the dropped pieces go entirely.
@@ -233,37 +302,6 @@ public enum SubjectSelect {
                 out.v[i] = weight.v[i] * v + (1 - weight.v[i]) * whole.v[i]
             }
         }
-        return out
-    }
-
-    /// The hybrid: one model's shapes (`shape`, good at edges and props), kept where another
-    /// (`which`, good at telling people apart) agrees they are the subject, or where they are
-    /// attached and sharp. What only `which` claims is added too.
-    public static func hybrid(shape: Gray, which: Gray, sharpness map: SharpnessMap, face: PixelRect,
-                              rules: SubjectRules = SubjectRules()) -> (mask: Gray, decision: Decision) {
-        let w = shape.w, h = shape.h
-        let radius = max(Int(rules.hybridDilate * Float(max(w, h))), 1)
-        let wide = PlaneMath.extremum(Gray(w: w, h: h, v: which.v.map { $0 >= 0.5 ? 1 : 0 }), radius: radius, smallest: false)
-        var (mask, decision) = keep(shape, sharpness: map, face: face, rules: rules) { piece in
-            var inside = 0, total = 0
-            for i in 0 ..< w * h where piece[i] {
-                total += 1
-                if wide.v[i] > 0.5 { inside += 1 }
-            }
-            return total > 0 && Float(inside) / Float(total) >= rules.hybridOverlap
-        }
-        for i in 0 ..< w * h where which.v[i] >= 0.5 && mask.v[i] < 0.5 { mask.v[i] = max(mask.v[i], which.v[i]) }
-        return (mask, decision)
-    }
-
-    // MARK: What a point-and-box model is given
-
-    /// The two points that say "this person": the middle of the face, and the chest two
-    /// face-heights below it when that is inside the picture.
-    public static func points(face: PixelRect, h: Int) -> [(x: Float, y: Float)] {
-        let cx = Float(face.x) + Float(face.w) / 2, cy = Float(face.y) + Float(face.h) / 2
-        var out = [(cx, cy)]
-        if cy + 2 * Float(face.h) < Float(h) { out.append((cx, cy + 2 * Float(face.h))) }
         return out
     }
 }

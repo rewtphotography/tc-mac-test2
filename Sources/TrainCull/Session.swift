@@ -109,18 +109,24 @@ final class Session: ObservableObject {
     @Published var exportStatus: String?
     /// Masking: the chosen quality, what the large image shows, the area the sliders act on,
     /// the current frame's local adjustments, and what is going on.
-    @Published var maskTier = MatteTier.high
+    /// Changing the tier of a photo that has a mask refines its edge again from what is
+    /// already known about its subject; the model is not run again.
+    @Published var maskTier = MatteTier.high {
+        didSet { if maskTier != oldValue && currentMask != nil { makeMask(fresh: false, trigger: "tier changed to \(maskTier.name)") } }
+    }
     @Published var maskView = MaskView.photo
     @Published var localArea = LocalArea.subject
     @Published var local = LocalEdits()
     @Published var maskStatus: String?
     @Published var maskBusy = false
     @Published var maskTick = 0
-    /// The narrower of the two edge-band widths being compared (the masking spec's 9.6).
-    @Published var narrowBand = false
-    /// Where the first idea of the subject comes from: Vision, or one of the models in this build.
-    /// BiRefNet first: it agreed best with Photoshop's masks in the bake-off.
-    @Published var maskSource = [SubjectSource.birefnet, .hybrid, .sam, .vision].first { $0.available } ?? .vision
+    /// How readily soft pieces are left out of the subject (the masking spec's Focus strictness).
+    @Published var focusStrictness = FocusStrictness.moderate
+    /// Debug: Apple's Vision masks instead of BiRefNet, and which processors the model runs on.
+    @Published var legacyVision = false
+    @Published var modelUnits = ModelUnits.gpu {
+        didSet { if modelUnits != oldValue { BiRefNetModel.shared.setUnits(modelUnits) } }
+    }
     @Published var recents: [URL] = []
     @Published var volumes: [Volume] = []
     @Published var ratedCount = 0
@@ -131,7 +137,10 @@ final class Session: ObservableObject {
     @Published var minStars = 1
     /// Edit mode: the thumbnail pane makes way for the editing controls.
     @Published var editing = false {
-        didSet { if !editing { thumbsWhileEditing = false; flushSave() } }
+        didSet {
+            if !editing { thumbsWhileEditing = false; flushSave() }
+            if editing != oldValue { modelFollowsEditing() }
+        }
     }
     @Published var thumbsWhileEditing = false
     /// The current frame's changed controls, and what Apple's decoder uses by default for it.
@@ -164,6 +173,7 @@ final class Session: ObservableObject {
     private var renderTrigger = "selection"
     private var draftsSkipped = 0
     private let maskQueue = DispatchQueue(label: "mask", qos: .userInitiated)
+    private var memoryPressure: DispatchSourceMemoryPressure?
     private var fullSize: [Int: CGSize] = [:]
     private var editToken = 0
     private var valuesToken = 0
@@ -221,9 +231,22 @@ final class Session: ObservableObject {
             let renderBytes = self.rawCache.reduce(0) { $0 + $1.image.bytesPerRow * $1.image.height }
             let maskBytes = self.masks.reduce(0) { $0 + $1.mask.width * $1.mask.height * 6 }
             defer { self.evictions = 0 }
-            return "summary · render \(self.rawCache.count) / \(MemoryStats.plain(UInt64(renderBytes))) · masks \(self.masks.count) / "
-                + "\(MemoryStats.plain(UInt64(maskBytes))) · evictions \(self.evictions)"
+            let model: String = BiRefNetModel.shared.isLoaded ? "loaded" : "not loaded"
+            let renders: String = "render \(self.rawCache.count) / \(MemoryStats.plain(UInt64(renderBytes))) · masks \(self.masks.count) / \(MemoryStats.plain(UInt64(maskBytes)))"
+            return "summary · \(renders) · evictions \(self.evictions) · \(Masking.keptSummary) · model \(model)"
         }
+        // Short of memory, the model and everything kept for remaking masks are let go; they
+        // come back when next needed.
+        let pressure = DispatchSource.makeMemoryPressureSource(eventMask: [.warning, .critical], queue: .main)
+        pressure.setEventHandler { [weak self] in
+            Log.warn("the Mac is short of memory (\(MemoryStats.plain(MemoryMonitor.footprint())) in use here): letting go of the model and the masking caches")
+            self?.maskQueue.async {
+                BiRefNetModel.shared.unload("memory pressure")
+                Masking.forgetAll("memory pressure")
+            }
+        }
+        pressure.resume()
+        memoryPressure = pressure
         // For the automated build's launch check: open a folder straight away, and optionally
         // show its first two frames side by side.
         if let path = UserDefaults.standard.string(forKey: "TCOpenFolder") {
@@ -317,7 +340,7 @@ final class Session: ObservableObject {
         rawCache = []
         evicted = []
         introduced = []
-        Masking.forgetNeutral()
+        Masking.forgetAll("another folder")
         masks = []
         maskRun += 1
         maskBusy = false
@@ -1007,33 +1030,71 @@ final class Session: ObservableObject {
         return LocalRender(mask: mask, edits: item.local, view: view, area: localArea)
     }
 
+    /// The model is made ready when Edit mode is entered, kept while it lasts, and let go
+    /// when it ends (masking spec v3, 2.3).
+    private func modelFollowsEditing() {
+        guard BundledModels.hasBiRefNet else { return }
+        let on = editing
+        maskQueue.async {
+            if on { BiRefNetModel.shared.prewarm() } else { BiRefNetModel.shared.unload("left Edit mode") }
+        }
+    }
+
+    /// The selection rules as the panel has them set.
+    private var subjectRules: SubjectRules {
+        var rules = SubjectRules()
+        rules.focusStrictness = focusStrictness.factor
+        return rules
+    }
+
+    private var subjectSource: SubjectSource { legacyVision || !BundledModels.hasBiRefNet ? .vision : .birefnet }
+
     /// Makes the current frame's masks at the chosen quality. The work is a numbered job in
     /// the log, from request to completion. Finishing never changes which frame is selected.
-    func makeMask() {
-        guard let item = current, !maskBusy else { return }
+    /// `fresh` forgets what was known about the photo's subject first (the Remake button);
+    /// without it only the edge is refined again. A job asked for while another is running
+    /// takes its place.
+    func makeMask(fresh: Bool = true, trigger: String = "user (Make button)") {
+        guard let item = current else { return }
         if compare != nil { endCompare() }
+        let superseding = maskBusy
         maskBusy = true
         maskRun += 1
         maskJobs += 1
         let run = maskRun, job = maskJobs
-        let tier = maskTier, source = maskSource.available ? maskSource : .vision
+        let tier = maskTier, source = subjectSource, rules = subjectRules
         let url = item.url, id = item.id, name = item.name
         let known = faces[id]
-        var settings = MatteSettings()
-        if narrowBand {
-            settings.bandIn = 0.012
-            settings.bandOut = 0.04
-        }
         maskStatus = "Starting…"
         let requested = CFAbsoluteTimeGetCurrent()
-        Log.note("job", "#\(job) \(tier.name) \(name) · subject from \(source.name) (\(source.rawValue)) · trigger: user (Make button) · band \(narrowBand ? "narrow" : "standard")")
+        let how: String = fresh ? "from scratch" : "from what is kept"
+        let instead: String = superseding ? " · takes the place of the job still running" : ""
+        Log.note("job", "#\(job) \(tier.name) \(name) · subject from \(source.name) · focus strictness \(focusStrictness.name) · trigger: \(trigger) · \(how)\(instead)")
         maskQueue.async {
+            var gone = false
+            DispatchQueue.main.sync { gone = run != self.maskRun }
+            if gone {
+                Log.note("job", "#\(job) superseded before it started")
+                return
+            }
             Log.note("job", "#\(job) started · queued \(Log.seconds(since: requested))")
+            if fresh { Masking.forgetBase(url) }
             let meter = JobMeter()
             let working = CFAbsoluteTimeGetCurrent()
             let result = Result { () -> MaskResult in
-                try Masking.make(url: url, tier: tier, faces: known, settings: settings, subject: source, progress: { text in
+                try Masking.make(url: url, tier: tier, faces: known, rules: rules, subject: source, progress: { text in
                     DispatchQueue.main.async { if run == self.maskRun { self.maskStatus = "\(text)…" } }
+                }, partial: { first in
+                    // The snapped edge, shown while the hair is still being refined.
+                    Log.note("job", "#\(job) first result (Off) after \(Log.seconds(since: working))")
+                    DispatchQueue.main.async {
+                        guard run == self.maskRun else { return }
+                        self.keep(first, for: item)
+                        if self.selected == id {
+                            self.renderTrigger = "first mask"
+                            self.refreshLocal(item)
+                        }
+                    }
                 }, cancelled: {
                     var stop = false
                     DispatchQueue.main.sync { stop = run != self.maskRun }
@@ -1054,11 +1115,7 @@ final class Session: ObservableObject {
                 switch result {
                 case let .success(mask):
                     Log.note("job", "#\(job) completed in \(took) · image selected at completion: \(still ? "yes" : "no (\(self.current?.name ?? "none"))")")
-                    self.masks.removeAll { $0.id == id }
-                    self.masks.append((id, mask))
-                    if self.masks.count > 2 { self.masks.removeFirst() }
-                    self.maskTick += 1
-                    item.localStamp += 1
+                    self.keep(mask, for: item)
                     if still {
                         self.maskStatus = mask.summary + (Masking.blendsByChannel ? "" : " (plain blending)")
                         if self.localArea == .skin && mask.skin == nil { self.localArea = .subject }
@@ -1073,15 +1130,24 @@ final class Session: ObservableObject {
         }
     }
 
-    /// Writes the current frame's mask debug bundle (the masking spec's 2.2) next to the raw
-    /// and shows it in the Finder.
+    /// Holds a frame's mask: the last two frames' are kept.
+    private func keep(_ mask: MaskResult, for item: FrameItem) {
+        masks.removeAll { $0.id == item.id }
+        masks.append((item.id, mask))
+        if masks.count > 2 { masks.removeFirst() }
+        maskTick += 1
+        item.localStamp += 1
+    }
+
+    /// Writes the current frame's mask debug bundle next to the raw and shows it in the Finder.
     func exportDebugBundle() {
         guard let item = current else { return }
         let url = item.url, known = faces[item.id]
+        let rules = subjectRules, source = subjectSource, mask = currentMask
         say("Writing the debug bundle for \(item.name)…")
         exportQueue.async {
             do {
-                let folder = try Masking.debugBundle(url: url, faces: known)
+                let folder = try Masking.debugBundle(url: url, faces: known, rules: rules, subject: source, mask: mask)
                 DispatchQueue.main.async {
                     self.say("Saved \(folder.lastPathComponent) next to the raw.")
                     NSWorkspace.shared.activateFileViewerSelecting([folder])

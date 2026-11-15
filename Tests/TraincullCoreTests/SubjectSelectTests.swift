@@ -8,7 +8,8 @@ final class SubjectSelectTests: XCTestCase {
         let w = 400, h = 300
         var luma: Gray
         var soft: Gray
-        let face = PixelRect(x: 80, y: 60, w: 60, h: 60)
+        /// A small face (under a twentieth of the frame's height), so sharpness is applied strictly.
+        let face = PixelRect(x: 103, y: 60, w: 14, h: 14)
 
         init() {
             luma = Gray(w: 400, h: 300, fill: 0.2)
@@ -27,7 +28,7 @@ final class SubjectSelectTests: XCTestCase {
             }
             paint(PixelRect(x: 50, y: 40, w: 120, h: 220), blur: 0, into: &soft) // the person
             paint(PixelRect(x: 172, y: 100, w: 50, h: 40), blur: 0, into: &soft) // a prop in their hand (2 px gap)
-            paint(PixelRect(x: 60, y: 262, w: 90, h: 34), blur: 4, into: &soft) // someone behind, out of focus (2 px gap)
+            paint(PixelRect(x: 60, y: 262, w: 90, h: 34), blur: 6, into: &soft) // someone behind, out of focus (2 px gap)
             paint(PixelRect(x: 320, y: 40, w: 50, h: 60), blur: 0, into: &soft) // far away
         }
     }
@@ -68,18 +69,113 @@ final class SubjectSelectTests: XCTestCase {
         XCTAssertEqual(decision.kept, ["primary", "attached"])
     }
 
-    func testHybridKeepsWhatTheOtherModelAgreesOn() {
+    /// Strictness follows the size of the face, and the user's setting scales it.
+    func testStrictnessFollowsTheFaceAndTheSetting() {
+        var rules = SubjectRules()
+        XCTAssertEqual(rules.strictness(faceHeight: 40, frameHeight: 1000), 1.0, accuracy: 1e-5, "a small face: strict")
+        XCTAssertEqual(rules.strictness(faceHeight: 250, frameHeight: 1000), 0.2, accuracy: 1e-5, "a large face: very loose")
+        XCTAssertEqual(rules.strictness(faceHeight: 125, frameHeight: 1000), 0.6, accuracy: 1e-5, "half way between")
+        rules.focusStrictness = 1.4
+        XCTAssertEqual(rules.strictness(faceHeight: 40, frameHeight: 1000), 1.4, accuracy: 1e-5)
+
+        // The same scene, the face made large: the blurred piece behind now stays, because a
+        // close subject is allowed to fall out of focus.
         let scene = Scene()
         let map = SharpnessMap(luma: scene.luma)
-        // The second model says the subject is the person and, wrongly sized, part of the far shape.
-        var which = Gray(w: scene.w, h: scene.h)
-        for y in 40 ..< 260 { for x in 50 ..< 170 { which.v[y * scene.w + x] = 1 } }
-        for y in 40 ..< 100 { for x in 320 ..< 370 { which.v[y * scene.w + x] = 1 } }
-        let (mask, decision) = SubjectSelect.hybrid(shape: scene.soft, which: which, sharpness: map, face: scene.face)
-        XCTAssertGreaterThanOrEqual(mask.at(345, 70), 0.5, "kept because the second model claims it")
-        XCTAssertGreaterThanOrEqual(mask.at(195, 120), 0.5, "the prop still comes along")
-        XCTAssertLessThan(mask.at(105, 280), 0.5)
-        XCTAssertTrue(decision.kept.contains("overlap"))
+        let strict = SubjectSelect.keep(scene.soft, sharpness: map, face: scene.face).decision
+        XCTAssertEqual(strict.dropped["defocused"], 1)
+        XCTAssertEqual(strict.limit, strict.subjectSharpness + 1 / strict.strictness, accuracy: 1e-4)
+        var loose = SubjectRules()
+        loose.focusStrictness = 0.1
+        XCTAssertNil(SubjectSelect.keep(scene.soft, sharpness: map, face: scene.face, rules: loose).decision.dropped["defocused"])
+        XCTAssertTrue(strict.details.contains { $0.contains("dropped: defocused") && $0.contains("edge blur") }, "\(strict.details)")
+        XCTAssertTrue(strict.details.contains { $0.contains("kept: primary") })
+    }
+
+    /// A piece the body pose confirms is kept however soft it is; and with no face at all the
+    /// largest piece is the subject.
+    func testPoseConfirmedPiecesStayAndNoFaceStillWorks() {
+        let scene = Scene()
+        let map = SharpnessMap(luma: scene.luma)
+        // A "wrist" in the blurred piece behind, an "elbow" in the person.
+        let pose = BodyPose(joints: ["leftElbow": .init(x: 105, y: 240, confidence: 0.9), "leftWrist": .init(x: 105, y: 280, confidence: 0.8),
+                                     "rightWrist": .init(x: 345, y: 70, confidence: 0.1)])
+        let limbs = pose.confirmed(radius: 8, w: scene.w, h: scene.h)
+        XCTAssertTrue(limbs[260 * scene.w + 105], "on the line between the two joints")
+        XCTAssertFalse(limbs[260 * scene.w + 125], "well to the side of it")
+        XCTAssertFalse(limbs[70 * scene.w + 345], "a joint the detector wasn't sure of counts for nothing")
+        let (mask, decision) = SubjectSelect.keep(scene.soft, sharpness: map, face: scene.face) { piece in
+            zip(piece, limbs).contains { $0 && $1 }
+        }
+        XCTAssertGreaterThanOrEqual(mask.at(105, 280), 0.5, "soft, but the pose says it is the subject's arm")
+        XCTAssertTrue(decision.kept.contains("confirmed body"))
+        XCTAssertLessThan(mask.at(345, 70), 0.5)
+
+        let (faceless, _) = SubjectSelect.keep(scene.soft, sharpness: map, face: nil)
+        XCTAssertGreaterThanOrEqual(faceless.at(110, 150), 0.5, "the largest piece")
+
+        // Matching a pose to a face: the nearest head, if it is near enough.
+        let near = BodyPose(joints: ["nose": .init(x: 111, y: 70, confidence: 0.9)])
+        let far = BodyPose(joints: ["nose": .init(x: 300, y: 90, confidence: 0.9)])
+        XCTAssertEqual(BodyPose.match([far, near], face: scene.face), 1)
+        XCTAssertNil(BodyPose.match([far], face: scene.face))
+    }
+
+    /// Close-up tiles cover the subject's box, stay in the picture and are never too many.
+    func testCloseUpTilesCoverTheBox() {
+        let rules = SubjectRules()
+        func covered(_ box: Box, _ tiles: [Box]) -> Bool {
+            for y in stride(from: box.y0, to: box.y1, by: 7) {
+                for x in stride(from: box.x0, to: box.x1, by: 7) where !tiles.contains(where: { x >= $0.x0 && x < $0.x1 && y >= $0.y0 && y < $0.y1 }) { return false }
+            }
+            return true
+        }
+        // A full-length figure: a tall narrow box.
+        let tall = Box(x0: 700, y0: 60, x1: 1300, y1: 1340)
+        let a = CloseUps.tiles(covering: tall, w: 2048, h: 1365, rules: rules)
+        XCTAssertEqual(a.count, 3)
+        XCTAssertTrue(a.allSatisfy { $0.x1 - $0.x0 == 600 && $0.y1 - $0.y0 == 600 })
+        XCTAssertTrue(covered(tall, a))
+        // A small subject: one tile, no smaller than the least size, inside the picture.
+        let small = Box(x0: 10, y0: 20, x1: 150, y1: 300)
+        let b = CloseUps.tiles(covering: small, w: 2048, h: 1365, rules: rules)
+        XCTAssertEqual(b.count, 1)
+        XCTAssertEqual(b[0].x0, 0)
+        XCTAssertEqual(b[0].x1 - b[0].x0, rules.tileLeast)
+        XCTAssertTrue(covered(small, b))
+        // The whole frame: tiles as large as allowed, never more than the limit.
+        let whole = Box(x0: 0, y0: 0, x1: 2048, y1: 1365)
+        let c = CloseUps.tiles(covering: whole, w: 2048, h: 1365, rules: rules)
+        XCTAssertLessThanOrEqual(c.count, rules.tilesMost)
+        XCTAssertTrue(covered(whole, c))
+        XCTAssertTrue(c.allSatisfy { $0.x0 >= 0 && $0.y0 >= 0 && $0.x1 <= 2048 && $0.y1 <= 1365 })
+        XCTAssertTrue(CloseUps.tiles(covering: Box(x0: 5, y0: 5, x1: 5, y1: 9), w: 100, h: 100).isEmpty)
+    }
+
+    /// A closer look moves the edge that is there, at a finer size, and adds nothing far from it.
+    func testCloseUpsOnlyMoveTheEdgeThatIsThere() {
+        // The mask so far: the left half, its edge at x = 50. The closer look says the edge is
+        // at x = 53, and also (wrongly) claims a blob far away on the right.
+        let w = 100, h = 80
+        var base = Gray(w: w, h: h)
+        for y in 0 ..< h { for x in 0 ..< 50 { base.v[y * w + x] = 1 } }
+        let zone = CloseUps.edgeZone(base, radius: 8)
+        XCTAssertEqual(zone.at(50, 40), 1)
+        XCTAssertEqual(zone.at(44, 40), 1)
+        XCTAssertEqual(zone.at(70, 40), 0)
+        XCTAssertEqual(zone.at(20, 40), 0)
+        var answer = Gray(w: 2 * w, h: 2 * h)
+        for y in 0 ..< 2 * h { for x in 0 ..< 2 * w where x < 106 || (x > 170 && x < 190) { answer.v[y * 2 * w + x] = 1 } }
+        var canvas = CloseUps.Canvas(w: 2 * w, h: 2 * h, scale: 2)
+        canvas.add(answer, box: Box(x0: 0, y0: 0, x1: w, y1: h), feather: 4)
+        XCTAssertEqual(canvas.tiles, 1)
+        let out = canvas.merged(over: base, zone: zone)
+        XCTAssertEqual(out.w, 2 * w)
+        XCTAssertGreaterThan(out.at(104, 80), 0.9, "the edge has moved out to where the closer look put it")
+        XCTAssertLessThan(out.at(108, 80), 0.1)
+        XCTAssertLessThan(out.at(180, 80), 0.01, "the far blob is not near the edge, so it is not taken")
+        XCTAssertGreaterThan(out.at(40, 80), 0.99)
+        XCTAssertEqual(CloseUps.mergeRadius(faceHeight: 200, longEdge: 2048), 16, accuracy: 1e-4)
     }
 
     func testMergeFadesACloserLookIn() {
@@ -92,13 +188,5 @@ final class SubjectSelectTests: XCTestCase {
         XCTAssertEqual(out.at(20, 50), 0, accuracy: 1e-4, "nothing right at the box's edge")
         XCTAssertEqual(out.at(32, 50), 0.5, accuracy: 0.05, "half way across the feather")
         XCTAssertEqual(Box(x0: 10, y0: 10, x1: 30, y1: 50).expanded(by: 0.1, w: 31, h: 100), Box(x0: 8, y0: 6, x1: 31, y1: 54))
-    }
-
-    func testPointsForTheSubject() {
-        let face = PixelRect(x: 100, y: 100, w: 40, h: 50)
-        let both = SubjectSelect.points(face: face, h: 600)
-        XCTAssertEqual(both.count, 2)
-        XCTAssertEqual(both[1].y, 225)
-        XCTAssertEqual(SubjectSelect.points(face: face, h: 200).count, 1, "no chest point when it would fall outside the picture")
     }
 }
