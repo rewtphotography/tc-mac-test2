@@ -99,7 +99,7 @@ jobs:
       - name: BiRefNet check
         continue-on-error: true
         timeout-minutes: 12
-        run: TRAINCULL_MODELS="$PWD/build-models" TRAINCULL_HEAVY_MODELS=1 swift test --filter TrainCullTests/testBiRefNetFindsTheSubject
+        run: TRAINCULL_MODELS="$PWD/build-models" TRAINCULL_HEAVY_MODELS=1 swift test --filter testBiRefNetFindsTheSubject
       # Alpha numbers follow on from the last published one (alpha 4 came from the earlier
       # repository), so a failed build never uses a number up.
       - name: Build number
