@@ -265,7 +265,9 @@ extension Matte {
                     // Keep the middle of the tile; its margin was only there to give the edges context.
                     for ly in (tile.y - y0) ..< (tile.y - y0 + tile.h) {
                         for lx in (tile.x - x0) ..< (tile.x - x0 + tile.w) where kind(lx, ly) == 1 {
-                            out[(y0 + ly) * bw + (x0 + lx)] = Float(min(max(x[ly * w + lx], 0), 1))
+                            // A solve that went wrong leaves the High tier's answer in place.
+                            let v = x[ly * w + lx]
+                            if v.isFinite { out[(y0 + ly) * bw + (x0 + lx)] = Float(min(max(v, 0), 1)) }
                         }
                     }
                     lock.lock()

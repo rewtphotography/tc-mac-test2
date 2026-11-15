@@ -650,7 +650,8 @@ public final class Matte {
                     var s = SIMD3<Float>(repeating: t == 2 ? 1 : 0)
                     if t == 1 && haveBand && band.contains(x, y) {
                         let i = (y - band.y) * bw + (x - band.x)
-                        let al = min(max(a[i], 0), 1)
+                        // Written so that a value that isn't a number at all comes out as 0.
+                        let al: Float = a[i] >= 0 ? min(a[i], 1) : 0
                         a8 = UInt8((al * 255).rounded())
                         s = SIMD3(repeating: al)
                         if al > 0.004 && al < 0.996 {
