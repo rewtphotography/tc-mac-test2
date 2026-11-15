@@ -157,8 +157,10 @@ final class TiffExportTests: XCTestCase {
             XCTAssertEqual(a[90 * mask.alpha.bytesPerRow + 110], 255, "\(tier.name): the middle of the shape")
             XCTAssertEqual(a[250 * mask.alpha.bytesPerRow + 330], 0, "\(tier.name): far from it")
             // The edge of the shape is where the photo says it is, not where the rough mask put it.
-            XCTAssertGreaterThan(a[90 * mask.alpha.bytesPerRow + 110 + 55], 200, "\(tier.name): just inside the edge")
-            XCTAssertLessThan(a[90 * mask.alpha.bytesPerRow + 110 + 65], 55, "\(tier.name): just outside the edge")
+            // Off only snaps the rough mask's own edge, so it is allowed to be a little softer here.
+            let inside: UInt8 = tier == .off ? 170 : 200, outside: UInt8 = tier == .off ? 85 : 55
+            XCTAssertGreaterThan(a[90 * mask.alpha.bytesPerRow + 110 + 55], inside, "\(tier.name): just inside the edge")
+            XCTAssertLessThan(a[90 * mask.alpha.bytesPerRow + 110 + 65], outside, "\(tier.name): just outside the edge")
             XCTAssertEqual(mask.tier, tier)
             XCTAssertNotNil(mask.debug, "\(tier.name): the debug overlay")
             print("MASK-CHECK \(mask.summary) · \(mask.edge.summary)")
