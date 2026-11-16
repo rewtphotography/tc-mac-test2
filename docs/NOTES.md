@@ -127,7 +127,7 @@ Bridge, Photoshop or Lightroom has it)
   folder tree, a calibration table mapping Apple's values to Camera Raw's.
 - Subject, hair and skin masks: see "Masking" below.
 
-## What is built (alpha 14)
+## What is built (alpha 15)
 
 Folder opening (button, File menu, drag and drop, recents, drives), resizable left pane,
 thumbnails with rating, label and reject marks, the large image with raw render and face
@@ -137,7 +137,7 @@ at the bottom left (double-click the rated count to choose stars), side-by-side 
 extracting the embedded JPEG, exporting a developed 16-bit TIFF, the diagnostics log and
 memory report, an app icon, and the masking test with its three refine tools (see "Masking").
 
-Checked by tests on Linux (102): raw and recipe reading, the settings line, sidecar editing,
+Checked by tests on Linux (109): raw and recipe reading, the settings line, sidecar editing,
 crash-safe saving, face-zoom maths, the TIFF writer, JPEG orientation, compare stepping,
 memory figures. Checked by a test on the Mac build: an exported TIFF opens in Apple's reader
 with the right pixels. Checked by the automated build's screenshots (made-up frames): the
@@ -180,15 +180,18 @@ Same folder and Mac, two and a half minutes of use:
 
 ## Next, in order
 
-1. The owner tries alpha 14 (spec v5) on the eight test photos: the colour fix in
-   Background −3 EV at 200–400%, then the three tools. The tools' gestures (box, brush,
-   Option, Undo, [ ]) have been compiled and their engine tested, but nobody has yet used
-   them with a hand on a Mac. Two or three shots on a seamless backdrop are still wanted,
-   to tune when Refine Hair may use colour matting.
-2. From spec v5's deferred list, when the owner asks: automatic hand and foot boxes,
-   automatic prop growth, an automatic gap check, automatic defringe.
-3. Soft-focus and closed-eyes flags from Apple's face landmarks.
-4. A Settings window (label names, editor choice), Undo after reject.
+1. **Masking has its own handover document: `MASKING.md`** (pipeline, every number, every
+   log figure, status, what was tried). Start there for anything about masks.
+2. The owner tries alpha 15 on the eight test photos, base mask alone, Background −3 EV at
+   200–300%: is the pale rim gone on 6303's fingers and sleeve, 7451's waist and arm,
+   6957's hand and waist? The log's new `edge placement` line gives the offset and the edge
+   widths on the real photos; nothing in alpha 15 has been seen on one.
+3. Priority 5 of the final masking round, none of it built: the tool overlay bug, the edit
+   stack, Show edits, the history panel, reorder mode. Written out as steps in
+   `MASKING.md`, section 16.
+4. Tune when Refine Hair may use colour matting, on seamless-backdrop shots from the owner.
+5. Soft-focus and closed-eyes flags from Apple's face landmarks.
+6. A Settings window (label names, editor choice), Undo after reject.
 
 ## Masking (a test build of phases 1 and 2)
 
@@ -744,6 +747,37 @@ peak, the same for both; the owner's Mac has been about twenty times quicker. Th
 starts in the single, side-by-side and Edit views and loads the main model. The download
 is 822 MB (was 411). Not exercised by the build: the tools' gestures on the photo, the
 tool picker, Undo, the Debug switches. They compile; nobody has used them yet.
+
+## The final masking round (alpha 15)
+
+The owner's brief, in priority order: (1) the base mask's edge sits wrong, a pale rim 3–4
+px wide; (2) colour still added on 6303, a dark seam after Refine Hair, a lightness bound
+for the guard; (3) three tool bugs; (4) a handover document; (5) UI. The owner then said to
+stop after (4). **Everything about it is in `MASKING.md`**; in short:
+
+- The photos' real pixels are not here, so the app's pipeline was rebuilt at full size on
+  stand-ins made from the eight proxies (a soft one and a sharpened one of each). They
+  reproduce alpha 14's rim and its colour-guard count on 6303.
+- The rim had three causes: the model's edge is about 8 photo pixels wide against a real
+  2 to 5 and more than 1.5 px off on a quarter to a half of the edge; pixels just inside
+  the edge still carry background light, which was not cleaned at alpha ≥ 0.95; and the
+  subject colour was read a dozen pixels in. Half-size storage is not a cause.
+- Built: the edge re-centred on the photo's strongest colour change (linear light) and
+  given the photo's edge width; subject and background colours read beside the edge;
+  decontamination of the inner tail; a contrast gate that passes bright, far-apart
+  colours; a pixel's off-the-line colour given to whichever side lights it; the guard's
+  lightness bound; a signed edge-offset figure in the log. No matting model over the
+  edge band was needed.
+- On the stand-ins: mean offset from +0.06…+1.43 px (alpha 14's edge) to −0.13…+0.11 px,
+  6465 excepted (+0.45…+0.60); the rim gone on 6303 and 7451; hair and footwear unchanged.
+- Tools: answers shrunk properly (they were read pixel for pixel and came out ragged);
+  the box's edge steepened or widened by the photo; colours and tail handled under the
+  hair brush too; Clean Edge smoother; the hair contrast figure fixed. The box's "0 px
+  changed" could not be reproduced; it is logged and guarded.
+- The debug bundle now holds full-size crops round the last tool operations.
+- Not done, by the owner's decision: all of priority 5.
+
+**The automated build (alpha 15):** see the end of this section once it has run.
 
 ## Still to design
 

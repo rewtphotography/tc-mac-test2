@@ -22,7 +22,7 @@ public struct CleanSettings: Equatable {
     public var sharpnessWeight: Float = 0.25
     public var colourWeight: Float = 0.75
     /// Half the width of the step from background to subject on the score, 0 to 1.
-    public var step: Float = 0.1
+    public var step: Float = 0.15
     /// How far from the edge that is there the brush may decide anything, in pixels at 33
     /// megapixels (it scales with the photo; never under 3). Beyond that the mask stands:
     /// a bokeh highlight the colour of skin, a finger's width from a finger, is not the finger.
@@ -465,8 +465,14 @@ public enum Refine {
             return HairChoice(contrast: 0, texture: 1, colour: false, why: "too little sure subject or background beside the stroke to judge the backdrop")
         }
         let f = fs / fn, b = bs / bn
-        let d = f - b
-        let contrast = smoothstep(0.02, 0.10, dot3(d, d) / (dot3(f, f) + dot3(b, b) + 1e-6))
+        // How far apart the two average colours are as the eye judges it (Oklab), where 0.6
+        // or more counts as 1: black against white is 1.0, skin against a mid-green wall
+        // about 0.25, dark hair against a dark brown room 0.1. (Until the final round this
+        // was a proportional measure that reached 1 at a tenth of that; it read 1.00 on
+        // every stroke.)
+        let apart = Oklab.distance(Oklab.from(linear: SIMD3(pow(f.x, 2.2), pow(f.y, 2.2), pow(f.z, 2.2))),
+                                   Oklab.from(linear: SIMD3(pow(b.x, 2.2), pow(b.y, 2.2), pow(b.z, 2.2))))
+        let contrast = min(apart / 0.6, 1)
         // How busy: the background's brightness against its own local average, taken over the
         // sure background alone (so the subject's edge in the window doesn't count as busyness).
         var count = isBack, sum = [Float](repeating: 0, count: w * h), squares = [Float](repeating: 0, count: w * h)
@@ -610,10 +616,12 @@ extension Refine {
         let current = plane(alpha, width: W, patch)
         let inBox = weight(box: box, in: patch, feather: 6)
         // The model's answer, at the photo's size over the area it was shown.
-        let full = answer.resized(w: look.w, h: look.h)
+        let full = answer.fitted(w: look.w, h: look.h)
         let was = current.cropped(PixelRect(x: look.x - patch.x, y: look.y - patch.y, w: look.w, h: look.h))
         let (kept, pieces, dropped) = keepTouching(full, current: was)
-        let firmed = firm(kept, haze: c.settings.haze, gain: c.settings.steepen)
+        // With re-centring on, the engine steepens the new edge itself, by as much as the
+        // photo's own edge says; here only the haze is taken off.
+        let firmed = firm(kept, haze: c.settings.haze, gain: c.settings.recentre ? 1 : c.settings.steepen)
         var next = current
         for y in 0 ..< look.h {
             for x in 0 ..< look.w {
@@ -624,11 +632,18 @@ extension Refine {
         }
         let photo = c.photo.cropped(patch)
         let gaps = openGaps(photo: photo, alpha: next, box: inBox)
-        let out = Matte(photo: photo, coarse: gaps.alpha, faces: moved(c.faces, by: patch), settings: patchSettings(from: c.settings),
-                        defocus: region(c.defocus, photoW: W, photoH: H, patch), subjectSharpness: c.subjectSharpness).run(tier: .off)
+        var settings = patchSettings(from: c.settings)
+        // How many photo pixels one pixel of the model's answer covered: the scale of what it can get wrong.
+        let modelPixel = max(Float(max(look.w, look.h)) / Float(max(max(answer.w, answer.h), 1)), 1)
+        // Where the photo can't say how wide an edge is, a much-enlarged answer is steepened
+        // as the automatic mask's is; one the model gave at about the photo's own size is left.
+        if c.settings.recentre && modelPixel > 1.5 { settings.steepen = c.settings.steepen }
+        let out = Matte(photo: photo, coarse: gaps.alpha, faces: moved(c.faces, by: patch), settings: settings,
+                        defocus: region(c.defocus, photoW: W, photoH: H, patch), subjectSharpness: c.subjectSharpness,
+                        firstPassPixel: modelPixel).run(tier: .off)
         var log = ["box \(box.w)×\(box.h) px at \(box.x),\(box.y) · the model's pieces: \(pieces) kept, \(dropped) dropped (not part of the subject) · gaps opened \(gaps.opened)"]
         log += gaps.log
-        log += out.log.filter { $0.hasPrefix("snap") || $0.hasPrefix("colour guard") || $0.hasPrefix("decontaminated") }
+        log += out.log.filter { $0.hasPrefix("snap") || $0.hasPrefix("colour guard") || $0.hasPrefix("decontaminated") || $0.hasPrefix("edge placement") }
         var result = RefineResult(patch: patch, weight: inBox, output: out, log: log)
         // Only what is new counts as running off: the subject that was already there always does.
         var added = kept
@@ -688,12 +703,14 @@ extension Refine {
         if let answer = answer, let look = look {
             // The model's matte, at the photo's size, laid in under the stroke.
             var next = current
-            let kx = Float(answer.w) / Float(max(look.w, 1)), ky = Float(answer.h) / Float(max(look.h, 1))
+            // (Made the photo's size properly first: a small stroke's area is shown to the
+            // model enlarged several times, and read back pixel for pixel its edge came out ragged.)
+            let full = answer.fitted(w: look.w, h: look.h)
             for y in 0 ..< patch.h {
                 for x in 0 ..< patch.w where under.v[y * patch.w + x] > 0 {
                     let px = patch.x + x - look.x, py = patch.y + y - look.y
                     if px < 0 || py < 0 || px >= look.w || py >= look.h { continue }
-                    let v = answer.sample((Float(px) + 0.5) * kx, (Float(py) + 0.5) * ky)
+                    let v = full.v[py * look.w + px]
                     let i = y * patch.w + x
                     next.v[i] += (v - next.v[i]) * under.v[i]
                 }

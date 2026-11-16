@@ -2,7 +2,8 @@
 
 A lean, folder-based replacement for Adobe Bridge with raw-first editing, for one photographer
 (the owner). Read `docs/NOTES.md` before changing anything: it holds the owner's decisions,
-what is built, and what is next.
+what is built, and what is next. For anything about masks, read `MASKING.md` first: it is the
+handover for that work.
 
 ## Working with the owner
 

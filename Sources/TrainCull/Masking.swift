@@ -139,10 +139,15 @@ final class SubjectBase {
     let subjectBox: Box?
     /// How much the close-up tiles' borders show in the mask; over 3 is a visible seam.
     let seam: Float?
+    /// Photo pixels for each pixel of the model answers the first-pass mask came from: the
+    /// scale of its mistakes about where an edge is. Nil when it didn't come from BiRefNet.
+    let firstPassPixel: Float?
     let seconds: Double
 
     init(key: String, source: SubjectSource, faces: [PixelRect], proxy: CGImage, ranking: Masking.Ranking, coarse: Gray, selected: Gray?,
-         patches: [HeadPatch], poses: [BodyPose], primaryPose: Int?, tiles: [(box: Box, used: Bool)], subjectBox: Box?, seam: Float? = nil, seconds: Double) {
+         patches: [HeadPatch], poses: [BodyPose], primaryPose: Int?, tiles: [(box: Box, used: Bool)], subjectBox: Box?, seam: Float? = nil,
+         firstPassPixel: Float? = nil, seconds: Double) {
+        self.firstPassPixel = firstPassPixel
         self.key = key; self.source = source; self.faces = faces; self.proxy = proxy; self.ranking = ranking
         self.coarse = coarse; self.selected = selected; self.patches = patches
         self.poses = poses; self.primaryPose = primaryPose; self.tiles = tiles; self.subjectBox = subjectBox; self.seam = seam; self.seconds = seconds
@@ -482,6 +487,7 @@ enum Masking {
         var tiles: [(box: Box, used: Bool)] = []
         var subjectBox: Box?
         var seam: Float?
+        var modelPixel: Float?
     }
 
     /// The first pass from BiRefNet (masking spec v3, sections 3, 4.1, 6 and 7): the whole
@@ -544,6 +550,8 @@ enum Masking {
             }
         }
         var pass = ModelPass(coarse: kept, selected: kept, poses: poses, primaryPose: primaryPose)
+        // The whole frame is squashed into the model's square: its longer side is the coarser.
+        pass.modelPixel = Float(max(reference.width, reference.height)) / Float(side)
 
         // Closer looks at the subject, from the full-size photo.
         var x0 = w, y0 = h, x1 = 0, y1 = 0
@@ -601,6 +609,7 @@ enum Masking {
             }
         }
         let tileSide = grid.first.map { $0.x1 - $0.x0 } ?? 0
+        if canvas.tiles > 0 && tileSide > 0 { pass.modelPixel = Float(Double(tileSide) * scale / Double(side)) }
         let detail = tileSide > 0 ? 100 * Double(side) / (Double(tileSide) * scale) : 0
         let wholeDetail = 100 * Double(side) / Double(max(reference.width, reference.height))
         let detailText: String = String(format: "%.0f", locale: posix, detail)
@@ -706,7 +715,7 @@ enum Masking {
         let seconds = CFAbsoluteTimeGetCurrent() - started
         let made = SubjectBase(key: key ?? "", source: used, faces: faces, proxy: small, ranking: ranking, coarse: first, selected: pass?.selected,
                                patches: patches, poses: pass?.poses ?? [], primaryPose: pass?.primaryPose, tiles: pass?.tiles ?? [],
-                               subjectBox: pass?.subjectBox, seam: pass?.seam, seconds: seconds)
+                               subjectBox: pass?.subjectBox, seam: pass?.seam, firstPassPixel: pass?.modelPixel, seconds: seconds)
         if key != nil {
             keptLock.lock()
             bases.removeAll { $0.key == made.key }
@@ -745,7 +754,7 @@ enum Masking {
         var ready: Matte?
         keptLock.lock()
         // (Set up afresh when a Debug switch has changed how the edge is made.)
-        let signature = "\(settings.colourSnap)|\(settings.decontaminate)|\(settings.colourGuard)"
+        let signature = "\(settings.colourSnap)|\(settings.decontaminate)|\(settings.colourGuard)|\(settings.recentre)"
         if let kept = keptMatte, kept.base === found, kept.signature == signature { ready = kept.matte }
         keptLock.unlock()
         if ready != nil {
@@ -754,7 +763,8 @@ enum Masking {
             progress("Preparing the edge")
             guard let photo = photo(from: reference) else { throw Failure("the rendered photo isn't in the expected 8-bit form") }
             let fresh = Matte(photo: photo, coarse: found.coarse, faces: found.faces, patches: found.patches, settings: settings,
-                              defocus: found.ranking.sharpness?.dense, subjectSharpness: found.ranking.primary?.sharp)
+                              defocus: found.ranking.sharpness?.dense, subjectSharpness: found.ranking.primary?.sharp,
+                              firstPassPixel: found.firstPassPixel)
             if key != nil {
                 keptLock.lock()
                 keptMatte = (found, fresh, signature)
@@ -825,6 +835,11 @@ enum Masking {
         if let fringe = out.edgeQuality.fringe {
             summary += " · colour fringe " + String(format: "%.3f", locale: Locale(identifier: "en_US_POSIX"), fringe)
         }
+        if let offset = out.edgeOffset.mean {
+            let offsetText: String = String(format: "%+.2f", locale: Locale(identifier: "en_US_POSIX"), offset)
+            summary += " · edge offset \(offsetText) px"
+            if final && abs(offset) > 0.5 { Log.warn("\(name): OFFSET? the mask's edge sits \(offsetText) px from the photo's, on average (\(tier.name) mask)") }
+        }
         if !out.warnings.isEmpty { summary += " · check: " + out.warnings.joined(separator: ", ") }
         if final {
             var fields: [String: Any] = ["image": name, "tier": tier.name, "seconds": CFAbsoluteTimeGetCurrent() - started, "edge_pixels": out.unknownPixels]
@@ -834,6 +849,14 @@ enum Masking {
                                                ("erosion_near_elsewhere", q.nearErosionElsewhere), ("erosion_hair", q.erosionHair),
                                                ("erosion_elsewhere", q.erosionElsewhere), ("colour_fringe", q.fringe)]
             for (key, value) in metrics { if let value = value { fields[key] = Double(value) } }
+            let placed: [(String, Float?)] = [("edge_offset", out.edgeOffset.mean), ("edge_offset_size", out.edgeOffset.spread),
+                                              ("edge_offset_far", out.edgeOffset.far), ("edge_width", out.edgeOffset.maskWidth),
+                                              ("photo_edge_width", out.edgeOffset.photoWidth), ("first_pass_edge_offset", out.edgeOffsetBefore.mean),
+                                              ("first_pass_edge_width", out.edgeOffsetBefore.maskWidth), ("first_pass_pixel", base.firstPassPixel)]
+            for (key, value) in placed { if let value = value { fields[key] = Double(value) } }
+            fields["edge_points_measured"] = out.edgeOffset.measured
+            fields["colour_guard_corrections"] = out.guardCorrections
+            fields["lightness_corrections"] = out.lightnessCorrections
             Log.note("mask", "\(name): \(summary)", fields: fields)
         }
         return MaskResult(width: W, height: H, alpha: alpha, shares: shares, skin: skin, trimap: trimap, coarse: rough,
@@ -1034,6 +1057,37 @@ enum Masking {
             }
             try write(picture(rgbx: cut, w: photo.w, h: photo.h).flatMap { png($0) }, "F.png")
         }
+        // Full-size pieces of the photo with the mask and its colour shares over them, so
+        // that an edge can be looked into pixel for pixel outside the app: one round each
+        // place a tool was used (draw a box over a problem and export), at most four, or
+        // else one round the middle of the subject's box.
+        if let mask = mask, mask.width == reference.width, mask.height == reference.height {
+            var centres: [(String, Int, Int)] = []
+            for op in ops.suffix(4) {
+                if let box = op.box { centres.append((op.tool.rawValue, box.x + box.w / 2, box.y + box.h / 2)) }
+                else if let stroke = op.stroke, !stroke.points.isEmpty {
+                    let mid = stroke.points[stroke.points.count / 2]
+                    centres.append((op.tool.rawValue, Int(mid.x), Int(mid.y)))
+                }
+            }
+            if centres.isEmpty {
+                let k = Double(reference.width) / Double(small.width)
+                if let box = found.subjectBox { centres.append(("subject", Int(Double(box.x0 + box.x1) / 2 * k), Int(Double(box.y0 + box.y1) / 2 * k))) }
+                else { centres.append(("middle", reference.width / 2, reference.height / 2)) }
+            }
+            var cropsJSON: [[String: Any]] = []
+            let side = min(1200, min(reference.width, reference.height))
+            for (n, centre) in centres.enumerated() {
+                let x = min(max(centre.1 - side / 2, 0), reference.width - side), y = min(max(centre.2 - side / 2, 0), reference.height - side)
+                let rect = CGRect(x: x, y: y, width: side, height: side)
+                try write(reference.cropping(to: rect).flatMap { png($0) }, "crop\(n + 1)_photo.png")
+                try write(mask.alpha.cropping(to: rect).flatMap { png($0) }, "crop\(n + 1)_alpha.png")
+                try write(mask.shares.cropping(to: rect).flatMap { png($0) }, "crop\(n + 1)_shares.png")
+                let entry: [String: Any] = ["files": "crop\(n + 1)_*.png", "at": centre.0, "rect_full": [x, y, side, side]]
+                cropsJSON.append(entry)
+            }
+            regions["crops"] = cropsJSON
+        }
         try json(regions, "regions.json")
 
         var alphaNote = " (not written: no mask had been made)"
@@ -1049,7 +1103,11 @@ enum Masking {
         sharpness.png     how out of focus each part is: black is sharp, white is \(Int(SharpnessMap.most)) px of blur or more
         F.png             the subject cut out on black through the mask's colour shares (its edge with the background's light taken out)
         pose.json         the body poses found
-        regions.json      the subject's box, the close-up tiles, what the tools did, and the Debug switches
+        regions.json      the subject's box, the close-up tiles, what the tools did, the Debug switches, and where the crops are
+        crop<n>_photo.png, crop<n>_alpha.png, crop<n>_shares.png
+                          a full-size piece of the photo (up to 1200 px square) with the mask and its colour shares over
+                          the same pixels: one round each place a tool was last used (up to four), or round the middle
+                          of the subject. To have an edge looked into, draw a Refine Edges box over it and export.
 
         To compare against Photoshop: open proxy.png, Select Subject, and save the mask at the same
         size in this folder as ps_mask-<number>.jpg. Then compress this folder (right-click,

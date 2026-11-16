@@ -265,10 +265,10 @@ final class MatteTests: XCTestCase {
             for x in 0 ..< scene.w {
                 let i = y * scene.w + x
                 XCTAssertEqual(out.shares[i * 4 + 3], 255)
-                if out.alpha[i] == 0 || out.alpha[i] == 255 {
-                    XCTAssertEqual(out.shares[i * 4], out.alpha[i])
-                    continue
-                }
+                // Outside the mask no light is the subject's. Inside it all of it is, except
+                // just inside the edge, where a blurred bright background still lies over it.
+                if out.alpha[i] == 0 { XCTAssertEqual(out.shares[i * 4], 0) }
+                if out.alpha[i] == 0 || out.alpha[i] == 255 { continue }
                 // Only where colour matting ran: well inside the hair zone.
                 let cell = (y / 4) * out.trimapW + x / 4
                 if out.zones[cell] == 2 && out.hair[cell] > 128 && out.alpha[i] > 60 && out.alpha[i] < 200 {
@@ -396,6 +396,8 @@ final class MatteTests: XCTestCase {
         var plain = MatteSettings()
         plain.snapPasses = 0
         plain.steepen = 1
+        plain.recentre = false
+        plain.colourSnap = false
         let unsnapped = Matte(photo: scene.photo, coarse: scene.coarse, faces: [face], settings: plain).run(tier: .off)
         var width = 0, plainWidth = 0
         for x in 0 ..< w {
@@ -450,6 +452,7 @@ final class MatteTests: XCTestCase {
         let face = PixelRect(x: 2, y: 2, w: 8, h: 8) // far from the disc: its edge is not hair
         var plain = MatteSettings()
         plain.colourSnap = false
+        plain.recentre = false
         let before = Matte(photo: scene.photo, coarse: slid, faces: [face], settings: plain).run(tier: .off)
         let after = Matte(photo: scene.photo, coarse: slid, faces: [face]).run(tier: .off)
         // Against the truth, all round the disc.
@@ -492,8 +495,8 @@ final class MatteTests: XCTestCase {
             if out.alpha[i] > 60 && out.alpha[i] < 200 {
                 total += 1
                 if out.shares[i * 4 + 1] < out.alpha[i] { lower += 1 }
-            } else if out.alpha[i] == 0 || out.alpha[i] == 255 {
-                XCTAssertEqual(out.shares[i * 4 + 1], out.alpha[i])
+            } else if out.alpha[i] == 0 {
+                XCTAssertEqual(out.shares[i * 4 + 1], 0)
             }
         }
         XCTAssertGreaterThan(total, 100)

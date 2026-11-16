@@ -93,6 +93,41 @@ public struct Gray {
     }
 
     /// This plane stretched or shrunk to another size, blending between pixels.
+    /// This plane at another size, made smaller properly: each new pixel is the average of
+    /// the area it covers. (`resized` reads four pixels wherever the new pixel's centre
+    /// falls; shrinking a hard edge by two or more that way leaves it ragged.) Enlarging is
+    /// the same as `resized`.
+    public func fitted(w nw: Int, h nh: Int) -> Gray {
+        if nw >= w && nh >= h { return resized(w: nw, h: nh) }
+        // Across, then down: each a weighted sum over the span of old pixels a new one covers.
+        func shrink(_ src: [Float], _ sw: Int, _ sh: Int, to dw: Int) -> [Float] {
+            if dw >= sw { return Gray(w: sw, h: sh, v: src).resized(w: dw, h: sh).v }
+            var out = [Float](repeating: 0, count: dw * sh)
+            let k = Float(sw) / Float(dw)
+            for x in 0 ..< dw {
+                let a = Float(x) * k, b = Float(x + 1) * k
+                let i0 = Int(a), i1 = min(Int(b.rounded(.up)), sw)
+                for y in 0 ..< sh {
+                    var sum: Float = 0
+                    for i in i0 ..< i1 {
+                        let part = min(Float(i + 1), b) - max(Float(i), a)
+                        if part > 0 { sum += src[y * sw + i] * part }
+                    }
+                    out[y * dw + x] = sum / k
+                }
+            }
+            return out
+        }
+        func turned(_ src: [Float], _ sw: Int, _ sh: Int) -> [Float] {
+            var out = [Float](repeating: 0, count: sw * sh)
+            for y in 0 ..< sh { for x in 0 ..< sw { out[x * sh + y] = src[y * sw + x] } }
+            return out
+        }
+        let across = shrink(v, w, h, to: nw)
+        let down = shrink(turned(across, nw, h), h, nw, to: nh)
+        return Gray(w: nw, h: nh, v: turned(down, nh, nw))
+    }
+
     public func resized(w nw: Int, h nh: Int) -> Gray {
         if nw == w && nh == h { return self }
         var out = Gray(w: nw, h: nh)

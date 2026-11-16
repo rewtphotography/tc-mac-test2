@@ -228,9 +228,23 @@ extension Masking {
                 if wantsTiles(area) {
                     show("first look")
                     progress("Looking closer, in tiles")
+                    let single = changed
                     let fine = try look(.shared, reference: reference, area: area, tiled: true, what: "\(name) box")
+                    var covered = 0
+                    for v in fine.v where v >= 0.5 { covered += 1 }
+                    let share = 100 * Double(covered) / Double(max(fine.v.count, 1))
                     lay(Refine.edges(box: box, look: area, answer: fine, alpha: alpha0, context: context))
-                    passes = "one pass, then tiles of up to 1536 px"
+                    let tiled = changed
+                    passes = "one pass (\(single) px changed), then tiles of up to 1536 px (\(tiled) px changed; the tiles call "
+                        + String(format: "%.0f", locale: Locale(identifier: "en_US_POSIX"), share) + "% of the area subject)"
+                    // Alpha 14 once reported a tiled box as "0 px changed" where the single
+                    // look had changed thousands. It could not be reproduced from the
+                    // engine's side; if it happens the single look stands, and the log says so.
+                    if tiled == 0 && single > 0 {
+                        Log.warn("\(name): TILES? the tiled look changed nothing where the single look changed \(single) px; the single look is kept")
+                        lay(result)
+                        passes += " · the tiles changed nothing: the single look is kept"
+                    }
                 }
                 notes.insert("\(passes) · growth: \(grown) extension(s), \(stopped)", at: 0)
             case .clean:

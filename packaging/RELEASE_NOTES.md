@@ -8,32 +8,28 @@ An alpha build of TrainCull for Mac (Apple silicon, macOS 15 or later).
    **Done**, then open **System Settings → Privacy & Security**, scroll down to the message
    about TrainCull and click **Open Anyway**. This is needed once for each new build.
 
-**New in this build: the colour fix and three refine tools (masking spec v5)**
+**New in this build: where the mask's edge sits (the final masking round)**
 
-- **No more green, teal or pink lines.** The photos have a one-pixel colour fringe from the
-  lens on bright edges, and alpha 13 was magnifying it when the background was darkened.
-  Edge pixels now keep their own hue, and a last check (the colour guard) puts back any edge
-  pixel that comes out more colourful than the photo has it.
-- **Three tools**, under **Make Mask** once a photo has a mask. Choose one in **Tool**, then
-  work on the large image:
-  - **Refine Edges:** drag a box round fingers, footwear, a gap or a prop's edge. The model
-    looks again, closer, inside the box.
-  - **Refine Hair:** paint over curls or flowing hair.
-  - **Clean Edge:** paint along a hard edge that still has a rim. **Strength** and
-    **Tightness** adjust it.
-  - Hold **Option** while dragging or painting to put the automatic mask back there.
-  - **Undo** (or Command-Z while a tool is chosen) takes back the last operation.
-    **[** and **]** make the brush smaller and larger.
-  - **Remake Mask** does your operations again on the new mask.
-- **Zoom to 400%** by pinching.
-- **Debug** has switches for **Edge snap**, **Decontamination** and **Colour guard**, and the
-  Refine Hair method with its two thresholds.
-- **A larger download** (about twice the size): a second model, for hair, is inside it.
-- The log gives, for each tool operation: the method and why, pixels changed, colour guard
-  corrections and time. **Export Debug Bundle** now includes boxes, strokes and switches.
+- **The pale rim.** The mask's edge is now moved onto the photo's own edge and made as
+  wide as it, the colours either side are read right beside it, and the few pixels just
+  inside the edge have the background's light taken out of them too. That is aimed at the
+  3–4 px pale rim round fingers, arms and waists in **Background −3 EV**.
+- **Less colour added.** The colour guard had been catching one mistake over and over at
+  bright-on-dark edges; that mistake is gone, and the guard now also stops an edge coming
+  out darker than the subject beside it (the log counts those separately).
+- **Tools.** Refine Edges and Refine Hair no longer leave a ragged edge on small areas;
+  Clean Edge is smoother; the Refine Hair "contrast" figure is no longer always 1.00.
+  If a large Refine Edges box ever reports "0 px changed" again, the log now says why and
+  the first, quicker result is kept.
+- **The log** has a new line for every mask, `edge placement`: how far the mask's edge is
+  from the photo's (positive is outside the subject), and how wide each is.
+- **Export Debug Bundle** now includes full-size pieces of the photo with the mask over
+  them, round wherever a tool was last used. To have an edge looked into, drag a
+  **Refine Edges** box over it, then export.
+- **Debug** has one more switch, **Edge re-centre**. Off is alpha 14's edge.
 
-The tools have been tested here on the eight test photos by the engine, but nobody has yet
-used them by hand on a Mac: if a drag or a brush misbehaves, send the log.
+This has been checked here on enlarged copies of your eight test photos, not on the photos
+themselves: please look at 6303, 7451 and 6957 with the base mask alone, and send the log.
 
 **The masking test:** open **Edit** and scroll to **Mask (Test)**. Click **Make Mask**.
 **Show** switches between the photo, a red overlay, the mask, On Black, On White,

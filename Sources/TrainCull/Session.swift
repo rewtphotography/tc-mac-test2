@@ -137,6 +137,7 @@ final class Session: ObservableObject {
     @Published var edgeSnap = true { didSet { if edgeSnap != oldValue { edgeStepChanged("edge snap", edgeSnap) } } }
     @Published var decontamination = true { didSet { if decontamination != oldValue { edgeStepChanged("decontamination", decontamination) } } }
     @Published var colourGuard = true { didSet { if colourGuard != oldValue { edgeStepChanged("colour guard", colourGuard) } } }
+    @Published var edgeRecentre = true { didSet { if edgeRecentre != oldValue { edgeStepChanged("edge re-centre", edgeRecentre) } } }
     /// The mask tools: which is chosen, the brush, and the Clean Edge and Refine Hair settings.
     @Published var maskTool = MaskTool.none { didSet { if maskTool != oldValue { toolChanged() } } }
     /// The brush's radius, in pixels of the photo.
@@ -1212,6 +1213,7 @@ final class Session: ObservableObject {
         settings.colourSnap = edgeSnap
         settings.decontaminate = decontamination
         settings.colourGuard = colourGuard
+        settings.recentre = edgeRecentre
         return settings
     }
 
@@ -1354,7 +1356,8 @@ final class Session: ObservableObject {
         let url = item.url, known = faces[item.id]
         let rules = subjectRules, source = subjectSource, mask = currentMask
         let ops = refined[item.id]?.ops ?? []
-        let switches = ["edge_snap": edgeSnap, "decontamination": decontamination, "colour_guard": colourGuard, "legacy_vision": legacyVision]
+        let switches = ["edge_snap": edgeSnap, "decontamination": decontamination, "colour_guard": colourGuard, "edge_recentre": edgeRecentre,
+                        "legacy_vision": legacyVision]
         say("Writing the debug bundle for \(item.name)…")
         exportQueue.async {
             do {

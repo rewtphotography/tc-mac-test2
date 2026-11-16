@@ -60,7 +60,7 @@ final class RefineTests: XCTestCase {
     func testSharesFollowTheColoursOnlyWhereTheyExplainThePixel() {
         let lin = Matte.toLinear.p
         func shares(_ I: SIMD3<Float>, _ F: SIMD3<Float>, _ B: SIMD3<Float>, _ a: Float) -> SIMD3<Float> {
-            Matte.shares(pixel: I, subject: F, background: B, alpha: a, lin: lin, low: 0.08, high: 0.20, floor0: 0.10, floor1: 0.25, falloff: 50)
+            Matte.shares(pixel: I, subject: F, background: B, alpha: a, lin: lin, low: 0.08, high: 0.20, floor0: 0.10, floor1: 0.25, falloff: 50).shares
         }
         // Half a black top, half a mid-grey wall: nearly all the pixel's light is the wall's.
         let dark = shares(SIMD3(0.42, 0.42, 0.42), SIMD3(0.08, 0.08, 0.08), SIMD3(0.6, 0.6, 0.6), 0.5)

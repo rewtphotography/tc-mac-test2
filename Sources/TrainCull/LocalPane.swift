@@ -74,6 +74,9 @@ struct LocalPane: View {
                         ForEach(MatteTier.allCases, id: \.rawValue) { Text($0.name).tag($0) }
                     }
                     .help("Off is the mask. Fast, High and Max add the older automatic hair matting on top, kept here only for comparison; changing this on a photo that has a mask redoes just the hair.")
+                    Toggle("Edge re-centre", isOn: $session.edgeRecentre)
+                        .controlSize(.small)
+                        .help("The mask's edge moved onto the photo's own edge and made as wide as it, and the colours beside it read off the photo there. Off is alpha 14's edge.")
                     Toggle("Edge snap", isOn: $session.edgeSnap)
                         .controlSize(.small)
                         .help("The edge moved to where each pixel's colour puts it. Switching it remakes the edge of this photo's mask (tool operations are done again).")
