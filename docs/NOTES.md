@@ -777,7 +777,15 @@ stop after (4). **Everything about it is in `MASKING.md`**; in short:
 - The debug bundle now holds full-size crops round the last tool operations.
 - Not done, by the owner's decision: all of priority 5.
 
-**The automated build (alpha 15):** see the end of this section once it has run.
+**The automated build (alpha 15):** the Mac part first sat in GitHub's queue for fifteen
+minutes without being given a Mac and was cancelled there (no fault of the code); run
+again, it compiled first time and all ten Mac tests pass, with the box check through the
+new engine (8,472 px changed) and the matting model in one pass and in tiles (IoU 0.999).
+The app starts in the single, side-by-side and Edit views. The download is 822 MB, as
+before. **Not exercised by the build:** the edge-offset figure with real numbers (the
+build's made-up pictures have no face, so their whole edge counts as hair and reads
+"n/a"), the Edge re-centre switch, the crops in the debug bundle, the tools by hand.
+The 109 engine tests cover the arithmetic; the owner's log will be the first real reading.
 
 ## Still to design
 
