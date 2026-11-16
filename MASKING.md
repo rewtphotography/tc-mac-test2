@@ -512,9 +512,11 @@ Photoshop's Select Subject masks for all eight are the owner's reference for *se
 3. Never commit photos, crops, bundles or logs. Scratch tests that read them must not be
    committed either.
 
-## 16. Next steps: Priority 5 (UI), none of it built
+## 16. Next steps: Priority 5 (UI)
 
-The owner's order. None of this was started; nothing is half-built.
+The owner's order.
+
+**Built in alpha 16: a and c** (see `docs/NOTES.md`, "Alpha 16"). b, d and e are not.
 
 **a. Overlay bug: brush strokes and boxes stay on screen permanently.** They should show
 only while a tool is active or when "Show edits" is on. Today `Session.toolChanged()`

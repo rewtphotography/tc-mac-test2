@@ -59,7 +59,8 @@ final class HeroNSView: NSView {
         case brush(radius: CGFloat)
     }
 
-    /// Something a tool did earlier, drawn faintly while a tool is active.
+    /// Something a tool did: drawn faintly when Show edits is on, and the latest one while it is
+    /// worked out and for a moment after.
     enum Mark {
         case box(CGRect, restore: Bool)
         case stroke([CGPoint], radius: CGFloat, restore: Bool)
@@ -74,7 +75,20 @@ final class HeroNSView: NSView {
             }
         }
     }
+    /// What the tools have done to this photo, drawn only when Show edits is on.
     var marks: [Mark] = [] { didSet { needsDisplay = true } }
+    /// The operation just asked for: held as it was drawn while it is worked out, then faded.
+    var pending: Mark? {
+        didSet {
+            fadeTimer?.invalidate()
+            fadeTimer = nil
+            fadeStart = nil
+            needsDisplay = true
+        }
+    }
+    private var fadeStart: CFTimeInterval?
+    private var fadeTimer: Timer?
+    static let fadeSeconds: CFTimeInterval = 0.6
     /// A box dragged out, in pixels of the photo; `restore` when Option was held.
     var onBox: ((CGRect, Bool) -> Void)?
     /// A stroke painted, as points in pixels of the photo, with the brush's radius.
@@ -364,10 +378,16 @@ final class HeroNSView: NSView {
             case .box:
                 let box = CGRect(x: min(start.x, end.x), y: min(start.y, end.y), width: abs(end.x - start.x), height: abs(end.y - start.y)).intersection(whole)
                 // A click, or a sliver: not a box.
-                if box.width * shownScale >= 8 && box.height * shownScale >= 8 { onBox?(box, dragRestores) }
+                if box.width * shownScale >= 8 && box.height * shownScale >= 8 {
+                    pending = .box(box, restore: dragRestores)
+                    onBox?(box, dragRestores)
+                }
             case let .brush(radius):
                 let points = dragPoints.filter { whole.insetBy(dx: -radius, dy: -radius).contains($0) }
-                if !points.isEmpty { onStroke?(points, radius, dragRestores) }
+                if !points.isEmpty {
+                    pending = .stroke(points, radius: radius, restore: dragRestores)
+                    onStroke?(points, radius, dragRestores)
+                }
             case .none:
                 break
             }
@@ -392,9 +412,23 @@ final class HeroNSView: NSView {
         return CGPoint(x: bounds.width / 2 + (q.x - c.x) * s, y: bounds.height - (bounds.height / 2 + (q.y - c.y) * s))
     }
 
-    /// The tools' marks: what was done earlier, faintly; the drag in progress; the brush's outline.
+    /// Fades the operation just made away, once it has been worked out.
+    func fadePending() {
+        guard pending != nil, fadeStart == nil else { return }
+        guard window != nil else { pending = nil; return }
+        fadeStart = CACurrentMediaTime()
+        let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+            guard let self = self, let start = self.fadeStart else { return }
+            if CACurrentMediaTime() - start >= HeroNSView.fadeSeconds { self.pending = nil } else { self.needsDisplay = true }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        fadeTimer = timer
+    }
+
+    /// The tools' marks: what was done earlier, faintly (Show edits); the operation being worked
+    /// out, fading once done; the drag in progress; the brush's outline.
     private func drawTools(_ ctx: CGContext) {
-        guard tool != .none else { return }
+        guard tool != .none || !marks.isEmpty || pending != nil else { return }
         let s = shownScale
         func path(_ points: [CGPoint]) {
             guard let first = points.first else { return }
@@ -418,6 +452,25 @@ final class HeroNSView: NSView {
                 ctx.stroke(box(r))
             case let .stroke(points, radius, restore):
                 ctx.setStrokeColor(red: restore ? 0.6 : 1, green: restore ? 0.8 : 0.85, blue: restore ? 1 : 0.2, alpha: 0.10)
+                ctx.setLineWidth(max(2 * radius * s, 1))
+                path(points)
+                ctx.strokePath()
+            }
+        }
+        // The operation just made: as it was drawn, then fading.
+        if let mark = pending {
+            let k = fadeStart.map { CGFloat(max(0, 1 - (CACurrentMediaTime() - $0) / HeroNSView.fadeSeconds)) } ?? 1
+            switch mark {
+            case let .box(r, restore):
+                let colour: (CGFloat, CGFloat, CGFloat) = restore ? (0.6, 0.8, 1) : (1, 0.85, 0.2)
+                ctx.setFillColor(red: colour.0, green: colour.1, blue: colour.2, alpha: 0.10 * k)
+                ctx.fill(box(r))
+                ctx.setStrokeColor(red: colour.0, green: colour.1, blue: colour.2, alpha: 0.9 * k)
+                ctx.setLineWidth(1.5)
+                ctx.stroke(box(r))
+            case let .stroke(points, radius, restore):
+                let colour: (CGFloat, CGFloat, CGFloat) = restore ? (0.6, 0.8, 1) : (1, 0.85, 0.2)
+                ctx.setStrokeColor(red: colour.0, green: colour.1, blue: colour.2, alpha: 0.30 * k)
                 ctx.setLineWidth(max(2 * radius * s, 1))
                 path(points)
                 ctx.strokePath()

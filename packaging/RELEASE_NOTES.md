@@ -8,28 +8,17 @@ An alpha build of TrainCull for Mac (Apple silicon, macOS 15 or later).
    **Done**, then open **System Settings → Privacy & Security**, scroll down to the message
    about TrainCull and click **Open Anyway**. This is needed once for each new build.
 
-**New in this build: where the mask's edge sits (the final masking round)**
+**New in this build: tool marks no longer stay on the photo**
 
-- **The pale rim.** The mask's edge is now moved onto the photo's own edge and made as
-  wide as it, the colours either side are read right beside it, and the few pixels just
-  inside the edge have the background's light taken out of them too. That is aimed at the
-  3–4 px pale rim round fingers, arms and waists in **Background −3 EV**.
-- **Less colour added.** The colour guard had been catching one mistake over and over at
-  bright-on-dark edges; that mistake is gone, and the guard now also stops an edge coming
-  out darker than the subject beside it (the log counts those separately).
-- **Tools.** Refine Edges and Refine Hair no longer leave a ragged edge on small areas;
-  Clean Edge is smoother; the Refine Hair "contrast" figure is no longer always 1.00.
-  If a large Refine Edges box ever reports "0 px changed" again, the log now says why and
-  the first, quicker result is kept.
-- **The log** has a new line for every mask, `edge placement`: how far the mask's edge is
-  from the photo's (positive is outside the subject), and how wide each is.
-- **Export Debug Bundle** now includes full-size pieces of the photo with the mask over
-  them, round wherever a tool was last used. To have an edge looked into, drag a
-  **Refine Edges** box over it, then export.
-- **Debug** has one more switch, **Edge re-centre**. Off is alpha 14's edge.
+- After a **Refine Edges** box or a **Refine Hair** / **Clean Edge** stroke, the mark stays
+  while it is being worked out, then fades away. Before, every box and stroke stayed drawn
+  over the photo for as long as a tool was chosen.
+- **Show edits** (a new checkbox under **Tool** in **Mask (Test)**) brings them all back,
+  faintly, so you can see where you have worked. It is off to begin with.
 
-This has been checked here on enlarged copies of your eight test photos, not on the photos
-themselves: please look at 6303, 7451 and 6957 with the base mask alone, and send the log.
+Still wanted from alpha 15: please look at 6303, 7451 and 6957 with the base mask alone in
+**Background −3 EV** at 200–300%, and send the log (**Help → Diagnostics**). Nothing about
+the mask's edge changed in this build.
 
 **The masking test:** open **Edit** and scroll to **Mask (Test)**. Click **Make Mask**.
 **Show** switches between the photo, a red overlay, the mask, On Black, On White,

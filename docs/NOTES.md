@@ -186,9 +186,9 @@ Same folder and Mac, two and a half minutes of use:
    200–300%: is the pale rim gone on 6303's fingers and sleeve, 7451's waist and arm,
    6957's hand and waist? The log's new `edge placement` line gives the offset and the edge
    widths on the real photos; nothing in alpha 15 has been seen on one.
-3. Priority 5 of the final masking round, none of it built: the tool overlay bug, the edit
-   stack, Show edits, the history panel, reorder mode. Written out as steps in
-   `MASKING.md`, section 16.
+3. Priority 5 of the final masking round: the tool overlay bug and Show edits are built
+   (alpha 16); the edit stack, the history panel and reorder mode are not. Written out as
+   steps in `MASKING.md`, section 16.
 4. Tune when Refine Hair may use colour matting, on seamless-backdrop shots from the owner.
 5. Soft-focus and closed-eyes flags from Apple's face landmarks.
 6. A Settings window (label names, editor choice), Undo after reject.
@@ -787,6 +787,17 @@ build's made-up pictures have no face, so their whole edge counts as hair and re
 "n/a"), the Edge re-centre switch, the crops in the debug bundle, the tools by hand.
 The 109 engine tests cover the arithmetic; the owner's log will be the first real reading.
 
+## Alpha 16: tool marks (priority 5a and 5c)
+
+The owner's roadmap (2026-11-16): 5a and 5c first, as quick bug fixes, ahead of their alpha 15
+check of the edge. Built:
+- A box or stroke stays on the large image, as it was drawn, while its job runs, then fades
+  over 0.6 s (`HeroNSView.pending`, `fadePending`). `Session.pendingJob` ties it to the job
+  and the frame; changing frame, leaving Edit or comparing drops it at once.
+- **Show edits**, a checkbox under Tool, off by default and not remembered between launches:
+  every operation's mark is drawn faintly, with or without a tool chosen, in Edit only.
+  Logged as `tool` "show edits on/off".
+
 ## Still to design
 
 The owner will share screenshots of how they use Bridge. Until then these are open: where
@@ -805,6 +816,8 @@ shown, how several frames are selected for the editor, the font, the overall loo
   hair) does nothing on such a photo; decontamination still applies.
 - The colour snap goes by colour: where a thin sliver beside the edge is the subject's
   colour (a lit sole edge between two boots), it can add a one-to-two pixel line of mask.
+- Two tool operations drawn in quick succession: the second mark replaces the first on
+  screen, and fades when its own job ends.
 - The tools work on the mask of the photo being shown and are kept until the folder is
   closed, like the mask itself; nothing of them is saved with the photo yet.
 - A Refine Edges box over a large area (more than about 1,840 px across at full size)

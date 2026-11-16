@@ -38,6 +38,8 @@ struct LocalPane: View {
                         ForEach(MaskTool.allCases, id: \.rawValue) { Text($0.name).tag($0) }
                     }
                     .help("Refine Edges: drag a box round fingers, footwear, a gap or a prop. Refine Hair: paint over hair. Clean Edge: paint along a hard edge that still has a rim. Hold Option to put the automatic mask back instead.")
+                    Toggle("Show edits", isOn: $session.showEdits)
+                        .help("Keeps every box and stroke made on this photo drawn over it. Off, each shows only while it is drawn and worked out.")
                     if session.maskTool != .none {
                         Text(session.maskTool.hint)
                             .font(.system(size: 11))

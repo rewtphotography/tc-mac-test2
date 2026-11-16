@@ -142,6 +142,18 @@ final class Session: ObservableObject {
     @Published var maskTool = MaskTool.none { didSet { if maskTool != oldValue { toolChanged() } } }
     /// The brush's radius, in pixels of the photo.
     @Published var brushSize: Double = 60 { didSet { if brushSize != oldValue { toolChanged() } } }
+    /// Show edits: every box and stroke on this photo stays drawn over it. Off, only the one being
+    /// drawn shows, held while it is worked out and faded once done.
+    @Published var showEdits = false {
+        didSet {
+            if showEdits != oldValue {
+                Log.note("tool", "show edits \(showEdits ? "on" : "off")")
+                toolChanged()
+            }
+        }
+    }
+    /// The tool job whose box or stroke is held on the large image until it is done, and its frame.
+    private var pendingJob: (job: Int, frame: Int)?
     @Published var cleanStrength: Double = 1
     @Published var cleanTightness: Double = 0
     @Published var hairMethod = HairMethod.auto
@@ -556,7 +568,7 @@ final class Session: ObservableObject {
             view.onBox = { [weak self] rect, restore in
                 guard let self = self else { return }
                 let box = PixelRect(x: Int(rect.minX), y: Int(rect.minY), w: max(Int(rect.width), 1), h: max(Int(rect.height), 1))
-                self.applyTool(RefineOp(tool: self.maskTool, box: box, stroke: nil, restore: restore))
+                self.userTool(RefineOp(tool: self.maskTool, box: box, stroke: nil, restore: restore))
             }
             view.onStroke = { [weak self] points, radius, restore in
                 guard let self = self else { return }
@@ -564,7 +576,7 @@ final class Session: ObservableObject {
                 var op = RefineOp(tool: self.maskTool, box: nil, stroke: stroke, restore: restore)
                 op.clean.strength = Float(self.cleanStrength)
                 op.clean.tightness = Float(self.cleanTightness)
-                self.applyTool(op)
+                self.userTool(op)
             }
             toolChanged()
         }
@@ -1236,13 +1248,36 @@ final class Session: ObservableObject {
         case .hair, .clean: view.tool = .brush(radius: CGFloat(brushSize))
         }
         let ops = refined[selected]?.ops ?? []
-        view.marks = maskTool == .none ? [] : ops.map { $0.mark }
+        // Earlier boxes and strokes only when asked for (Show edits); never outside the edit view.
+        let shown = showEdits && currentMask != nil && compare == nil && editing
+        view.marks = shown ? ops.map { $0.mark } : []
+        if let pending = pendingJob, pending.frame != selected || !usable {
+            pendingJob = nil
+            view.pending = nil
+        }
         if refineCount != ops.count { refineCount = ops.count }
     }
 
+    /// A box or stroke from the large image: its mark stays there until the job is done.
+    private func userTool(_ op: RefineOp) {
+        if let job = applyTool(op) {
+            pendingJob = (job, selected)
+        } else {
+            slots[0].view?.pending = nil
+        }
+    }
+
+    /// The box or stroke of a job that has finished fades from the large image.
+    private func toolJobEnded(_ job: Int) {
+        guard let pending = pendingJob, pending.job == job else { return }
+        pendingJob = nil
+        if pending.frame == selected { slots[0].view?.fadePending() } else { slots[0].view?.pending = nil }
+    }
+
     /// Runs one tool operation on a frame's mask, as a numbered job like making a mask.
-    func applyTool(_ op: RefineOp, to given: FrameItem? = nil, trigger: String = "user") {
-        guard op.tool != .none, let item = given ?? current, masks.contains(where: { $0.id == item.id }) else { return }
+    @discardableResult
+    func applyTool(_ op: RefineOp, to given: FrameItem? = nil, trigger: String = "user") -> Int? {
+        guard op.tool != .none, let item = given ?? current, masks.contains(where: { $0.id == item.id }) else { return nil }
         maskJobs += 1
         let job = maskJobs
         let url = item.url, id = item.id, name = item.name
@@ -1265,7 +1300,7 @@ final class Session: ObservableObject {
                 automatic = self.refined[id]?.automatic
             }
             guard let now = mask, let base = automatic else {
-                DispatchQueue.main.async { self.maskBusy = false }
+                DispatchQueue.main.async { self.maskBusy = false; self.toolJobEnded(job) }
                 Log.note("job", "#\(job) dropped: the frame has no mask any more")
                 return
             }
@@ -1291,6 +1326,7 @@ final class Session: ObservableObject {
             Log.note("memory", "ToolJob#\(job) · \(measured.memory)", fields: fields)
             DispatchQueue.main.async {
                 self.maskBusy = false
+                self.toolJobEnded(job)
                 let still = self.selected == id
                 switch result {
                 case let .success(done):
@@ -1318,6 +1354,7 @@ final class Session: ObservableObject {
                 }
             }
         }
+        return job
     }
 
     /// Takes back the last tool operation on the current frame.
