@@ -736,7 +736,14 @@ leave it out, see 1.5.3. Halo "elsewhere", as before.)
   beside 6303's fingertips.
 - The skin mask and the Zones view are not remade after a tool operation.
 
-**The automated build (alpha 14):** see the end of this section once it has run.
+**The automated build (alpha 14):** compiled first time; the ten Mac tests pass, among
+them a new one that runs the hair-matting model in one pass and in six tiles and lays tool
+results back into a mask. Both models convert on Linux (8 minutes, kept between builds).
+On the build machine each model loads in about 9 s and a pass takes 17–20 s at a 1.1 GB
+peak, the same for both; the owner's Mac has been about twenty times quicker. The app
+starts in the single, side-by-side and Edit views and loads the main model. The download
+is 822 MB (was 411). Not exercised by the build: the tools' gestures on the photo, the
+tool picker, Undo, the Debug switches. They compile; nobody has used them yet.
 
 ## Still to design
 
