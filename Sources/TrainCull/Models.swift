@@ -201,7 +201,13 @@ final class BiRefNetModel {
         }
         count += 1
         let measured = meter.finish()
-        Log.note("model", "BiRefNet #\(count) \(what) · \(picture.width)×\(picture.height) → \(side)² in \(Log.seconds(since: start)) · memory \(measured.memory) · \(units.name)")
+        var fields = meter.numbers
+        fields["call"] = count
+        fields["what"] = what
+        fields["input_side"] = side
+        fields["units"] = units.name
+        Log.note("model", "BiRefNet #\(count) \(what) · \(picture.width)×\(picture.height) → \(side)² in \(Log.seconds(since: start)) · memory \(measured.memory) · \(units.name)",
+                 fields: fields)
         return result
     }
 }

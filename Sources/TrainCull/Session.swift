@@ -111,7 +111,8 @@ final class Session: ObservableObject {
     /// the current frame's local adjustments, and what is going on.
     /// Changing the tier of a photo that has a mask refines its edge again from what is
     /// already known about its subject; the model is not run again.
-    @Published var maskTier = MatteTier.high {
+    /// Off is the mask (masking spec v4); the hair tiers are a debug comparison.
+    @Published var maskTier = MatteTier.off {
         didSet { if maskTier != oldValue && currentMask != nil { makeMask(fresh: false, trigger: "tier changed to \(maskTier.name)") } }
     }
     @Published var maskView = MaskView.photo
@@ -174,6 +175,9 @@ final class Session: ObservableObject {
     private var draftsSkipped = 0
     private let maskQueue = DispatchQueue(label: "mask", qos: .userInitiated)
     private var memoryPressure: DispatchSourceMemoryPressure?
+    private var modelToken = 0
+    /// How long the model stays loaded after Edit mode is left, in case it is entered again.
+    static let modelLingers: TimeInterval = 120
     private var fullSize: [Int: CGSize] = [:]
     private var editToken = 0
     private var valuesToken = 0
@@ -1031,12 +1035,19 @@ final class Session: ObservableObject {
     }
 
     /// The model is made ready when Edit mode is entered, kept while it lasts, and let go
-    /// when it ends (masking spec v3, 2.3).
+    /// two minutes after it ends (masking spec v3, 2.3, and v4, phase 3).
     private func modelFollowsEditing() {
         guard BundledModels.hasBiRefNet else { return }
-        let on = editing
-        maskQueue.async {
-            if on { BiRefNetModel.shared.prewarm() } else { BiRefNetModel.shared.unload("left Edit mode") }
+        modelToken += 1
+        let token = modelToken
+        if editing {
+            maskQueue.async { BiRefNetModel.shared.prewarm() }
+            return
+        }
+        // Kept for two minutes after leaving, so going straight back in costs nothing.
+        DispatchQueue.main.asyncAfter(deadline: .now() + Session.modelLingers) { [weak self] in
+            guard let self = self, token == self.modelToken, !self.editing else { return }
+            self.maskQueue.async { BiRefNetModel.shared.unload("Edit mode left \(Int(Session.modelLingers)) s ago") }
         }
     }
 
@@ -1102,7 +1113,11 @@ final class Session: ObservableObject {
                 })
             }
             let measured = meter.finish()
-            Log.note("memory", "MaskJob#\(job) · \(measured.memory)")
+            var jobFields = meter.numbers
+            jobFields["job"] = job
+            jobFields["image"] = name
+            jobFields["tier"] = tier.name
+            Log.note("memory", "MaskJob#\(job) · \(measured.memory)", fields: jobFields)
             Log.note("load", "MaskJob#\(job) \(tier.name) \(name) · \(measured.load)")
             let took = Log.seconds(since: working)
             DispatchQueue.main.async {

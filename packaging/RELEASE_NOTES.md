@@ -8,33 +8,33 @@ An alpha build of TrainCull for Mac (Apple silicon, macOS 15 or later).
    **Done**, then open **System Settings → Privacy & Security**, scroll down to the message
    about TrainCull and click **Open Anyway**. This is needed once for each new build.
 
-**New in this build: cleaner hard edges, a lighter model, an Off tier**
+**New in this build: the fringe and halo fixes (masking spec v4, Phase 1)**
 
-- **Off / Fast / High / Max.** **Off** is the subject's edge as found, snapped to the photo,
-  with no colour work: judge shoes, jeans and arms there. Fast, High and Max now refine
-  **hair only**, on top of Off.
-- **Closer looks now run.** After the whole frame, the model looks at the subject in pieces
-  cut from the full-size photo, which is what sharpens hard edges.
-- **Lighter and quicker.** The model works at half its former size (the subject it picks is
-  the same on your eight test photos). It is made ready when you enter Edit and let go when
-  you leave. The log gives memory before, at peak and after every model call.
-- **Changing the tier no longer finds the subject again**; only the hair is redone. The
-  plain edge appears first, the hair a moment later. **Remake** starts from scratch.
-- **Focus strictness** (Loose, Moderate, Strict): how readily things softer than the face
-  are left out. Arms and legs the body-pose detector confirms are kept however soft.
-- **Show** has two new views: **Background −3 EV**, and **Zones (debug)**, which draws where
-  hair was refined, where the edge was snapped, the close-up boxes and the body pose.
-- **Debug** (click to open): the old Vision mask, which processors the model runs on, and
-  **Export Debug Bundle**, which now includes the masks at each stage.
-- SAM and the Hybrid are gone, and the download is about 330 MB smaller for it.
+- **The rim along edges.** Where the subject and the background are clearly different
+  colours, the edge now goes where each pixel's own colour puts it, and every edge pixel
+  knows how much of its light is the subject's. Darkening the background no longer leaves a
+  bright or coloured line round fingers, arms and sleeves. Black boots on dark ground are
+  left as they were.
+- **Closer looks on every photo**, including ones the subject fills (they were skipped).
+- **No more square steps** in soft areas, and no jagged edge on soft-edged things: two
+  causes found and removed.
+- **Small gaps** between leaves and fingers are no longer half filled.
+- **Make Mask** makes the mask; there is no tier to choose. The old hair tiers are under
+  **Debug → Hair tier**, for comparison only.
+- The model stays loaded for two minutes after you leave Edit.
+- The log now gives, for every mask: halo in two rings (0–3 px and 3–10 px), a colour
+  fringe figure, how much the snap moved, and a check for tile seams.
 
-Not in this build yet: following a long prop out of frame, picking up detached headpiece
-parts, and the box tools for adding and removing areas.
+Not in this build: the **Refine Edges** box and the **Refine Hair** brush (next), and
+automatic opening of enclosed gaps. Tested here as specified, the gap check would have cut
+pieces out of costumes, so gaps wait for the box.
 
-**The masking test:** open **Edit** and scroll to **Mask (Test)**. Choose a tier and click
-**Make**. Pick **Subject**, **Background** or **Skin** and move **Exposure**, **Saturation** or
-**Warmth**. Masks and local adjustments last until you close the folder; **Export 16-bit TIFF**
-includes them. The app never uses the network: the model is inside the download.
+**The masking test:** open **Edit** and scroll to **Mask (Test)**. Click **Make Mask**.
+**Show** switches between the photo, a red overlay, the mask, On Black, On White,
+**Background −3 EV** and a debug view of zones. Pick **Subject**, **Background** or **Skin** and
+move **Exposure**, **Saturation** or **Warmth**. Masks and local adjustments last until you
+close the folder; **Export 16-bit TIFF** includes them. The app never uses the network: the
+model is inside the download.
 
 **Since alpha 4**
 

@@ -58,7 +58,9 @@ final class Log {
     }
 
     /// Writes one line: the time, an area ("folder", "image", "save"…) and what happened.
-    static func note(_ area: String, _ text: String) { shared.write(area, text, level: "info") }
+    /// `fields` are extra named values for the JSON copy of the log (numbers, names), so a
+    /// script reading it needn't pick them out of the sentence.
+    static func note(_ area: String, _ text: String, fields: [String: Any]? = nil) { shared.write(area, text, level: "info", fields: fields) }
 
     /// Something that went wrong, or went a way it shouldn't have: a fallback taken, a limit hit.
     static func warn(_ text: String) { shared.write("warn", text, level: "warn") }
@@ -77,7 +79,7 @@ final class Log {
         String(format: "%.3f s", locale: Locale(identifier: "en_US_POSIX"), CFAbsoluteTimeGetCurrent() - start)
     }
 
-    private func write(_ area: String, _ text: String, level: String) {
+    private func write(_ area: String, _ text: String, level: String, fields: [String: Any]? = nil) {
         let now = Date()
         queue.async {
             if let handle = self.handle {
@@ -85,7 +87,8 @@ final class Log {
                 try? handle.write(contentsOf: Data(line.utf8))
             }
             if let handle = self.jsonHandle {
-                let event: [String: Any] = ["ts": self.stamp.string(from: now), "level": level, "category": area, "message": text]
+                var event: [String: Any] = ["ts": self.stamp.string(from: now), "level": level, "category": area, "message": text]
+                if let fields = fields, JSONSerialization.isValidJSONObject(fields) { event["fields"] = fields }
                 if var data = try? JSONSerialization.data(withJSONObject: event, options: [.sortedKeys]) {
                     data.append(0x0A)
                     try? handle.write(contentsOf: data)
@@ -165,6 +168,9 @@ final class JobMeter {
     }
 
     /// Stops measuring and says what was found, in two log-ready pieces.
+    /// What the last `finish` measured, as numbers: bytes of memory and seconds.
+    private(set) var numbers: [String: Any] = [:]
+
     func finish() -> (memory: String, load: String) {
         timer.cancel()
         let wall = max(CFAbsoluteTimeGetCurrent() - started, 0.001)
@@ -174,6 +180,7 @@ final class JobMeter {
         lock.unlock()
         let cpu = max(JobMeter.cpuSeconds() - cpuBefore, 0)
         let thermalAfter = Log.thermal
+        numbers = ["seconds": wall, "memory_before": Double(before), "memory_peak": Double(top), "memory_after": Double(after), "cpu_seconds": cpu]
         let memory = "before \(MemoryStats.plain(before)) · peak \(MemoryStats.plain(top)) · after \(MemoryStats.plain(after))"
         let load = String(format: "cpu %.1f core-s · avg %.1f of %d cores", locale: Locale(identifier: "en_US_POSIX"),
                           cpu, cpu / wall, ProcessInfo.processInfo.activeProcessorCount)

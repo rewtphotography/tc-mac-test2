@@ -15,18 +15,10 @@ struct LocalPane: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             SectionTitle("MASK (TEST)")
-            HStack(spacing: 8) {
-                Picker("", selection: $session.maskTier) {
-                    ForEach(MatteTier.allCases, id: \.rawValue) { Text($0.name).tag($0) }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .help("Off: the subject's edge as found, snapped to the photo. Fast, High and Max refine hair on top of that: Fast for clean backdrops, High for hair over several colours, Max for every strand, slowly. Changing this on a photo that has a mask only redoes the hair.")
-                Button(mask == nil ? "Make" : "Remake") { session.makeMask() }
-                    .disabled(session.maskBusy || session.current == nil)
-                    .help(mask == nil ? "Find the subject and make its mask" : "Find the subject again from scratch")
-            }
-            .padding(.horizontal, 6)
+            Button(mask == nil ? "Make Mask" : "Remake Mask") { session.makeMask() }
+                .disabled(session.maskBusy || session.current == nil)
+                .padding(.horizontal, 6)
+                .help(mask == nil ? "Find the subject and make its mask" : "Find the subject again from scratch")
             Picker("Focus strictness", selection: $session.focusStrictness) {
                 ForEach(FocusStrictness.allCases, id: \.rawValue) { Text($0.name).tag($0) }
             }
@@ -42,6 +34,10 @@ struct LocalPane: View {
             }
             DisclosureGroup("Debug", isExpanded: $showDebug) {
                 VStack(alignment: .leading, spacing: 8) {
+                    Picker("Hair tier", selection: $session.maskTier) {
+                        ForEach(MatteTier.allCases, id: \.rawValue) { Text($0.name).tag($0) }
+                    }
+                    .help("Off is the mask. Fast, High and Max add the older automatic hair matting on top, kept here only for comparison; changing this on a photo that has a mask redoes just the hair.")
                     Toggle("Legacy Vision mask", isOn: $session.legacyVision)
                         .controlSize(.small)
                         .help("Apple's Vision finds the subject instead of BiRefNet, as before alpha 9. Takes effect on Remake.")

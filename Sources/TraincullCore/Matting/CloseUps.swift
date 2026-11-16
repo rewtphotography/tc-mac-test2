@@ -6,19 +6,23 @@ import Foundation
 /// that is already there, so a closer look can sharpen an edge and never invent a new region.
 public enum CloseUps {
     /// Square tiles that together cover `box`, in the same pixels as the box. Each is as
-    /// large as the box's shorter side, within `rules.tileLeast ... rules.tileCap`, and they
-    /// overlap by `rules.tileOverlap`. If that takes more than `rules.tilesMost`, larger
-    /// tiles are used. Tiles stay inside a picture `w` by `h`.
+    /// large as the box's shorter side but no more than half its longer side (so the model
+    /// sees at least twice the detail it had of the whole frame; masking spec v4, 1.1),
+    /// within `rules.tileLeast ... rules.tileCap`, and they overlap by `rules.tileOverlap`.
+    /// If that takes more than `rules.tilesMost`, larger tiles are used. Tiles stay inside a
+    /// picture `w` by `h`.
     public static func tiles(covering box: Box, w: Int, h: Int, rules: SubjectRules = SubjectRules()) -> [Box] {
         let bw = box.x1 - box.x0, bh = box.y1 - box.y0
         if bw <= 0 || bh <= 0 { return [] }
         var side = min(max(min(bw, bh), rules.tileLeast), rules.tileCap)
+        side = min(side, max(max(bw, bh) / 2, rules.tileLeast))
         side = min(side, min(w, h))
         func count(_ span: Int, _ side: Int) -> Int {
             span <= side ? 1 : Int((Float(span - side) / ((1 - rules.tileOverlap) * Float(side))).rounded(.up)) + 1
         }
-        while count(bw, side) * count(bh, side) > rules.tilesMost && side < min(w, h) {
-            side = min(Int(Float(side) * 1.15) + 1, min(w, h))
+        let largest = min(rules.tileCap, min(w, h))
+        while count(bw, side) * count(bh, side) > rules.tilesMost && side < largest {
+            side = min(Int(Float(side) * 1.15) + 1, largest)
         }
         func starts(_ lo: Int, _ span: Int, _ limit: Int) -> [Int] {
             let n = count(span, side)
@@ -65,6 +69,8 @@ public enum CloseUps {
         var sum: [Float]
         var weight: [Float]
         public private(set) var tiles = 0
+        /// The tiles added, in canvas pixels.
+        var placed: [Box] = []
 
         public init(w: Int, h: Int, scale: Float) {
             self.w = w; self.h = h; self.scale = scale
@@ -99,6 +105,42 @@ public enum CloseUps {
                 }
             }
             tiles += 1
+            placed.append(Box(x0: x0, y0: y0, x1: x1, y1: y1))
+        }
+
+        /// A check for lines where tiles meet (masking spec v4, 1.2): the merged mask's
+        /// steps across tile borders against its steps half a tile further in, each at its
+        /// 99th percentile. A border that shows has much larger ones; over 3 is worth a
+        /// warning. Nil when there is too little edge on the borders to tell.
+        public func seamRatio(_ merged: Gray) -> Float? {
+            precondition(merged.w == w && merged.h == h)
+            var across: [Float] = [], within: [Float] = []
+            func step(_ x: Int, _ y: Int, _ dx: Int, _ dy: Int) -> Float? {
+                let ax = x - dx, ay = y - dy
+                if ax < 0 || ay < 0 || x >= w || y >= h { return nil }
+                let a = merged.v[ay * w + ax], b = merged.v[y * w + x]
+                // Only where there is an edge to cut: flat inside and flat outside say nothing.
+                if (a < 0.02 && b < 0.02) || (a > 0.98 && b > 0.98) { return nil }
+                return abs(a - b)
+            }
+            for tile in placed {
+                let half = max((tile.x1 - tile.x0) / 2, 1)
+                for (border, inward) in [(tile.x0, half), (tile.x1, -half)] where border > 0 && border < w {
+                    for y in stride(from: tile.y0, to: tile.y1, by: 2) {
+                        if let v = step(border, y, 1, 0) { across.append(v) }
+                        if let v = step(border + inward, y, 1, 0) { within.append(v) }
+                    }
+                }
+                for (border, inward) in [(tile.y0, half), (tile.y1, -half)] where border > 0 && border < h {
+                    for x in stride(from: tile.x0, to: tile.x1, by: 2) {
+                        if let v = step(x, border, 0, 1) { across.append(v) }
+                        if let v = step(x, border + inward, 0, 1) { within.append(v) }
+                    }
+                }
+            }
+            if across.count < 100 || within.count < 100 { return nil }
+            across.sort(); within.sort()
+            return across[across.count * 99 / 100] / max(within[within.count * 99 / 100], 0.01)
         }
 
         /// The mask at the canvas's size: `base` stretched up, replaced by the close-ups

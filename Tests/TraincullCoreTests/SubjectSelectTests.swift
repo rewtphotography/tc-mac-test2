@@ -136,6 +136,14 @@ final class SubjectSelectTests: XCTestCase {
         XCTAssertEqual(a.count, 3)
         XCTAssertTrue(a.allSatisfy { $0.x1 - $0.x0 == 600 && $0.y1 - $0.y0 == 600 })
         XCTAssertTrue(covered(tall, a))
+        // A box nearly as wide as it is tall: tiles are at most half its longer side, so the
+        // model always sees at least twice the detail it had of the whole frame.
+        let squarish = Box(x0: 100, y0: 0, x1: 1300, y1: 1365)
+        let s = CloseUps.tiles(covering: squarish, w: 2048, h: 1365, rules: rules)
+        XCTAssertTrue(s.allSatisfy { $0.x1 - $0.x0 <= 1024 }, "\(s)")
+        XCTAssertGreaterThanOrEqual(s.count, 4)
+        XCTAssertLessThanOrEqual(s.count, rules.tilesMost)
+        XCTAssertTrue(covered(squarish, s))
         // A small subject: one tile, no smaller than the least size, inside the picture.
         let small = Box(x0: 10, y0: 20, x1: 150, y1: 300)
         let b = CloseUps.tiles(covering: small, w: 2048, h: 1365, rules: rules)
@@ -176,6 +184,20 @@ final class SubjectSelectTests: XCTestCase {
         XCTAssertLessThan(out.at(180, 80), 0.01, "the far blob is not near the edge, so it is not taken")
         XCTAssertGreaterThan(out.at(40, 80), 0.99)
         XCTAssertEqual(CloseUps.mergeRadius(faceHeight: 200, longEdge: 2048), 16, accuracy: 1e-4)
+        XCTAssertNil(canvas.seamRatio(out), "one tile over the whole picture has no border inside it")
+
+        // Two tiles that disagree about where the edge is, overlapping: where they meet must not show.
+        var left = Gray(w: 120, h: 160), right = Gray(w: 120, h: 160)
+        for y in 0 ..< 160 { for x in 0 ..< 120 { left.v[y * 120 + x] = y < 80 ? 1 : 0; right.v[y * 120 + x] = y < 84 ? 1 : 0 } }
+        var flat = Gray(w: 200, h: 160)
+        for y in 0 ..< 82 { for x in 0 ..< 200 { flat.v[y * 200 + x] = 1 } }
+        var two = CloseUps.Canvas(w: 200, h: 160, scale: 1)
+        two.add(left, box: Box(x0: 0, y0: 0, x1: 120, y1: 160), feather: 24)
+        two.add(right, box: Box(x0: 80, y0: 0, x1: 200, y1: 160), feather: 24)
+        let joined = two.merged(over: flat, zone: CloseUps.edgeZone(flat, radius: 10))
+        var worst: Float = 0
+        for x in 1 ..< 200 { worst = max(worst, abs(joined.at(x, 82) - joined.at(x - 1, 82))) }
+        XCTAssertLessThan(worst, 0.1, "the two tiles' answers fade into each other")
     }
 
     func testMergeFadesACloserLookIn() {

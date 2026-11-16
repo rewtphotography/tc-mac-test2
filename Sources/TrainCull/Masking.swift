@@ -137,13 +137,15 @@ final class SubjectBase {
     /// The close-up boxes, in proxy pixels, and whether each was used.
     let tiles: [(box: Box, used: Bool)]
     let subjectBox: Box?
+    /// How much the close-up tiles' borders show in the mask; over 3 is a visible seam.
+    let seam: Float?
     let seconds: Double
 
     init(key: String, source: SubjectSource, faces: [PixelRect], proxy: CGImage, ranking: Masking.Ranking, coarse: Gray, selected: Gray?,
-         patches: [HeadPatch], poses: [BodyPose], primaryPose: Int?, tiles: [(box: Box, used: Bool)], subjectBox: Box?, seconds: Double) {
+         patches: [HeadPatch], poses: [BodyPose], primaryPose: Int?, tiles: [(box: Box, used: Bool)], subjectBox: Box?, seam: Float? = nil, seconds: Double) {
         self.key = key; self.source = source; self.faces = faces; self.proxy = proxy; self.ranking = ranking
         self.coarse = coarse; self.selected = selected; self.patches = patches
-        self.poses = poses; self.primaryPose = primaryPose; self.tiles = tiles; self.subjectBox = subjectBox; self.seconds = seconds
+        self.poses = poses; self.primaryPose = primaryPose; self.tiles = tiles; self.subjectBox = subjectBox; self.seam = seam; self.seconds = seconds
     }
 }
 
@@ -479,6 +481,7 @@ enum Masking {
         var primaryPose: Int?
         var tiles: [(box: Box, used: Bool)] = []
         var subjectBox: Box?
+        var seam: Float?
     }
 
     /// The first pass from BiRefNet (masking spec v3, sections 3, 4.1, 6 and 7): the whole
@@ -557,10 +560,6 @@ enum Masking {
         pass.subjectBox = box
         let percent = 100 * Double(box.area) / Double(w * h)
         let size = "\(box.x1 - box.x0)×\(box.y1 - box.y0) px of the proxy, \(String(format: "%.0f", locale: posix, percent))% of the frame"
-        if percent > 80 {
-            Log.note("base", "\(name): close-up skipped: the subject's box is \(size), over 80%, so the whole-frame pass already is the close-up")
-            return pass
-        }
         stage = CFAbsoluteTimeGetCurrent()
         let grid = CloseUps.tiles(covering: box, w: w, h: h, rules: rules)
         let radius = CloseUps.mergeRadius(faceHeight: face?.h, longEdge: max(w, h), rules: rules)
@@ -590,7 +589,17 @@ enum Masking {
             canvas.add(answer, box: tile, feather: rules.feather)
             pass.tiles.append((tile, true))
         }
-        if canvas.tiles > 0 { pass.coarse = canvas.merged(over: kept, zone: zone) }
+        var seamText = "seam check n/a"
+        if canvas.tiles > 0 {
+            let joined = canvas.merged(over: kept, zone: zone)
+            pass.coarse = joined
+            // Where tiles meet must not show (masking spec v4, 1.2).
+            if let ratio = canvas.seamRatio(joined) {
+                pass.seam = ratio
+                seamText = "seam ratio " + String(format: "%.1f", locale: posix, ratio) + (ratio > 3 ? " SEAM?" : " OK")
+                if ratio > 3 { Log.warn("\(name): SEAM? the close-up tiles' borders show in the mask (ratio \(String(format: "%.1f", locale: posix, ratio)))") }
+            }
+        }
         let tileSide = grid.first.map { $0.x1 - $0.x0 } ?? 0
         let detail = tileSide > 0 ? 100 * Double(side) / (Double(tileSide) * scale) : 0
         let wholeDetail = 100 * Double(side) / Double(max(reference.width, reference.height))
@@ -598,7 +607,7 @@ enum Masking {
         let wholeText: String = String(format: "%.0f", locale: posix, wholeDetail)
         let ran: String = "\(name): close-up run: the subject's box is \(size) → \(canvas.tiles) of \(grid.count) tile(s) of \(tileSide) px used (a tile with no edge in it is left out)"
         let saw: String = "the model saw \(detailText)% of the photo's detail there, \(wholeText)% in the whole frame"
-        let kept2: String = "the edge may move \(Int(radius)) px · mask kept at \(pass.coarse.w)×\(pass.coarse.h) · \(Log.seconds(since: stage))"
+        let kept2: String = "the edge may move \(Int(radius)) px · \(seamText) · mask kept at \(pass.coarse.w)×\(pass.coarse.h) · \(Log.seconds(since: stage))"
         Log.note("base", [ran, saw, kept2].joined(separator: " · "))
         return pass
     }
@@ -697,7 +706,7 @@ enum Masking {
         let seconds = CFAbsoluteTimeGetCurrent() - started
         let made = SubjectBase(key: key ?? "", source: used, faces: faces, proxy: small, ranking: ranking, coarse: first, selected: pass?.selected,
                                patches: patches, poses: pass?.poses ?? [], primaryPose: pass?.primaryPose, tiles: pass?.tiles ?? [],
-                               subjectBox: pass?.subjectBox, seconds: seconds)
+                               subjectBox: pass?.subjectBox, seam: pass?.seam, seconds: seconds)
         if key != nil {
             keptLock.lock()
             bases.removeAll { $0.key == made.key }
@@ -809,10 +818,22 @@ enum Masking {
         if let halo = out.edgeQuality.haloElsewhere {
             let haloText: String = String(format: "%.3f", locale: Locale(identifier: "en_US_POSIX"), halo)
             summary += " · halo away from hair \(haloText)"
-            if final && halo > 0.05 { Log.warn("\(name): HALO? mean alpha \(haloText) just outside the edge, away from hair (\(tier.name) mask)") }
+            if final && halo > 0.02 { Log.warn("\(name): HALO? mean alpha \(haloText) just outside the edge, away from hair (\(tier.name) mask)") }
+        }
+        if let fringe = out.edgeQuality.fringe {
+            summary += " · colour fringe " + String(format: "%.3f", locale: Locale(identifier: "en_US_POSIX"), fringe)
         }
         if !out.warnings.isEmpty { summary += " · check: " + out.warnings.joined(separator: ", ") }
-        if final { Log.note("mask", "\(name): \(summary)") }
+        if final {
+            var fields: [String: Any] = ["image": name, "tier": tier.name, "seconds": CFAbsoluteTimeGetCurrent() - started, "edge_pixels": out.unknownPixels]
+            let q = out.edgeQuality
+            let metrics: [(String, Float?)] = [("halo_near_hair", q.nearHaloHair), ("halo_near_elsewhere", q.nearHaloElsewhere), ("halo_hair", q.haloHair),
+                                               ("halo_elsewhere", q.haloElsewhere), ("erosion_near_hair", q.nearErosionHair),
+                                               ("erosion_near_elsewhere", q.nearErosionElsewhere), ("erosion_hair", q.erosionHair),
+                                               ("erosion_elsewhere", q.erosionElsewhere), ("colour_fringe", q.fringe)]
+            for (key, value) in metrics { if let value = value { fields[key] = Double(value) } }
+            Log.note("mask", "\(name): \(summary)", fields: fields)
+        }
         return MaskResult(width: W, height: H, alpha: alpha, shares: shares, skin: skin, trimap: trimap, coarse: rough,
                           debug: overlay(out, base: base), tier: tier, edge: out.edgeQuality, summary: summary)
     }
@@ -970,6 +991,7 @@ enum Masking {
             "mask_size": [found.coarse.w, found.coarse.h],
         ]
         if let box = found.subjectBox { regions["subject_box"] = list(box) }
+        if let seam = found.seam { regions["tile_seam_ratio"] = Double(seam) }
         try json(regions, "regions.json")
 
         var alphaNote = " (not written: no mask had been made)"

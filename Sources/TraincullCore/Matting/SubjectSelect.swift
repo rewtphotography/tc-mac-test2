@@ -28,7 +28,10 @@ public struct Box: Equatable {
 public struct SubjectRules {
     public var feather = 24
     public var speckle: Float = 0.0002
-    public var hole: Float = 0.0001
+    /// Holes in the mask smaller than this fraction of the picture are filled as pinholes.
+    /// Kept under the smallest background gap worth opening (spec v4, 1.5): at five times
+    /// this, as it was, small true gaps between leaves and fingers were being half filled.
+    public var hole: Float = 0.00002
     public var attachDistance: Float = 0.01
     /// How much more blurred than the subject's face a separate piece may be, in pixels of
     /// blur width, at strictness 1. The allowance is divided by the strictness.
@@ -41,9 +44,11 @@ public struct SubjectRules {
     /// face's height of it, plus a few pixels.
     public var mergeFraction: Float = 0.05
     public var mergePlus: Float = 6
-    /// Close-up tiles: square, no larger than `tileCap` and no smaller than `tileLeast`
-    /// pixels of the proxy, overlapping by a quarter, at most `tilesMost` of them.
-    public var tileCap = 1152
+    /// Close-up tiles: square, no larger than `tileCap` (half the proxy's long edge, so a
+    /// tile always shows the model at least twice the detail of the whole frame) and no
+    /// smaller than `tileLeast` pixels of the proxy, overlapping by a quarter, at most
+    /// `tilesMost` of them.
+    public var tileCap = 1024
     public var tileLeast = 384
     public var tileOverlap: Float = 0.25
     public var tilesMost = 8
@@ -134,7 +139,7 @@ public enum SubjectSelect {
                 let x = i % w, y = i / w
                 if x == 0 || y == 0 || x == w - 1 || y == h - 1 { open[Int(holes[i])] = true }
             }
-            for i in 0 ..< w * h where holes[i] > 0 && !open[Int(holes[i])] && Float(areas[Int(holes[i])]) < rules.hole * n { out[i] = true }
+            for i in 0 ..< w * h where holes[i] > 0 && !open[Int(holes[i])] && Float(areas[Int(holes[i])]) < max(rules.hole * n, 2) { out[i] = true }
         }
         return out
     }
