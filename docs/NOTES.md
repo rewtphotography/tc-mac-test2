@@ -584,6 +584,11 @@ with the new rule; alpha 12's edge against the new one; "elsewhere" = away from 
   fingers, the orange rim round 6372's rose and hand, and the fringe on 6957's hand are
   gone or nearly; boots on 6957 and 7451 stay clean.
 
+**The automated build (alpha 13):** compiled first time; the Mac tests pass, the pipeline
+test now with four close-up tiles and a tier change that runs no model; the app starts in
+Edit and loads the model (peak 1.1 GB on the build machine, as before). The download is
+411 MB. Nothing in it has yet been seen on a real raw file.
+
 **Changed from the spec, or not done, and why:**
 - **The automatic gap check (1.5) is not built.** Prototyped on the proxies as specified
   (colour near the background's, far from the subject's, no sharp detail, enclosed), it
@@ -628,6 +633,8 @@ shown, how several frames are selected for the editor, the font, the overall loo
   opened or macOS reports memory pressure.
 - The hair zone is a box around each face (2.6 face widths by 3 face heights). Long hair
   that falls below it gets the Off edge, not strand matting. The Zones view shows the box.
+- With no face found the whole edge counts as hair zone, so the colour snap (which skips
+  hair) does nothing on such a photo; decontamination still applies.
 - The colour snap goes by colour: where a thin sliver beside the edge is the subject's
   colour (a lit sole edge between two boots), it can add a one-to-two pixel line of mask.
 - The model is unloaded two minutes after leaving Edit mode; entering it later loads it
