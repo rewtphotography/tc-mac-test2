@@ -127,7 +127,7 @@ Bridge, Photoshop or Lightroom has it)
   folder tree, a calibration table mapping Apple's values to Camera Raw's.
 - Subject, hair and skin masks: see "Masking" below.
 
-## What is built (alpha 13)
+## What is built (alpha 14)
 
 Folder opening (button, File menu, drag and drop, recents, drives), resizable left pane,
 thumbnails with rating, label and reject marks, the large image with raw render and face
@@ -135,9 +135,9 @@ zoom with a glide, ratings and labels, edit mode with 15 of Apple's raw controls
 sidecar, Send to Photoshop, the one-line bar under the image, click-to-filter on the counts
 at the bottom left (double-click the rated count to choose stars), side-by-side compare,
 extracting the embedded JPEG, exporting a developed 16-bit TIFF, the diagnostics log and
-memory report, an app icon, and the masking test (see "Masking").
+memory report, an app icon, and the masking test with its three refine tools (see "Masking").
 
-Checked by tests on Linux (94): raw and recipe reading, the settings line, sidecar editing,
+Checked by tests on Linux (102): raw and recipe reading, the settings line, sidecar editing,
 crash-safe saving, face-zoom maths, the TIFF writer, JPEG orientation, compare stepping,
 memory figures. Checked by a test on the Mac build: an exported TIFF opens in Apple's reader
 with the right pixels. Checked by the automated build's screenshots (made-up frames): the
@@ -180,11 +180,13 @@ Same folder and Mac, two and a half minutes of use:
 
 ## Next, in order
 
-1. The owner tries alpha 13 (spec v4, Phase 1) in Background −3 EV at 100% on the eight test
-   photos, and supplies two or three shots on a seamless or plain backdrop.
-2. Spec v4, Phase 2: the Refine Edges box and the Refine Hair brush (see "Masking spec v4").
-   Gaps are opened there, by the model at close range, not by an automatic colour test.
-3. Spec v4, Phase 3, what is left of it: automatic hand and foot boxes, prop growth.
+1. The owner tries alpha 14 (spec v5) on the eight test photos: the colour fix in
+   Background −3 EV at 200–400%, then the three tools. The tools' gestures (box, brush,
+   Option, Undo, [ ]) have been compiled and their engine tested, but nobody has yet used
+   them with a hand on a Mac. Two or three shots on a seamless backdrop are still wanted,
+   to tune when Refine Hair may use colour matting.
+2. From spec v5's deferred list, when the owner asks: automatic hand and foot boxes,
+   automatic prop growth, an automatic gap check, automatic defringe.
 3. Soft-focus and closed-eyes flags from Apple's face landmarks.
 4. A Settings window (label names, editor choice), Undo after reject.
 
@@ -619,6 +621,123 @@ BiRefNet-matting (its licence to confirm, and it would ship inside the download 
 main model, not download on first use), colour matting recalibrated on the owner's
 seamless shots, the tiers' own blockiness (2.3.2).
 
+## Masking spec v5 (alpha 14: the colour fix and the refine tools)
+
+`docs/specs/masking-spec-v5.md`. From alpha 13 testing: the base mask is usable on all
+eight; one bug (masking adds colour at high-contrast edges: green and teal lines on 7451,
+pink on 6957); and the refine tools are to be built, all in one build. Nothing in it was
+put off; what was built differently is listed at the end.
+
+**The colour bug, found on the real pixels.** Alpha 13 gave each edge pixel three shares,
+one per colour channel, each "nudged" until that channel reproduced the pixel exactly. The
+photos have a one-pixel green lens fringe on bright edges. On 7451's arm that fringe pixel
+got shares of 2% red and 15% green: with the background darkened, a green line. So the
+masking amplified a tint the lens had put there.
+
+**Built:**
+- **Hue-preserving decontamination** (1.2), `Matte.shares`. In linear light the pixel is
+  placed on the line between the nearby subject and background colours; the subject's part
+  of it gives the shares, scaled together, never per channel past what that fit supports.
+  How far this is believed falls with the contrast between the two colours, with how badly
+  the pixel fits the line (a fringe pixel fits badly), and to nothing where the background
+  is blown out, where one share for all channels is used. Applied only to part-covered
+  pixels (5–95%).
+- **The colour guard** (1.1), `Matte.guardColour`, in Oklab. Each part-covered edge pixel
+  is composited two ways (background three stops down, subject three stops down) and
+  compared with the originals within two pixels and the local subject and background
+  colours. If it is more colourful than all of them, more colourful for its brightness,
+  or more than 15° of hue from every one, it gets one share for all channels. Counts and
+  reasons are logged.
+- **Background colours in narrow gaps.** The colour fields were filled from 16 px blocks
+  upward and from cells a full band away, so a gap a few pixels wide had no background
+  colour of its own (it read black). They now fill from single cells one cell away.
+- **Debug switches** (1.4): Edge snap, Decontamination, Colour guard. Switching one redoes
+  this photo's edge without the model and replays its tool operations.
+- **Refine Edges, Refine Hair, Clean Edge** (2), in `Refine` (engine) and `Refining.swift`
+  (app). A tool picker under Make Mask; a box drag or a brush on the photo; Option puts the
+  automatic mask back; Undo button and ⌘Z; [ and ] size the brush; each photo keeps its
+  list of operations, replayed after Remake Mask; boxes and strokes are drawn on the photo
+  while a tool is chosen. The tier control was already out of the main interface.
+  - **Box:** crop grown 15%, the main model looks again (at once on the crop, then in tiles
+    if the crop is over about 1,840 px across), only parts touching the old mask or
+    overlapping it 30% are kept, pasted back with a 6 px feather, then snap, shares and
+    guard inside. If kept parts touch the crop's border it grows and looks again, up to
+    four times or six seconds.
+  - **Hair:** the stroke marks the unknown area; guards are relaxed inside it. Method per
+    stroke, logged with its reason: colour matting when the backdrop is plain and unlike
+    the hair, otherwise **BiRefNet-matting**, which is now inside the download like the
+    main model (MIT licence, converted the same way, checked against the original to
+    2·10⁻⁶). Both thresholds are in Debug.
+  - **Clean Edge:** along the stroke each pixel is assigned to subject or background by its
+    colour and a little by sharpness, with a narrow ramp; Strength and Tightness sliders.
+- **Small items** (3): both models stay loaded two minutes after leaving Edit; JSON fields
+  on tool operations too; the debug bundle gains `F.png`, boxes, strokes, gaps opened and
+  the switch states in `regions.json`; every tool operation logs method and reason, pixels
+  changed, guard corrections and time.
+- The large image now zooms to 400% (the spec's checks are at 200–400%).
+
+**Measured here on the eight proxies** (automatic mask, alpha 13 → alpha 14):
+
+| Photo | Halo 3–10 px | Halo 0–3 px | Colour fringe | Guard corrected, of edge pixels |
+|---|---|---|---|---|
+| 6303 | 0.001 → 0.000 | 0.144 → 0.139 | 0.054 → 0.043 | 462 of 6,768 |
+| 6372 | 0.014 → 0.014 | 0.177 → 0.174 | 0.048 → 0.040 | 908 of 33,403 |
+| 6378 | 0.008 → 0.008 | 0.182 → 0.180 | 0.065 → 0.058 | 1,554 of 45,692 |
+| 6465 | 0.001 → 0.001 | 0.168 → 0.171 | 0.088 → 0.076 | 54 of 7,465 |
+| 6957 | 0.001 → 0.001 | 0.152 → 0.152 | 0.032 → 0.025 | 752 of 13,737 |
+| 7006 | 0.001 → 0.001 | 0.162 → 0.156 | 0.053 → 0.042 | 686 of 12,687 |
+| 7451 | 0.000 → 0.000 | 0.150 → 0.149 | 0.047 → 0.041 | 65 of 12,608 |
+| 7473 | 0.002 → 0.002 | 0.191 → 0.192 | 0.156 → 0.065 | 63 of 82,503 |
+
+(The alpha 13 fringe figures are as measured then, hair-zone border included; alpha 14's
+leave it out, see 1.5.3. Halo "elsewhere", as before.)
+
+- **1.5.1, 1.5.2:** the teal and green lines on 7451 and the line on 6957's waist are gone
+  in the renders (before/after crops were given to the owner; they are not in the repository).
+- **1.5.3, 7473's fringe reading:** it was the border of the hair zone. The measure skipped
+  pixels inside the hair zone but counted the soft band where the zone fades out, and on
+  7473 that band runs through soft hair on a low-contrast backdrop (0.192 there, against
+  0.065 on the rest). Those pixels are now left out and logged separately. Legitimate
+  hair, not an edge fault.
+- **1.5.4, guard counts:** not ≈ 0: 0.1% to 7% of edge pixels. Most are "more colourful
+  for its brightness" and "hue off with the subject darkened": pixels where the photo's
+  own lens fringe is the nearest thing to a reference. The guard is doing the work the
+  spec wanted the earlier steps to make unnecessary; nothing visible was traced to it.
+- **1.5.5:** boots on 6957 and 7451 and the fingers on 6303 are as in alpha 13.
+- **Tools on the proxies** (20–330 ms each there, model time apart): the box round 6957's
+  hand tidies the fingers and opens nothing wrongly; a box on 7451's boots opens the dark
+  gap between them and does no harm; one Refine Hair stroke on 7473's shoulder clears the
+  mush and keeps the curls, and on the window side changes almost nothing; 6465 and 6372
+  improve a little; Clean Edge on 6303's fingers and 7451's gap tightens slightly, no harm.
+
+**Changed from the spec, and why:**
+- **1.3, the snap is not skipped near blown-out backgrounds or in narrow gaps.** Tried as
+  written, it left a light rim exactly where the owner sees one (7451's arm against the
+  white wall). With the new shares the snap is safe there. The settings exist
+  (`snapSkipsBright`, `snapNeedsBackground`), off.
+- **1.1, the guard's references** are the originals within two pixels (not one) plus the
+  local subject and background colours, and a "more colourful for its brightness" test was
+  added: a dark edge pixel can be low in chroma and still plainly green.
+- **2.2, gaps inside a box** are opened only on strong evidence (close to the background's
+  colour, far from the subject's, wholly inside the box, enclosed). As first written it
+  opened a piece of 6957's navy sleeve. Mostly the model's closer look opens them itself.
+- **2.2, "fast then full"** happens only when the box is big enough to need tiles;
+  otherwise the single look is the full result.
+- **2.3, the automatic choice is nearly always the matting model** on these photos (it asks
+  for a very plain backdrop: busyness under 0.03). Colour matting under a stroke ate a
+  sleeve on 6465 and hazed edges on 7473; it is now limited to near the existing edge and
+  can be forced in Debug. To be tuned on seamless shots.
+- **2.3, colour-matting blockiness:** the two stair-step causes were removed in alpha 13
+  (band cells at 93–97%, the brightness snap); the stroke path uses the same fixed code.
+- **2.4, Clean Edge goes mostly by colour** (weights 0.75 colour, 0.25 sharpness). The
+  sharpness map cannot tell subject from background at pixel scale along an edge. It works
+  only within a few pixels of the existing edge, will not grow the mask on weak evidence,
+  and leaves "too close to call" pixels alone: colour alone took in skin-coloured blur
+  beside 6303's fingertips.
+- The skin mask and the Zones view are not remade after a tool operation.
+
+**The automated build (alpha 14):** see the end of this section once it has run.
+
 ## Still to design
 
 The owner will share screenshots of how they use Bridge. Until then these are open: where
@@ -637,6 +756,14 @@ shown, how several frames are selected for the editor, the font, the overall loo
   hair) does nothing on such a photo; decontamination still applies.
 - The colour snap goes by colour: where a thin sliver beside the edge is the subject's
   colour (a lit sole edge between two boots), it can add a one-to-two pixel line of mask.
+- The tools work on the mask of the photo being shown and are kept until the folder is
+  closed, like the mask itself; nothing of them is saved with the photo yet.
+- A Refine Edges box over a large area (more than about 1,840 px across at full size)
+  shows a quick result first and the tiled one a few seconds later.
+- The first Refine Hair stroke loads the hair-matting model (a second or two, about as
+  much memory again as the main model while both are loaded). Both go two minutes after
+  leaving Edit, or at once under memory pressure.
+- The download is about twice the size from alpha 14: it carries two models.
 - The model is unloaded two minutes after leaving Edit mode; entering it later loads it
   again in the background, a second or two during which Make waits.
 - Edits in Camera Raw's fields are uncalibrated: Photoshop opens a photo close to, not

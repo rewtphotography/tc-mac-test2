@@ -108,6 +108,14 @@ public enum CloseUps {
             placed.append(Box(x0: x0, y0: y0, x1: x1, y1: y1))
         }
 
+        /// The tiles alone, put together: each pixel the tiles' answers by how far it is from
+        /// their borders, and 0 where no tile reached.
+        public func average() -> Gray {
+            var out = Gray(w: w, h: h)
+            for i in 0 ..< w * h where weight[i] > 0 { out.v[i] = sum[i] / weight[i] }
+            return out
+        }
+
         /// A check for lines where tiles meet (masking spec v4, 1.2): the merged mask's
         /// steps across tile borders against its steps half a tile further in, each at its
         /// 99th percentile. A border that shows has much larger ones; over 3 is worth a

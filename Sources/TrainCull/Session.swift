@@ -126,8 +126,30 @@ final class Session: ObservableObject {
     /// Debug: Apple's Vision masks instead of BiRefNet, and which processors the model runs on.
     @Published var legacyVision = false
     @Published var modelUnits = ModelUnits.gpu {
-        didSet { if modelUnits != oldValue { BiRefNetModel.shared.setUnits(modelUnits) } }
+        didSet {
+            if modelUnits != oldValue {
+                BiRefNetModel.shared.setUnits(modelUnits)
+                BiRefNetModel.matting.setUnits(modelUnits)
+            }
+        }
     }
+    /// Debug: each step of the edge on its own switch, to see what it does (masking spec v5, 1.4).
+    @Published var edgeSnap = true { didSet { if edgeSnap != oldValue { edgeStepChanged("edge snap", edgeSnap) } } }
+    @Published var decontamination = true { didSet { if decontamination != oldValue { edgeStepChanged("decontamination", decontamination) } } }
+    @Published var colourGuard = true { didSet { if colourGuard != oldValue { edgeStepChanged("colour guard", colourGuard) } } }
+    /// The mask tools: which is chosen, the brush, and the Clean Edge and Refine Hair settings.
+    @Published var maskTool = MaskTool.none { didSet { if maskTool != oldValue { toolChanged() } } }
+    /// The brush's radius, in pixels of the photo.
+    @Published var brushSize: Double = 60 { didSet { if brushSize != oldValue { toolChanged() } } }
+    @Published var cleanStrength: Double = 1
+    @Published var cleanTightness: Double = 0
+    @Published var hairMethod = HairMethod.auto
+    @Published var hairContrast: Double = 0.5
+    /// Low on purpose: on the owner's convention photos the matting model beat colour matting even
+    /// where the backdrop was plain, so colour matting is left for a near-uniform one (a seamless).
+    @Published var hairTexture: Double = 0.03
+    /// How many tool operations the current frame's mask carries (for the Undo button).
+    @Published var refineCount = 0
     @Published var recents: [URL] = []
     @Published var volumes: [Volume] = []
     @Published var ratedCount = 0
@@ -140,7 +162,10 @@ final class Session: ObservableObject {
     @Published var editing = false {
         didSet {
             if !editing { thumbsWhileEditing = false; flushSave() }
-            if editing != oldValue { modelFollowsEditing() }
+            if editing != oldValue {
+                modelFollowsEditing()
+                toolChanged()
+            }
         }
     }
     @Published var thumbsWhileEditing = false
@@ -163,6 +188,9 @@ final class Session: ObservableObject {
     private var masks: [(id: Int, mask: MaskResult)] = []
     private var maskRun = 0
     private var maskJobs = 0
+    /// For each frame with a mask: the mask as Make Mask left it, what the tools have done
+    /// since, and what each replaced.
+    private var refined: [Int: (automatic: MaskResult, ops: [RefineOp], undos: [RefineUndo])] = [:]
     /// Frames whose camera settings have been written to the log this session.
     private var introduced = Set<Int>()
     /// The render cache: at most this many bytes of finished pictures, least recently shown out first.
@@ -246,6 +274,7 @@ final class Session: ObservableObject {
             Log.warn("the Mac is short of memory (\(MemoryStats.plain(MemoryMonitor.footprint())) in use here): letting go of the model and the masking caches")
             self?.maskQueue.async {
                 BiRefNetModel.shared.unload("memory pressure")
+                BiRefNetModel.matting.unload("memory pressure")
                 Masking.forgetAll("memory pressure")
             }
         }
@@ -346,6 +375,8 @@ final class Session: ObservableObject {
         introduced = []
         Masking.forgetAll("another folder")
         masks = []
+        refined = [:]
+        maskTool = .none
         maskRun += 1
         maskBusy = false
         maskStatus = nil
@@ -520,6 +551,22 @@ final class Session: ObservableObject {
             }
         }
         view.acceptsClick = { [weak self] in self?.clicked(index) ?? true }
+        if index == 0 {
+            view.onBox = { [weak self] rect, restore in
+                guard let self = self else { return }
+                let box = PixelRect(x: Int(rect.minX), y: Int(rect.minY), w: max(Int(rect.width), 1), h: max(Int(rect.height), 1))
+                self.applyTool(RefineOp(tool: self.maskTool, box: box, stroke: nil, restore: restore))
+            }
+            view.onStroke = { [weak self] points, radius, restore in
+                guard let self = self else { return }
+                let stroke = RefineStroke(points: points.map { SIMD2(Float($0.x), Float($0.y)) }, radius: Float(radius))
+                var op = RefineOp(tool: self.maskTool, box: nil, stroke: stroke, restore: restore)
+                op.clean.strength = Float(self.cleanStrength)
+                op.clean.tightness = Float(self.cleanTightness)
+                self.applyTool(op)
+            }
+            toolChanged()
+        }
         view.onUserZoom = { [weak self] kind in self?.userZoomed(index, kind) }
         if frame(for: index) != nil { show(index) }
     }
@@ -591,6 +638,7 @@ final class Session: ObservableObject {
         values = item.adjust
         local = item.local
         if !maskBusy { maskStatus = currentMask?.summary }
+        toolChanged()
         defaults = [:]
         let token = valuesToken
         let url = item.url
@@ -1047,7 +1095,10 @@ final class Session: ObservableObject {
         // Kept for two minutes after leaving, so going straight back in costs nothing.
         DispatchQueue.main.asyncAfter(deadline: .now() + Session.modelLingers) { [weak self] in
             guard let self = self, token == self.modelToken, !self.editing else { return }
-            self.maskQueue.async { BiRefNetModel.shared.unload("Edit mode left \(Int(Session.modelLingers)) s ago") }
+            self.maskQueue.async {
+                BiRefNetModel.shared.unload("Edit mode left \(Int(Session.modelLingers)) s ago")
+                BiRefNetModel.matting.unload("Edit mode left \(Int(Session.modelLingers)) s ago")
+            }
         }
     }
 
@@ -1073,7 +1124,7 @@ final class Session: ObservableObject {
         maskRun += 1
         maskJobs += 1
         let run = maskRun, job = maskJobs
-        let tier = maskTier, source = subjectSource, rules = subjectRules
+        let tier = maskTier, source = subjectSource, rules = subjectRules, settings = edgeSettings
         let url = item.url, id = item.id, name = item.name
         let known = faces[id]
         maskStatus = "Starting…"
@@ -1093,7 +1144,7 @@ final class Session: ObservableObject {
             let meter = JobMeter()
             let working = CFAbsoluteTimeGetCurrent()
             let result = Result { () -> MaskResult in
-                try Masking.make(url: url, tier: tier, faces: known, rules: rules, subject: source, progress: { text in
+                try Masking.make(url: url, tier: tier, faces: known, settings: settings, rules: rules, subject: source, progress: { text in
                     DispatchQueue.main.async { if run == self.maskRun { self.maskStatus = "\(text)…" } }
                 }, partial: { first in
                     // The snapped edge, shown while the hair is still being refined.
@@ -1131,6 +1182,14 @@ final class Session: ObservableObject {
                 case let .success(mask):
                     Log.note("job", "#\(job) completed in \(took) · image selected at completion: \(still ? "yes" : "no (\(self.current?.name ?? "none"))")")
                     self.keep(mask, for: item)
+                    // What the tools had done to the mask this one replaces is done again on it.
+                    let again = self.refined[id]?.ops ?? []
+                    self.refined[id] = (mask, [], [])
+                    if !again.isEmpty {
+                        Log.note("tool", "\(name): doing \(again.count) tool operation(s) again on the new mask")
+                        for op in again { self.applyTool(op, to: item, trigger: "replay") }
+                    }
+                    if still { self.toolChanged() }
                     if still {
                         self.maskStatus = mask.summary + (Masking.blendsByChannel ? "" : " (plain blending)")
                         if self.localArea == .skin && mask.skin == nil { self.localArea = .subject }
@@ -1145,11 +1204,146 @@ final class Session: ObservableObject {
         }
     }
 
+    // MARK: Mask tools
+
+    /// The edge engine's settings as the Debug switches have them.
+    private var edgeSettings: MatteSettings {
+        var settings = MatteSettings()
+        settings.colourSnap = edgeSnap
+        settings.decontaminate = decontamination
+        settings.colourGuard = colourGuard
+        return settings
+    }
+
+    private func edgeStepChanged(_ step: String, _ on: Bool) {
+        Log.note("mask", "debug: \(step) \(on ? "on" : "off")")
+        if currentMask != nil { makeMask(fresh: false, trigger: "\(step) switched \(on ? "on" : "off")") }
+    }
+
+    /// Hands the chosen tool, and what the tools have done to this frame, to the large image.
+    private func toolChanged() {
+        guard let view = slots[0].view else { return }
+        let usable = currentMask != nil && compare == nil && editing
+        if !usable && maskTool != .none {
+            maskTool = .none
+            return
+        }
+        switch maskTool {
+        case .none: view.tool = .none
+        case .edges: view.tool = .box
+        case .hair, .clean: view.tool = .brush(radius: CGFloat(brushSize))
+        }
+        let ops = refined[selected]?.ops ?? []
+        view.marks = maskTool == .none ? [] : ops.map { $0.mark }
+        if refineCount != ops.count { refineCount = ops.count }
+    }
+
+    /// Runs one tool operation on a frame's mask, as a numbered job like making a mask.
+    func applyTool(_ op: RefineOp, to given: FrameItem? = nil, trigger: String = "user") {
+        guard op.tool != .none, let item = given ?? current, masks.contains(where: { $0.id == item.id }) else { return }
+        maskJobs += 1
+        let job = maskJobs
+        let url = item.url, id = item.id, name = item.name
+        let known = faces[id], rules = subjectRules, source = subjectSource
+        var options = RefineOptions()
+        options.settings = edgeSettings
+        options.hairMethod = hairMethod
+        options.contrastNeeded = Float(hairContrast)
+        options.textureAllowed = Float(hairTexture)
+        maskBusy = true
+        maskStatus = "\(op.tool.name)…"
+        let requested = CFAbsoluteTimeGetCurrent()
+        let what = op.box.map { "box \($0.w)×\($0.h) at \($0.x),\($0.y)" } ?? "stroke of \(op.stroke?.points.count ?? 0) points, brush \(Int(op.stroke?.radius ?? 0)) px"
+        Log.note("job", "#\(job) \(op.tool.name)\(op.restore ? " (restore)" : "") \(name) · \(what) · trigger: \(trigger)")
+        maskQueue.async {
+            // The mask as it is when this job's turn comes: earlier operations are in it.
+            var mask: MaskResult?, automatic: MaskResult?
+            DispatchQueue.main.sync {
+                mask = self.masks.first { $0.id == id }?.mask
+                automatic = self.refined[id]?.automatic
+            }
+            guard let now = mask, let base = automatic else {
+                DispatchQueue.main.async { self.maskBusy = false }
+                Log.note("job", "#\(job) dropped: the frame has no mask any more")
+                return
+            }
+            let meter = JobMeter()
+            let result = Result { () -> (mask: MaskResult, undo: RefineUndo) in
+                try Masking.refine(url: url, mask: now, automatic: base, op: op, options: options, faces: known, rules: rules, subject: source,
+                                   progress: { text in DispatchQueue.main.async { self.maskStatus = "\(text)…" } },
+                                   partial: { quick in
+                                       DispatchQueue.main.async {
+                                           self.keep(quick, for: item)
+                                           if self.selected == id {
+                                               self.renderTrigger = "tool, first result"
+                                               self.refreshLocal(item)
+                                           }
+                                       }
+                                   })
+            }
+            let measured = meter.finish()
+            var fields = meter.numbers
+            fields["job"] = job
+            fields["image"] = name
+            fields["tool"] = op.tool.rawValue
+            Log.note("memory", "ToolJob#\(job) · \(measured.memory)", fields: fields)
+            DispatchQueue.main.async {
+                self.maskBusy = false
+                let still = self.selected == id
+                switch result {
+                case let .success(done):
+                    Log.note("job", "#\(job) completed in \(Log.seconds(since: requested))")
+                    self.keep(done.mask, for: item)
+                    if var state = self.refined[id] {
+                        state.ops.append(op)
+                        state.undos.append(done.undo)
+                        self.refined[id] = state
+                    }
+                    if still {
+                        self.maskStatus = done.mask.summary
+                        self.renderTrigger = "tool"
+                        self.refreshLocal(item)
+                        self.toolChanged()
+                    }
+                case let .failure(error):
+                    Log.note("job", "#\(job) failed: \(error)")
+                    // A quick result may have been shown; the mask goes back to what it was.
+                    self.keep(now, for: item)
+                    if still {
+                        self.maskStatus = "\(op.tool.name) didn't work: \(error)."
+                        self.refreshLocal(item)
+                    }
+                }
+            }
+        }
+    }
+
+    /// Takes back the last tool operation on the current frame.
+    func undoTool() {
+        guard let item = current, !maskBusy, var state = refined[item.id], let undo = state.undos.popLast(),
+              let mask = masks.first(where: { $0.id == item.id })?.mask else { return }
+        let op = state.ops.removeLast()
+        do {
+            let before = try Masking.undone(mask, undo)
+            refined[item.id] = state
+            keep(before, for: item)
+            Log.note("tool", "\(item.name): \(op.tool.name) undone · \(state.ops.count) operation(s) left")
+            maskStatus = "\(op.tool.name) undone."
+            renderTrigger = "tool undone"
+            refreshLocal(item)
+            toolChanged()
+        } catch {
+            Log.warn("\(item.name): undo failed: \(error)")
+        }
+    }
+
     /// Holds a frame's mask: the last two frames' are kept.
     private func keep(_ mask: MaskResult, for item: FrameItem) {
         masks.removeAll { $0.id == item.id }
         masks.append((item.id, mask))
         if masks.count > 2 { masks.removeFirst() }
+        // The tools' history goes with a mask that is no longer kept.
+        for id in refined.keys where !masks.contains(where: { $0.id == id }) { refined[id] = nil }
         maskTick += 1
         item.localStamp += 1
     }
@@ -1159,10 +1353,12 @@ final class Session: ObservableObject {
         guard let item = current else { return }
         let url = item.url, known = faces[item.id]
         let rules = subjectRules, source = subjectSource, mask = currentMask
+        let ops = refined[item.id]?.ops ?? []
+        let switches = ["edge_snap": edgeSnap, "decontamination": decontamination, "colour_guard": colourGuard, "legacy_vision": legacyVision]
         say("Writing the debug bundle for \(item.name)…")
         exportQueue.async {
             do {
-                let folder = try Masking.debugBundle(url: url, faces: known, rules: rules, subject: source, mask: mask)
+                let folder = try Masking.debugBundle(url: url, faces: known, rules: rules, subject: source, mask: mask, ops: ops, switches: switches)
                 DispatchQueue.main.async {
                     self.say("Saved \(folder.lastPathComponent) next to the raw.")
                     NSWorkspace.shared.activateFileViewerSelecting([folder])
@@ -1395,12 +1591,23 @@ final class Session: ObservableObject {
 
     /// Only the shortcuts the core actions need. Returns true when the key was used.
     private func handleKey(_ event: NSEvent) -> Bool {
+        // While a mask tool is chosen: Command-Z takes its last operation back.
+        if maskTool != .none, event.modifierFlags.intersection([.command, .control, .option, .shift]) == [.command],
+           event.charactersIgnoringModifiers?.lowercased() == "z", NSApp.keyWindow === window, !(NSApp.keyWindow?.firstResponder is NSText) {
+            undoTool()
+            return true
+        }
         if !event.modifierFlags.intersection([.command, .control, .option]).isEmpty { return false }
         if NSApp.keyWindow?.firstResponder is NSText { return false }
         if NSApp.keyWindow?.attachedSheet != nil || NSApp.modalWindow != nil { return false }
         // Keys typed in another window (Diagnostics) are not for the photos.
         if let window = window, NSApp.keyWindow !== window { return false }
         guard folder != nil, !frames.isEmpty else { return false }
+        // With a brush chosen, [ and ] make it smaller and larger.
+        if maskTool == .hair || maskTool == .clean, let key = event.charactersIgnoringModifiers, key == "[" || key == "]" {
+            brushSize = min(max(brushSize * (key == "]" ? 1.2 : 1 / 1.2), 4), 600)
+            return true
+        }
         switch event.keyCode {
         case 123: step(-1); return true // left
         case 124: step(1); return true // right

@@ -118,6 +118,7 @@ final class Log {
         Log.note("app", "display scale \(NSScreen.main?.backingScaleFactor ?? 0) · thermal \(Log.thermal) · low power mode \(info.isLowPowerModeEnabled ? "on" : "off")"
             + " · blending \(Masking.blendsByChannel ? "per colour" : "plain")")
         Log.note("app", "subject model in this build: \(BundledModels.hasBiRefNet ? "BiRefNet (\(BiRefNetModel.version))" : "none; Vision's masks are used")")
+        Log.note("app", "hair-matting model in this build: \(BundledModels.hasMatting ? "BiRefNet-matting" : "none; Refine Hair uses colour matting only")")
     }
 
     /// How hot the Mac says it is running.

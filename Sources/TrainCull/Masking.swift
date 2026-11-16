@@ -374,14 +374,14 @@ enum Masking {
 
     static let keptNeutrals = 3
     static let keptBases = 3
-    private static let keptLock = NSLock()
+    static let keptLock = NSLock()
     /// Neutral renders of the last few raws: making or remaking a mask, changing its tier or
     /// exporting its debug bundle then doesn't develop the raw again.
     private static var neutrals: [(url: URL, image: CGImage)] = []
     /// What is known about the subject of the last few photos masked.
     private static var bases: [SubjectBase] = []
     /// The edge engine set up for the last photo masked, so another tier starts from there.
-    private static var keptMatte: (base: SubjectBase, matte: Matte)?
+    static var keptMatte: (base: SubjectBase, matte: Matte, signature: String)?
 
     /// A neutral render of a raw: the camera's white balance, Apple's defaults, none of the frame's edits.
     static func neutral(_ url: URL) throws -> CGImage {
@@ -744,7 +744,9 @@ enum Masking {
         // The edge engine, set up once for each base: the snapped edge (Off) is part of the setup.
         var ready: Matte?
         keptLock.lock()
-        if let kept = keptMatte, kept.base === found { ready = kept.matte }
+        // (Set up afresh when a Debug switch has changed how the edge is made.)
+        let signature = "\(settings.colourSnap)|\(settings.decontaminate)|\(settings.colourGuard)"
+        if let kept = keptMatte, kept.base === found, kept.signature == signature { ready = kept.matte }
         keptLock.unlock()
         if ready != nil {
             Log.note("cache", "edge \(name) · hit: only the \(tier.name) refinement runs")
@@ -755,7 +757,7 @@ enum Masking {
                               defocus: found.ranking.sharpness?.dense, subjectSharpness: found.ranking.primary?.sharp)
             if key != nil {
                 keptLock.lock()
-                keptMatte = (found, fresh)
+                keptMatte = (found, fresh, signature)
                 keptLock.unlock()
             }
             ready = fresh
@@ -919,7 +921,7 @@ enum Masking {
     /// Writes what the masking pipeline saw and decided for this photo into a new folder next
     /// to the raw, for looking into a mask outside the app.
     static func debugBundle(url: URL, faces known: DetectedFaces?, rules: SubjectRules = SubjectRules(), subject: SubjectSource = .birefnet,
-                            mask: MaskResult?) throws -> URL {
+                            mask: MaskResult?, ops: [RefineOp] = [], switches: [String: Bool] = [:]) throws -> URL {
         let reference = try neutral(url)
         let fm = FileManager.default
         let parent = url.deletingLastPathComponent(), stem = url.deletingPathExtension().lastPathComponent
@@ -931,13 +933,14 @@ enum Masking {
         }
         try fm.createDirectory(at: folder, withIntermediateDirectories: false)
         try writeBundle(reference: reference, name: url.lastPathComponent, key: baseKey(url, subject, rules), into: folder,
-                        faces: known, rules: rules, subject: subject, mask: mask)
+                        faces: known, rules: rules, subject: subject, mask: mask, ops: ops, switches: switches)
         return folder
     }
 
     /// The bundle's files, into a folder that exists.
     static func writeBundle(reference: CGImage, name: String, key: String?, into folder: URL, faces known: DetectedFaces?,
-                            rules: SubjectRules = SubjectRules(), subject: SubjectSource, mask: MaskResult?) throws {
+                            rules: SubjectRules = SubjectRules(), subject: SubjectSource, mask: MaskResult?, ops: [RefineOp] = [],
+                            switches: [String: Bool] = [:]) throws {
         let found = try base(reference: reference, name: name, key: key, faces: known, rules: rules, subject: subject, progress: { _ in })
         let small = found.proxy
         guard let proxyData = png(small) else { throw Failure("the proxy couldn't be encoded") }
@@ -992,6 +995,45 @@ enum Masking {
         ]
         if let box = found.subjectBox { regions["subject_box"] = list(box) }
         if let seam = found.seam { regions["tile_seam_ratio"] = Double(seam) }
+        // What the tools did, in pixels of the full photo, and how the edge steps were switched.
+        var boxes: [[String: Any]] = [], strokes: [[String: Any]] = []
+        for op in ops {
+            if let box = op.box {
+                let entry: [String: Any] = ["tool": op.tool.rawValue, "restore": op.restore, "box_full": [box.x, box.y, box.w, box.h]]
+                boxes.append(entry)
+            } else if let stroke = op.stroke {
+                let points: [[Double]] = stroke.points.map { [Double($0.x), Double($0.y)] }
+                let entry: [String: Any] = ["tool": op.tool.rawValue, "restore": op.restore, "radius_full": Double(stroke.radius), "points_full": points]
+                strokes.append(entry)
+            }
+        }
+        regions["boxes"] = boxes
+        regions["strokes"] = strokes
+        regions["gaps"] = [] as [Any]
+        regions["switches"] = switches
+        // The subject alone, with the background's light taken out of its edge: the photo
+        // through the mask's colour shares, on black.
+        if let mask = mask, let photo = photo(from: reference), let shares = bytes(of: mask.shares, count: mask.width * mask.height * 4),
+           mask.width == photo.w, mask.height == photo.h {
+            var cut = [UInt8](repeating: 255, count: shares.count)
+            let toLinear = (0 ..< 256).map { pow(Float($0) / 255, 2.2) }
+            for y in 0 ..< photo.h {
+                for x in 0 ..< photo.w {
+                    let o = (y * photo.w + x) * 4
+                    if shares[o] == 0 && shares[o + 1] == 0 && shares[o + 2] == 0 {
+                        cut[o] = 0; cut[o + 1] = 0; cut[o + 2] = 0
+                        continue
+                    }
+                    let c = photo.rgb(x, y)
+                    let v = [c.x, c.y, c.z]
+                    for ch in 0 ..< 3 {
+                        let light = toLinear[Int(v[ch] * 255)] * Float(shares[o + ch]) / 255
+                        cut[o + ch] = UInt8(min(max(pow(light, 1 / 2.2), 0), 1) * 255)
+                    }
+                }
+            }
+            try write(picture(rgbx: cut, w: photo.w, h: photo.h).flatMap { png($0) }, "F.png")
+        }
         try json(regions, "regions.json")
 
         var alphaNote = " (not written: no mask had been made)"
@@ -1005,8 +1047,9 @@ enum Masking {
         m0_final.png      the same after the close-ups: what the edge refinement starts from
         final_alpha.png   the finished mask, at the photo's size\(alphaNote)
         sharpness.png     how out of focus each part is: black is sharp, white is \(Int(SharpnessMap.most)) px of blur or more
+        F.png             the subject cut out on black through the mask's colour shares (its edge with the background's light taken out)
         pose.json         the body poses found
-        regions.json      the subject's box and the close-up tiles
+        regions.json      the subject's box, the close-up tiles, what the tools did, and the Debug switches
 
         To compare against Photoshop: open proxy.png, Select Subject, and save the mask at the same
         size in this folder as ps_mask-<number>.jpg. Then compress this folder (right-click,

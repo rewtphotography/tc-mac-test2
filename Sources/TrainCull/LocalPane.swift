@@ -32,12 +32,67 @@ struct LocalPane: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.horizontal, 6)
             }
+            if mask != nil {
+                VStack(alignment: .leading, spacing: 8) {
+                    Picker("Tool", selection: $session.maskTool) {
+                        ForEach(MaskTool.allCases, id: \.rawValue) { Text($0.name).tag($0) }
+                    }
+                    .help("Refine Edges: drag a box round fingers, footwear, a gap or a prop. Refine Hair: paint over hair. Clean Edge: paint along a hard edge that still has a rim. Hold Option to put the automatic mask back instead.")
+                    if session.maskTool != .none {
+                        Text(session.maskTool.hint)
+                            .font(.system(size: 11))
+                            .foregroundStyle(Theme.muted)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    if session.maskTool == .hair || session.maskTool == .clean {
+                        LocalRow(title: "Brush size", text: "\(Int(session.brushSize)) px", changed: false, range: 4 ... 600,
+                                 value: Binding(get: { Float(session.brushSize) }, set: { session.brushSize = Double($0) }),
+                                 reset: { session.brushSize = 60 })
+                            .help("The brush's radius in pixels of the photo. The [ and ] keys change it too.")
+                    }
+                    if session.maskTool == .clean {
+                        LocalRow(title: "Strength", text: String(format: "%.2f", session.cleanStrength), changed: session.cleanStrength != 1, range: 0 ... 1,
+                                 value: Binding(get: { Float(session.cleanStrength) }, set: { session.cleanStrength = Double($0) }),
+                                 reset: { session.cleanStrength = 1 })
+                            .help("How far the brush may move the mask from where it was")
+                        LocalRow(title: "Tightness", text: String(format: "%+.2f", session.cleanTightness), changed: session.cleanTightness != 0, range: -1 ... 1,
+                                 value: Binding(get: { Float(session.cleanTightness) }, set: { session.cleanTightness = abs(Double($0)) < 0.03 ? 0 : Double($0) }),
+                                 reset: { session.cleanTightness = 0 })
+                            .help("Above 0 pulls the edge in towards the subject; below 0 lets it out")
+                    }
+                    Button(session.refineCount == 0 ? "Undo" : "Undo (\(session.refineCount))") { session.undoTool() }
+                        .controlSize(.small)
+                        .disabled(session.refineCount == 0 || session.maskBusy)
+                        .help("Takes back the last tool operation on this photo (Command-Z while a tool is chosen)")
+                }
+                .font(.system(size: 12))
+                .padding(.horizontal, 6)
+            }
             DisclosureGroup("Debug", isExpanded: $showDebug) {
                 VStack(alignment: .leading, spacing: 8) {
                     Picker("Hair tier", selection: $session.maskTier) {
                         ForEach(MatteTier.allCases, id: \.rawValue) { Text($0.name).tag($0) }
                     }
                     .help("Off is the mask. Fast, High and Max add the older automatic hair matting on top, kept here only for comparison; changing this on a photo that has a mask redoes just the hair.")
+                    Toggle("Edge snap", isOn: $session.edgeSnap)
+                        .controlSize(.small)
+                        .help("The edge moved to where each pixel's colour puts it. Switching it remakes the edge of this photo's mask (tool operations are done again).")
+                    Toggle("Decontamination", isOn: $session.decontamination)
+                        .controlSize(.small)
+                        .help("Edge pixels given their own colour shares, so darkening the background takes the background's light with it")
+                    Toggle("Colour guard", isOn: $session.colourGuard)
+                        .controlSize(.small)
+                        .help("The last check that no edge pixel comes out more colourful, or a different hue, than the photo has it")
+                    Picker("Hair method", selection: $session.hairMethod) {
+                        ForEach(HairMethod.allCases, id: \.rawValue) { Text($0.name).tag($0) }
+                    }
+                    .help("Automatic: colour matting on a plain, contrasting backdrop, the matting model otherwise. The log says which ran and why.")
+                    LocalRow(title: "Colour matting needs contrast", text: String(format: "%.2f", session.hairContrast), changed: session.hairContrast != 0.5, range: 0 ... 1,
+                             value: Binding(get: { Float(session.hairContrast) }, set: { session.hairContrast = Double($0) }),
+                             reset: { session.hairContrast = 0.5 })
+                    LocalRow(title: "…and a backdrop no busier than", text: String(format: "%.2f", session.hairTexture), changed: session.hairTexture != 0.03, range: 0 ... 0.5,
+                             value: Binding(get: { Float(session.hairTexture) }, set: { session.hairTexture = Double($0) }),
+                             reset: { session.hairTexture = 0.03 })
                     Toggle("Legacy Vision mask", isOn: $session.legacyVision)
                         .controlSize(.small)
                         .help("Apple's Vision finds the subject instead of BiRefNet, as before alpha 9. Takes effect on Remake.")

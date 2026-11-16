@@ -5,7 +5,10 @@ here by the same arithmetic written with bilinear resampling, which Core ML does
 the replacement is checked against the original before anything is converted.
 
   convert_birefnet.py check                      the replacement against torchvision's own
-  convert_birefnet.py convert <out.mlpackage> [side]   parity on the real model, then the conversion
+  convert_birefnet.py convert <out.mlpackage> [side] [repo]   parity on the real model, then the conversion
+
+The app carries two models made this way: ZhengPeng7/BiRefNet_HR (the subject) and
+ZhengPeng7/BiRefNet-matting (hair under the Refine Hair brush). Both are MIT.
 
 Runs on Linux or a Mac with torch, torchvision, transformers and coremltools. Nothing from
 here ships in the app except the converted model.
@@ -112,16 +115,16 @@ def patch_coremltools():
         context.add(res)
 
 
-def convert(out, side=SIDE):
+def convert(out, side=SIDE, repo="ZhengPeng7/BiRefNet_HR"):
     import os
     import coremltools as ct
     patch_coremltools()
     kept = out + ".traced.pt"
     if os.path.exists(kept):
-        finish(ct, torch.jit.load(kept), out, side)
+        finish(ct, torch.jit.load(kept), out, side, repo)
         return
     from transformers import AutoModelForImageSegmentation
-    model = AutoModelForImageSegmentation.from_pretrained("ZhengPeng7/BiRefNet_HR", trust_remote_code=True).eval().float()
+    model = AutoModelForImageSegmentation.from_pretrained(repo, trust_remote_code=True).eval().float()
     net = BaseNet(model).eval()
     x = picture(side)
     import gc
@@ -156,16 +159,16 @@ def convert(out, side=SIDE):
         traced.save(kept)
     del model, net
     gc.collect()
-    finish(ct, traced, out, side)
+    finish(ct, traced, out, side, repo)
 
 
-def finish(ct, traced, out, side):
+def finish(ct, traced, out, side, repo="ZhengPeng7/BiRefNet_HR"):
     print("converting", flush=True)
     mlmodel = ct.convert(
         traced, convert_to="mlprogram", compute_precision=ct.precision.FLOAT16, minimum_deployment_target=ct.target.macOS14,
         inputs=[ct.ImageType(name="image", shape=(1, 3, side, side), scale=1 / 255.0, color_layout=ct.colorlayout.RGB)],
         outputs=[ct.TensorType(name="mask")])
-    mlmodel.short_description = f"BiRefNet_HR (MIT), {side}x{side}, deformable convolution rewritten for Core ML"
+    mlmodel.short_description = f"{repo.split('/')[-1]} (MIT), {side}x{side}, deformable convolution rewritten for Core ML"
     mlmodel.save(out)
     print("saved", out)
 
@@ -175,4 +178,4 @@ if __name__ == "__main__":
         check()
     else:
         check()
-        convert(sys.argv[2], int(sys.argv[3]) if len(sys.argv) > 3 else SIDE)
+        convert(sys.argv[2], int(sys.argv[3]) if len(sys.argv) > 3 else SIDE, sys.argv[4] if len(sys.argv) > 4 else "ZhengPeng7/BiRefNet_HR")

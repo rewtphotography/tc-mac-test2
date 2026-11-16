@@ -83,6 +83,15 @@ public struct Gray {
         return out
     }
 
+    /// The part of this plane inside a rectangle (which must lie within it).
+    public func cropped(_ r: PixelRect) -> Gray {
+        var out = Gray(w: r.w, h: r.h)
+        for y in 0 ..< r.h {
+            for x in 0 ..< r.w { out.v[y * r.w + x] = v[(r.y + y) * w + r.x + x] }
+        }
+        return out
+    }
+
     /// This plane stretched or shrunk to another size, blending between pixels.
     public func resized(w nw: Int, h nh: Int) -> Gray {
         if nw == w && nh == h { return self }
@@ -152,6 +161,18 @@ public final class Photo {
 
     @inline(__always)
     public func rgb(_ x: Int, _ y: Int) -> SIMD3<Float> { rgbAt(buf.p, rowBytes, x, y) }
+
+    /// A copy of the part of this photo inside a rectangle (which must lie within it).
+    public func cropped(_ r: PixelRect) -> Photo {
+        var px = [UInt8](repeating: 255, count: r.w * r.h * 4)
+        px.withUnsafeMutableBufferPointer { out in
+            for y in 0 ..< r.h {
+                let from = buf.p + (r.y + y) * rowBytes + r.x * 4
+                (out.baseAddress! + y * r.w * 4).update(from: from, count: r.w * 4)
+            }
+        }
+        return Photo(w: r.w, h: r.h, rowBytes: r.w * 4, px: px)
+    }
 }
 
 @inline(__always)

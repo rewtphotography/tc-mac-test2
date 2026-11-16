@@ -46,7 +46,44 @@ final class HeroNSView: NSView {
     /// Called after a click or a pinch here changed the zoom, so the image beside this one can follow.
     var onUserZoom: ((UserZoom) -> Void)?
 
-    static let maxZoom: CGFloat = 2 // 200%
+    static let maxZoom: CGFloat = 4 // 400%: a mask's edge is judged at 200 to 400%
+
+    // MARK: Mask tools
+
+    /// What a drag on the image does while a mask tool is chosen.
+    enum Tool: Equatable {
+        case none
+        /// Drag out a box.
+        case box
+        /// Paint with a round brush; the radius is in pixels of the photo.
+        case brush(radius: CGFloat)
+    }
+
+    /// Something a tool did earlier, drawn faintly while a tool is active.
+    enum Mark {
+        case box(CGRect, restore: Bool)
+        case stroke([CGPoint], radius: CGFloat, restore: Bool)
+    }
+
+    var tool = Tool.none {
+        didSet {
+            if tool != oldValue {
+                dragStart = nil
+                dragPoints = []
+                needsDisplay = true
+            }
+        }
+    }
+    var marks: [Mark] = [] { didSet { needsDisplay = true } }
+    /// A box dragged out, in pixels of the photo; `restore` when Option was held.
+    var onBox: ((CGRect, Bool) -> Void)?
+    /// A stroke painted, as points in pixels of the photo, with the brush's radius.
+    var onStroke: (([CGPoint], CGFloat, Bool) -> Void)?
+    private var dragStart: CGPoint?
+    private var dragPoints: [CGPoint] = []
+    private var dragRestores = false
+    private var hover: CGPoint?
+    private var tracking: NSTrackingArea?
     static let deadZone = 0.05
 
     override var acceptsFirstResponder: Bool { true }
@@ -263,17 +300,79 @@ final class HeroNSView: NSView {
         // draws quickly and the last frame, once it has stopped, is drawn properly.
         ctx.interpolationQuality = gliding ? .low : ((kx > 0.99 && s * backing >= 1) ? .none : .high)
         ctx.draw(part, in: CGRect(x: left, y: bounds.height - top - h * s, width: w * s, height: h * s))
+        drawTools(ctx)
     }
 
     // MARK: Input
 
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let tracking = tracking { removeTrackingArea(tracking) }
+        let area = NSTrackingArea(rect: bounds, options: [.mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self, userInfo: nil)
+        addTrackingArea(area)
+        tracking = area
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        guard tool != .none else { return }
+        hover = convert(event.locationInWindow, from: nil)
+        needsDisplay = true
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        if hover != nil {
+            hover = nil
+            needsDisplay = true
+        }
+    }
+
     override func mouseDown(with event: NSEvent) {
-        downPoint = convert(event.locationInWindow, from: nil)
+        let p = convert(event.locationInWindow, from: nil)
+        downPoint = p
+        guard tool != .none, image != nil, space.width > 0 else { return }
+        dragRestores = event.modifierFlags.contains(.option)
+        dragStart = spacePoint(p)
+        dragPoints = [spacePoint(p)]
+        needsDisplay = true
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard tool != .none, dragStart != nil else { return }
+        let p = convert(event.locationInWindow, from: nil)
+        hover = p
+        let at = spacePoint(p)
+        // A point every couple of screen points is plenty for a stroke.
+        if let last = dragPoints.last, hypot(at.x - last.x, at.y - last.y) * shownScale >= 2 { dragPoints.append(at) }
+        if dragPoints.count == 1, case .box = tool { dragPoints.append(at) }
+        if case .box = tool { dragPoints[dragPoints.count - 1] = at }
+        needsDisplay = true
     }
 
     override func mouseUp(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
         defer { downPoint = nil }
+        if tool != .none {
+            defer {
+                dragStart = nil
+                dragPoints = []
+                needsDisplay = true
+            }
+            guard let start = dragStart, image != nil else { return }
+            let end = spacePoint(p)
+            let whole = CGRect(origin: .zero, size: space)
+            switch tool {
+            case .box:
+                let box = CGRect(x: min(start.x, end.x), y: min(start.y, end.y), width: abs(end.x - start.x), height: abs(end.y - start.y)).intersection(whole)
+                // A click, or a sliver: not a box.
+                if box.width * shownScale >= 8 && box.height * shownScale >= 8 { onBox?(box, dragRestores) }
+            case let .brush(radius):
+                let points = dragPoints.filter { whole.insetBy(dx: -radius, dy: -radius).contains($0) }
+                if !points.isEmpty { onStroke?(points, radius, dragRestores) }
+            case .none:
+                break
+            }
+            return
+        }
         guard let d = downPoint, hypot(p.x - d.x, p.y - d.y) < 4, image != nil, space.width > 0 else { return }
         guard acceptsClick?() ?? true else { return }
         if !isFit {
@@ -285,6 +384,75 @@ final class HeroNSView: NSView {
         guard CGRect(origin: .zero, size: space).contains(at) else { return }
         zoom(to: targetFor?(at) ?? FaceResult(method: .point, anchor: P(Double(at.x), Double(at.y)), eyeSpan: nil))
         onUserZoom?(.click)
+    }
+
+    /// The point of the view over a point of the space (the photo's pixels), y up as AppKit draws.
+    private func viewPoint(_ q: CGPoint) -> CGPoint {
+        let s = shownScale, c = shownCenter
+        return CGPoint(x: bounds.width / 2 + (q.x - c.x) * s, y: bounds.height - (bounds.height / 2 + (q.y - c.y) * s))
+    }
+
+    /// The tools' marks: what was done earlier, faintly; the drag in progress; the brush's outline.
+    private func drawTools(_ ctx: CGContext) {
+        guard tool != .none else { return }
+        let s = shownScale
+        func path(_ points: [CGPoint]) {
+            guard let first = points.first else { return }
+            ctx.beginPath()
+            ctx.move(to: viewPoint(first))
+            for q in points.dropFirst() { ctx.addLine(to: viewPoint(q)) }
+            if points.count == 1 { ctx.addLine(to: viewPoint(first)) }
+        }
+        func box(_ r: CGRect) -> CGRect {
+            let a = viewPoint(CGPoint(x: r.minX, y: r.minY)), b = viewPoint(CGPoint(x: r.maxX, y: r.maxY))
+            return CGRect(x: min(a.x, b.x), y: min(a.y, b.y), width: abs(b.x - a.x), height: abs(b.y - a.y))
+        }
+        ctx.saveGState()
+        ctx.setLineCap(.round)
+        ctx.setLineJoin(.round)
+        for mark in marks {
+            switch mark {
+            case let .box(r, restore):
+                ctx.setStrokeColor(red: restore ? 0.6 : 1, green: restore ? 0.8 : 0.85, blue: restore ? 1 : 0.2, alpha: 0.35)
+                ctx.setLineWidth(1)
+                ctx.stroke(box(r))
+            case let .stroke(points, radius, restore):
+                ctx.setStrokeColor(red: restore ? 0.6 : 1, green: restore ? 0.8 : 0.85, blue: restore ? 1 : 0.2, alpha: 0.10)
+                ctx.setLineWidth(max(2 * radius * s, 1))
+                path(points)
+                ctx.strokePath()
+            }
+        }
+        // The drag in progress.
+        if let start = dragStart, let last = dragPoints.last {
+            let colour: (CGFloat, CGFloat, CGFloat) = dragRestores ? (0.6, 0.8, 1) : (1, 0.85, 0.2)
+            switch tool {
+            case .box:
+                let r = CGRect(x: min(start.x, last.x), y: min(start.y, last.y), width: abs(last.x - start.x), height: abs(last.y - start.y))
+                ctx.setFillColor(red: colour.0, green: colour.1, blue: colour.2, alpha: 0.10)
+                ctx.fill(box(r))
+                ctx.setStrokeColor(red: colour.0, green: colour.1, blue: colour.2, alpha: 0.9)
+                ctx.setLineWidth(1.5)
+                ctx.stroke(box(r))
+            case let .brush(radius):
+                ctx.setStrokeColor(red: colour.0, green: colour.1, blue: colour.2, alpha: 0.30)
+                ctx.setLineWidth(max(2 * radius * s, 1))
+                path(dragPoints)
+                ctx.strokePath()
+            case .none:
+                break
+            }
+        }
+        // The brush's size, round the pointer.
+        if case let .brush(radius) = tool, let at = hover {
+            let r = radius * s
+            ctx.setStrokeColor(red: 1, green: 1, blue: 1, alpha: 0.9)
+            ctx.setLineWidth(1)
+            ctx.strokeEllipse(in: CGRect(x: at.x - r, y: at.y - r, width: 2 * r, height: 2 * r))
+            ctx.setStrokeColor(red: 0, green: 0, blue: 0, alpha: 0.6)
+            ctx.strokeEllipse(in: CGRect(x: at.x - r - 1, y: at.y - r - 1, width: 2 * r + 2, height: 2 * r + 2))
+        }
+        ctx.restoreGState()
     }
 
     /// Two-finger drag on the trackpad pans a zoomed image.

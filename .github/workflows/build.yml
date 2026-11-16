@@ -21,9 +21,10 @@ jobs:
       - uses: actions/checkout@v4
       - run: swift test
 
-  # BiRefNet has no ready-made Core ML form. It is converted here, on Linux, once; the result
-  # is kept between builds and handed to the Mac job, which compiles it into the app. This is
-  # the only step that fetches anything (the model's published weights); the app never does.
+  # BiRefNet has no ready-made Core ML form. Its two models (the subject, and hair matting)
+  # are converted here, on Linux, once; the results are kept between builds and handed to the
+  # Mac job, which compiles them into the app. This is the only step that fetches anything
+  # (the models' published weights); the app never does.
   birefnet:
     name: Convert BiRefNet (Linux, kept between builds)
     runs-on: ubuntu-latest
@@ -32,8 +33,10 @@ jobs:
       - uses: actions/cache@v4
         id: kept
         with:
-          path: BiRefNet.mlpackage
-          key: birefnet-${{ hashFiles('tools/convert_birefnet.py') }}
+          path: |
+            BiRefNet.mlpackage
+            BiRefNetMatting.mlpackage
+          key: birefnet-two-${{ hashFiles('tools/convert_birefnet.py') }}
       - if: steps.kept.outputs.cache-hit != 'true'
         uses: actions/setup-python@v5
         with:
@@ -57,11 +60,14 @@ jobs:
           free -g
           pip install torch==2.15.0 torchvision --index-url https://download.pytorch.org/whl/cpu
           pip install transformers==5.23.0 timm==1.0.31 kornia==0.9.1 einops==0.8.2 coremltools==9.0
-          python -u tools/convert_birefnet.py convert BiRefNet.mlpackage 1024
+          python -u tools/convert_birefnet.py convert BiRefNet.mlpackage 1024 ZhengPeng7/BiRefNet_HR
+          python -u tools/convert_birefnet.py convert BiRefNetMatting.mlpackage 1024 ZhengPeng7/BiRefNet-matting
       - uses: actions/upload-artifact@v4
         with:
           name: birefnet
-          path: BiRefNet.mlpackage
+          path: |
+            BiRefNet.mlpackage
+            BiRefNetMatting.mlpackage
           retention-days: 2
 
   mac:
@@ -81,15 +87,15 @@ jobs:
         id: models
         with:
           path: build-models
-          key: models-${{ hashFiles('scripts/fetch-models.sh', 'tools/convert_birefnet.py') }}
+          key: models-two-${{ hashFiles('scripts/fetch-models.sh', 'tools/convert_birefnet.py') }}
       # Fetched every time: the models kept from an earlier build may be without it.
       - name: BiRefNet from the Linux job
         continue-on-error: true
         uses: actions/download-artifact@v4
         with:
           name: birefnet
-          path: BiRefNet.mlpackage
-      - name: Compile the model
+          path: .
+      - name: Compile the models
         run: scripts/fetch-models.sh build-models
       # The core library's own tests run in the Linux job. Here, the ones that need a Mac,
       # the model and the whole masking pipeline among them.

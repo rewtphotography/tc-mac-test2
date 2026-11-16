@@ -266,6 +266,63 @@ final class TiffExportTests: XCTestCase {
         XCTAssertFalse(BiRefNetModel.shared.isLoaded)
     }
 
+    /// The hair-matting model, when it is in the build: one look at an area of a picture,
+    /// and the same in tiles, both find the thing in it. Then a tool's whole path on a made-up
+    /// mask: a box, laid back into the mask, and Option-restore putting the first mask back.
+    func testMattingModelLooksAndToolsLayBack() throws {
+        let w = 2400, h = 1600
+        func inside(_ x: Int, _ y: Int) -> Bool { (x - 1200) * (x - 1200) + (y - 800) * (y - 800) < 500 * 500 }
+        let picture = try flat(w, h) { x, y in
+            inside(x, y) ? (UInt8(60 + (x % 24 < 12 ? 20 : 0)), 40, 30) : (UInt8(150 + x / 60), UInt8(170 + y / 50), 190)
+        }
+        let area = PixelRect(x: 100, y: 0, w: 2200, h: 1600)
+        if BiRefNetModel.matting.isAvailable {
+            for tiled in [false, true] {
+                let start = CFAbsoluteTimeGetCurrent()
+                let answer = try Masking.look(.matting, reference: picture, area: area, tiled: tiled, what: "test")
+                var both = 0, either = 0
+                for y in stride(from: 0, to: area.h, by: 4) {
+                    for x in stride(from: 0, to: area.w, by: 4) {
+                        let a = answer.sample((Float(x) + 0.5) * Float(answer.w) / Float(area.w), (Float(y) + 0.5) * Float(answer.h) / Float(area.h)) >= 0.5
+                        let b = inside(area.x + x, area.y + y)
+                        if a && b { both += 1 }
+                        if a || b { either += 1 }
+                    }
+                }
+                print("MATTING-CHECK \(tiled ? "tiled" : "one pass") IoU \(Double(both) / Double(max(either, 1))) · answer \(answer.w)×\(answer.h) in \(CFAbsoluteTimeGetCurrent() - start) s")
+                XCTAssertGreaterThan(Double(both) / Double(max(either, 1)), 0.8)
+            }
+            BiRefNetModel.matting.unload("test")
+        } else {
+            print("MATTING-CHECK no matting model in this build")
+        }
+        XCTAssertTrue(Masking.wantsTiles(area))
+        XCTAssertFalse(Masking.wantsTiles(PixelRect(x: 0, y: 0, w: 900, h: 1200)))
+
+        // A box through the engine (the "closer look" is the truth, standing in for a model).
+        let photo = try XCTUnwrap(Masking.photo(from: picture))
+        var alpha = [UInt8](repeating: 0, count: w * h), shares = [UInt8](repeating: 255, count: w * h * 4)
+        for y in 0 ..< h { for x in 0 ..< w where (x - 1200) * (x - 1200) + (y - 800) * (y - 800) < 520 * 520 { alpha[y * w + x] = 255 } } // 20 px too wide
+        for i in 0 ..< w * h { shares[i * 4] = alpha[i]; shares[i * 4 + 1] = alpha[i]; shares[i * 4 + 2] = alpha[i] }
+        let first = alpha, firstShares = shares
+        let box = PixelRect(x: 1500, y: 600, w: 400, h: 400)
+        let look = Refine.lookArea(box: box, w: w, h: h)
+        var answer = Gray(w: look.w / 2, h: look.h / 2)
+        for y in 0 ..< answer.h { for x in 0 ..< answer.w where inside(look.x + x * 2, look.y + y * 2) { answer.v[y * answer.w + x] = 1 } }
+        let context = RefineContext(photo: photo, faces: [])
+        let result = Refine.edges(box: box, look: look, answer: answer, alpha: alpha, context: context)
+        let changed = Refine.paste(result.output, at: result.patch, weight: result.weight, alpha: &alpha, shares: &shares, width: w)
+        XCTAssertGreaterThan(changed, 1000)
+        XCTAssertLessThan(alpha[800 * w + 1200 + 510], 40, "the 20 pixels of ground the mask had taken, inside the box")
+        XCTAssertEqual(alpha[800 * w + 1200 - 510], 255, "outside the box nothing moved")
+        print("TOOL-CHECK box: \(changed) px changed · \(result.log.joined(separator: " | "))")
+        // Option: the first mask back, exactly, inside the box.
+        let weight = Refine.weight(box: box, in: box, feather: 1)
+        Refine.restore(weight: weight, at: box, baseAlpha: first, baseShares: firstShares, alpha: &alpha, shares: &shares, width: w)
+        XCTAssertEqual(alpha[800 * w + 1200 + 510], 255)
+        XCTAssertEqual(alpha[(box.y + 200) * w + box.x + 200], first[(box.y + 200) * w + box.x + 200])
+    }
+
     /// Apple's body-pose detector runs here without failing. A made-up picture has no person
     /// in it, so what it returns is only reported.
     func testBodyPoseRuns() throws {

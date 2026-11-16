@@ -8,33 +8,39 @@ An alpha build of TrainCull for Mac (Apple silicon, macOS 15 or later).
    **Done**, then open **System Settings → Privacy & Security**, scroll down to the message
    about TrainCull and click **Open Anyway**. This is needed once for each new build.
 
-**New in this build: the fringe and halo fixes (masking spec v4, Phase 1)**
+**New in this build: the colour fix and three refine tools (masking spec v5)**
 
-- **The rim along edges.** Where the subject and the background are clearly different
-  colours, the edge now goes where each pixel's own colour puts it, and every edge pixel
-  knows how much of its light is the subject's. Darkening the background no longer leaves a
-  bright or coloured line round fingers, arms and sleeves. Black boots on dark ground are
-  left as they were.
-- **Closer looks on every photo**, including ones the subject fills (they were skipped).
-- **No more square steps** in soft areas, and no jagged edge on soft-edged things: two
-  causes found and removed.
-- **Small gaps** between leaves and fingers are no longer half filled.
-- **Make Mask** makes the mask; there is no tier to choose. The old hair tiers are under
-  **Debug → Hair tier**, for comparison only.
-- The model stays loaded for two minutes after you leave Edit.
-- The log now gives, for every mask: halo in two rings (0–3 px and 3–10 px), a colour
-  fringe figure, how much the snap moved, and a check for tile seams.
+- **No more green, teal or pink lines.** The photos have a one-pixel colour fringe from the
+  lens on bright edges, and alpha 13 was magnifying it when the background was darkened.
+  Edge pixels now keep their own hue, and a last check (the colour guard) puts back any edge
+  pixel that comes out more colourful than the photo has it.
+- **Three tools**, under **Make Mask** once a photo has a mask. Choose one in **Tool**, then
+  work on the large image:
+  - **Refine Edges:** drag a box round fingers, footwear, a gap or a prop's edge. The model
+    looks again, closer, inside the box.
+  - **Refine Hair:** paint over curls or flowing hair.
+  - **Clean Edge:** paint along a hard edge that still has a rim. **Strength** and
+    **Tightness** adjust it.
+  - Hold **Option** while dragging or painting to put the automatic mask back there.
+  - **Undo** (or Command-Z while a tool is chosen) takes back the last operation.
+    **[** and **]** make the brush smaller and larger.
+  - **Remake Mask** does your operations again on the new mask.
+- **Zoom to 400%** by pinching.
+- **Debug** has switches for **Edge snap**, **Decontamination** and **Colour guard**, and the
+  Refine Hair method with its two thresholds.
+- **A larger download** (about twice the size): a second model, for hair, is inside it.
+- The log gives, for each tool operation: the method and why, pixels changed, colour guard
+  corrections and time. **Export Debug Bundle** now includes boxes, strokes and switches.
 
-Not in this build: the **Refine Edges** box and the **Refine Hair** brush (next), and
-automatic opening of enclosed gaps. Tested here as specified, the gap check would have cut
-pieces out of costumes, so gaps wait for the box.
+The tools have been tested here on the eight test photos by the engine, but nobody has yet
+used them by hand on a Mac: if a drag or a brush misbehaves, send the log.
 
 **The masking test:** open **Edit** and scroll to **Mask (Test)**. Click **Make Mask**.
 **Show** switches between the photo, a red overlay, the mask, On Black, On White,
 **Background −3 EV** and a debug view of zones. Pick **Subject**, **Background** or **Skin** and
 move **Exposure**, **Saturation** or **Warmth**. Masks and local adjustments last until you
-close the folder; **Export 16-bit TIFF** includes them. The app never uses the network: the
-model is inside the download.
+close the folder; **Export 16-bit TIFF** includes them. The app never uses the network: both
+models are inside the download.
 
 **Since alpha 4**
 

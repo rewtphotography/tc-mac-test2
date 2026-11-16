@@ -18,6 +18,7 @@ enum BundledModels {
     }
 
     static var hasBiRefNet: Bool { url("BiRefNet") != nil }
+    static var hasMatting: Bool { url("BiRefNetMatting") != nil }
 
     /// A model output as plain numbers.
     static func floats(_ array: MLMultiArray) -> [Float] {
@@ -75,10 +76,25 @@ enum ModelUnits: String, CaseIterable {
 /// BiRefNet_HR: finds whatever stands out in a picture, with fine edges. No questions asked of
 /// it; it sees a picture squashed to a square (1024 × 1024 in this build) and returns one soft
 /// mask of that size, covering the whole picture. One picture at a time: calls queue up.
+///
+/// There are two of them: `shared` finds the subject, and `matting` (BiRefNet-matting, the
+/// same network trained for fine, see-through edges) reads hair under the Refine Hair brush.
 final class BiRefNetModel {
-    static let shared = BiRefNetModel()
+    static let shared = BiRefNetModel(file: "BiRefNet", label: "BiRefNet")
+    static let matting = BiRefNetModel(file: "BiRefNetMatting", label: "BiRefNet-matting")
     /// Part of the key masks are kept under: change it when the model or its input changes.
     static let version = "BiRefNet_HR-fp16-v3"
+
+    let file: String
+    let label: String
+
+    init(file: String, label: String) {
+        self.file = file
+        self.label = label
+    }
+
+    /// Whether this build carries the model.
+    var isAvailable: Bool { BundledModels.url(file) != nil }
 
     private var model: MLModel?
     private var inputName = "image"
@@ -120,7 +136,7 @@ final class BiRefNetModel {
         if new == units { return }
         units = new
         model = nil
-        Log.note("model", "BiRefNet will run on \(new.name) from the next call")
+        Log.note("model", "\(label) will run on \(new.name) from the next call")
     }
 
     /// Lets go of the model and the memory it holds.
@@ -129,13 +145,13 @@ final class BiRefNetModel {
         let had = model != nil
         model = nil
         lock.unlock()
-        if had { Log.note("model", "BiRefNet unloaded (\(why)) · memory now \(MemoryStats.plain(MemoryMonitor.footprint()))") }
+        if had { Log.note("model", "\(label) unloaded (\(why)) · memory now \(MemoryStats.plain(MemoryMonitor.footprint()))") }
     }
 
     /// The model, loading it if need be. Call with the lock held.
     private func loaded() throws -> MLModel {
         if let model = model { return model }
-        guard let url = BundledModels.url("BiRefNet") else { throw Masking.Failure("the BiRefNet model isn't in this build") }
+        guard let url = BundledModels.url(file) else { throw Masking.Failure("the \(label) model isn't in this build") }
         let start = CFAbsoluteTimeGetCurrent()
         let before = MemoryMonitor.footprint()
         let config = MLModelConfiguration()
@@ -155,7 +171,7 @@ final class BiRefNetModel {
         let about = (description.metadata[.description] as? String) ?? "no description"
         let shape: String = "input \(side)² · output \(numbers) · weights and arithmetic 16-bit (set when converted) · \(units.name)"
         let memory: String = "memory before \(MemoryStats.plain(before)) · after \(MemoryStats.plain(MemoryMonitor.footprint()))"
-        Log.note("model", "BiRefNet loaded in \(Log.seconds(since: start)) · \(shape) · \(memory) · \(about)")
+        Log.note("model", "\(label) loaded in \(Log.seconds(since: start)) · \(shape) · \(memory) · \(about)")
         model = fresh
         return fresh
     }
@@ -163,7 +179,7 @@ final class BiRefNetModel {
     /// Loads the model and runs it once on a plain picture, so that the first real call
     /// doesn't pay for either. Safe to call when it is already warm.
     func prewarm() {
-        guard BundledModels.hasBiRefNet, !isLoaded else { return }
+        guard isAvailable, !isLoaded else { return }
         guard let ctx = CGContext(data: nil, width: 64, height: 64, bitsPerComponent: 8, bytesPerRow: 0,
                                   space: CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB(),
                                   bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { return }
@@ -173,9 +189,9 @@ final class BiRefNetModel {
         let start = CFAbsoluteTimeGetCurrent()
         do {
             _ = try segment(plain, what: "warm-up")
-            Log.note("model", "BiRefNet ready in \(Log.seconds(since: start)) (loaded and run once)")
+            Log.note("model", "\(label) ready in \(Log.seconds(since: start)) (loaded and run once)")
         } catch {
-            Log.warn("BiRefNet couldn't be made ready: \(error)")
+            Log.warn("\(label) couldn't be made ready: \(error)")
         }
     }
 
@@ -192,11 +208,11 @@ final class BiRefNetModel {
             let input = try MLDictionaryFeatureProvider(dictionary: [inputName: BundledModels.image(picture, side: side)])
             let out = try model.prediction(from: input)
             guard let name = out.featureNames.first, let array = out.featureValue(for: name)?.multiArrayValue, array.shape.count >= 2 else {
-                throw Masking.Failure("BiRefNet's answer isn't in the expected form")
+                throw Masking.Failure("\(label)'s answer isn't in the expected form")
             }
             let h = array.shape[array.shape.count - 2].intValue, w = array.shape[array.shape.count - 1].intValue
             let values = BundledModels.floats(array)
-            guard w > 0, h > 0, values.count >= w * h else { throw Masking.Failure("BiRefNet's answer is empty") }
+            guard w > 0, h > 0, values.count >= w * h else { throw Masking.Failure("\(label)'s answer is empty") }
             return Gray(w: w, h: h, v: Array(values.suffix(w * h)).map { $0 >= 0 ? min($0, 1) : 0 })
         }
         count += 1
@@ -206,7 +222,7 @@ final class BiRefNetModel {
         fields["what"] = what
         fields["input_side"] = side
         fields["units"] = units.name
-        Log.note("model", "BiRefNet #\(count) \(what) · \(picture.width)×\(picture.height) → \(side)² in \(Log.seconds(since: start)) · memory \(measured.memory) · \(units.name)",
+        Log.note("model", "\(label) #\(count) \(what) · \(picture.width)×\(picture.height) → \(side)² in \(Log.seconds(since: start)) · memory \(measured.memory) · \(units.name)",
                  fields: fields)
         return result
     }
