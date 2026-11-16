@@ -798,6 +798,11 @@ check of the edge. Built:
   every operation's mark is drawn faintly, with or without a tool chosen, in Edit only.
   Logged as `tool` "show edits on/off".
 
+**The automated build (alpha 16):** compiled first time; Linux and Mac tests pass; the app
+starts in the single, side-by-side and Edit views. The mask panel is below the fold in the
+screenshots and the build draws no boxes or strokes, so the fade and Show edits are first
+seen by the owner.
+
 ## Still to design
 
 The owner will share screenshots of how they use Bridge. Until then these are open: where
