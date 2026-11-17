@@ -62,6 +62,16 @@ struct Scene {
         face = PixelRect(x: Int(c) - f / 2, y: Int(c) - f / 2, w: f, h: f)
     }
 
+    /// This scene's "face" is the whole head, with strands radiating all round it: tests of
+    /// the hair tiers give the hair zone alpha 15's larger box (spec v6 made it 2.0 × 2.4),
+    /// so the tiers have the strands to work on.
+    static var roomy: MatteSettings {
+        var s = MatteSettings()
+        s.hairBoxWidth = 2.6
+        s.hairBoxHeight = 3.0
+        return s
+    }
+
     /// Mean absolute error against the truth over the uncertain band, in thousandths.
     func error(_ alpha: [UInt8], _ out: MatteOutput) -> Float {
         var sum: Float = 0, n: Float = 0
@@ -229,8 +239,9 @@ final class MatteTests: XCTestCase {
 
         var errors: [Float] = []
         var last: MatteOutput?
+        let roomy = Scene.roomy
         for tier in MatteTier.allCases {
-            let matte = Matte(photo: scene.photo, coarse: scene.coarse, faces: [scene.face])
+            let matte = Matte(photo: scene.photo, coarse: scene.coarse, faces: [scene.face], settings: roomy)
             let out = matte.run(tier: tier)
             errors.append(scene.error(out.alpha, out))
             writePGM("alpha-\(tier.name).pgm", out.alpha, scene.w, scene.h)
@@ -306,10 +317,10 @@ final class MatteTests: XCTestCase {
     /// as good as before.
     func testTilesMeetWithoutASeam() {
         let scene = Scene()
-        var small = MatteSettings()
+        var small = Scene.roomy
         small.tileCore = 96
         small.tileApron = 16
-        let whole = Matte(photo: scene.photo, coarse: scene.coarse, faces: [scene.face]).run(tier: .max)
+        let whole = Matte(photo: scene.photo, coarse: scene.coarse, faces: [scene.face], settings: Scene.roomy).run(tier: .max)
         let tiled = Matte(photo: scene.photo, coarse: scene.coarse, faces: [scene.face], settings: small).run(tier: .max)
         print("MATTE tiled: \(tiled.log.filter { $0.hasPrefix("max") }.joined()) | warnings \(tiled.warnings)")
         XCTAssertFalse(tiled.warnings.contains("SEAM?"))
@@ -333,7 +344,7 @@ final class MatteTests: XCTestCase {
         let blurred = Gray(w: 8, h: 8, fill: 8) // everything eight pixels out of focus
         let sharp = Gray(w: 8, h: 8, fill: 0.5)
         func run(_ defocus: Gray, _ tier: MatteTier) -> MatteOutput {
-            Matte(photo: scene.photo, coarse: scene.coarse, faces: [scene.face], defocus: defocus, subjectSharpness: 0.5).run(tier: tier)
+            Matte(photo: scene.photo, coarse: scene.coarse, faces: [scene.face], settings: Scene.roomy, defocus: defocus, subjectSharpness: 0.5).run(tier: tier)
         }
         let fastBlurred = run(blurred, .fast), maxBlurred = run(blurred, .max), maxSharp = run(sharp, .max)
         XCTAssertEqual(maxBlurred.alpha, fastBlurred.alpha, "out of focus, High and Max add nothing")

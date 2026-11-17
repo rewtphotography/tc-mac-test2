@@ -201,7 +201,7 @@ public enum Refine {
         return centres
     }
 
-    static let toLinear: [Float] = (0 ..< 256).map { pow(Float($0) / 255, 2.2) }
+    static let toLinear: [Float] = sRGBToLinearTable
 
     @inline(__always) static func lab(_ photo: Photo, _ x: Int, _ y: Int) -> SIMD3<Float> {
         let c = photo.rgb(x, y)
@@ -470,8 +470,8 @@ public enum Refine {
         // about 0.25, dark hair against a dark brown room 0.1. (Until the final round this
         // was a proportional measure that reached 1 at a tenth of that; it read 1.00 on
         // every stroke.)
-        let apart = Oklab.distance(Oklab.from(linear: SIMD3(pow(f.x, 2.2), pow(f.y, 2.2), pow(f.z, 2.2))),
-                                   Oklab.from(linear: SIMD3(pow(b.x, 2.2), pow(b.y, 2.2), pow(b.z, 2.2))))
+        let apart = Oklab.distance(Oklab.from(linear: SIMD3(srgbToLinear(f.x), srgbToLinear(f.y), srgbToLinear(f.z))),
+                                   Oklab.from(linear: SIMD3(srgbToLinear(b.x), srgbToLinear(b.y), srgbToLinear(b.z))))
         let contrast = min(apart / 0.6, 1)
         // How busy: the background's brightness against its own local average, taken over the
         // sure background alone (so the subject's edge in the window doesn't count as busyness).

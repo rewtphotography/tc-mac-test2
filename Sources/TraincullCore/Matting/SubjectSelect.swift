@@ -264,12 +264,18 @@ public enum SubjectSelect {
             decision.details.append(parts.joined(separator: " · "))
         }
 
-        let keepMask = tidy(lab.map { kept.contains(Int($0)) }, w: w, h: h, rules: rules)
+        let inKept = lab.map { kept.contains(Int($0)) }
+        let keepMask = tidy(inKept, w: w, h: h, rules: rules)
         // The soft fringe just outside the kept pieces stays; the dropped pieces go entirely.
         let near = PlaneMath.extremum(Gray(w: w, h: h, v: keepMask.map { $0 ? 1 : 0 }), radius: 6, smallest: false)
         var out = Gray(w: w, h: h)
         for i in 0 ..< n {
-            if keepMask[i] {
+            if keepMask[i] && !inKept[i] {
+                // A pinhole tidy() filled: solid subject. At 0.51 it had no half-way line for
+                // the close-ups or re-centring to find, stayed half see-through, and showed as
+                // a spot once subject and background were edited differently (spec v6 addendum).
+                out.v[i] = 1
+            } else if keepMask[i] {
                 out.v[i] = max(soft.v[i], 0.51)
             } else if near.v[i] > 0.5 && !hard[i] {
                 out.v[i] = soft.v[i]

@@ -166,6 +166,22 @@ public struct MatteSettings {
     /// A colour change counts as an edge from this much per pixel (all three channels
     /// together, in linear light, each from 0 to 1), and fully at three times it.
     public var edgeStrength: Float = 0.012
+    /// The subject light bound (masking spec v6, 1.1): at an edge the subject can give off
+    /// no light its own colour doesn't have. Each channel's share is held to at most
+    /// (coverage × subject colour + tolerance) over the pixel, in linear light, where the
+    /// tolerance is `lightBoundFloor` + `lightBoundTolerance` × the subject's colour. Only
+    /// ever lowers a share; what it takes from the subject's side follows the background.
+    public var lightBound = true
+    public var lightBoundTolerance: Float = 0.15
+    public var lightBoundFloor: Float = 0.01
+    /// The hair zone round each face (spec v6, section 5): a box this many face widths wide
+    /// and face heights high, centred a quarter of a face height above the face's middle.
+    /// (2.6 × 3.0 until v6: on 6303 its border ran through the peace sign.)
+    public var hairBoxWidth: Float = 2.0
+    public var hairBoxHeight: Float = 2.4
+    /// The primary person's limbs and joints are never hair: this many face heights either
+    /// side of each is taken out of the zone.
+    public var bodyNotHair: Float = 0.25
 
     public init() {}
 }
@@ -207,6 +223,11 @@ public struct MatteOutput {
     /// Where the finished edge sits against the photo's own, and where the first pass's did.
     public var edgeOffset = EdgeOffset()
     public var edgeOffsetBefore = EdgeOffset()
+    /// How many edge pixels the subject light bound lowered, and by how much on average.
+    public var lightBounded = 0
+    public var lightBoundDrop: Float = 0
+    /// Where the hair zone came from: "faces", "the body pose's head", "none" or "the brush".
+    public var hairZoneFrom = ""
 }
 
 /// How clean a finished edge is, measured in a ring 3 to 10 pixels either side of the
@@ -259,6 +280,17 @@ public final class Matte {
     /// the mask is the matting model's and is not moved; the colours beside a clear edge
     /// there, and the light just inside it, are still worked out as anywhere else.
     var hairFaces = Buf<Float>(0, 0)
+    /// Where the subject light bound is not applied, 0 to 1: the hair zone and, under the
+    /// hair brush, the stroke (spec v6, 1.1). Not an Edge Brush stroke.
+    var lightExcluded = Buf<Float>(0, 0)
+    /// At quarter size: how far re-centring measured the photo's edge there (0 to 1), and
+    /// whether certain subject lies within about ten pixels. The light bound trusts the
+    /// subject's colour only where one of the two holds.
+    var knownQ: Buf<Float>?
+    var subjectNear = Buf<Float>(0, 0)
+    let body: BodyPose?
+    let forcedIsHair: Bool
+    var hairZoneFrom = "faces"
     /// The three-way split and band of the whole edge. `triq` and `band` are these while the
     /// edge is snapped, and their hair-zone part while colour matting runs.
     var tri0 = Buf<UInt8>(0, 0)
@@ -328,9 +360,16 @@ public final class Matte {
     ///     box round each head, is the hair zone.
     ///   - firstPassPixel: photo pixels for each pixel of the model answer the rough mask
     ///     came from. Without it, the rough mask's own pixel size is used.
+    ///   - body: the primary person's body pose, in pixels of the photo: its limbs are never
+    ///     hair, and with no face its head places the hair zone (spec v6, section 5).
+    ///   - forcedIsHair: false for the Edge Brush: the stroke is held as the matting model
+    ///     drew it, but it is a hard edge, and the light bound applies under it.
     public init(photo: Photo, coarse: Gray, faces: [PixelRect], patches: [HeadPatch] = [], settings: MatteSettings = MatteSettings(),
-                defocus: Gray? = nil, subjectSharpness: Float? = nil, forced: Gray? = nil, firstPassPixel: Float? = nil) {
+                defocus: Gray? = nil, subjectSharpness: Float? = nil, forced: Gray? = nil, firstPassPixel: Float? = nil,
+                body: BodyPose? = nil, forcedIsHair: Bool = true) {
         self.forced = forced
+        self.body = body
+        self.forcedIsHair = forcedIsHair
         self.firstPassPixel = max(firstPassPixel ?? Float(photo.w) / Float(max(coarse.w, 1)), 1)
         self.photo = photo
         self.settings = settings
@@ -426,11 +465,21 @@ public final class Matte {
         // The hair zone: around each head, outside the oval of the face. Curly hair masks tend
         // to fill the gaps between curls, so the certain-subject region is pulled in further there.
         // It fades in over a few pixels: a hard edge to the zone would show as a straight line in the mask.
+        // With no face, the body pose's head stands in for one; with neither there is no
+        // hair zone, and the whole outline is a plain edge (spec v6, section 5).
         var hair = [Float](repeating: 0, count: qw * qh)
-        for f in faces {
+        var heads = faces
+        if heads.isEmpty, let made = body?.headBox() {
+            heads = [made]
+            hairZoneFrom = "the body pose's head"
+        } else if heads.isEmpty {
+            hairZoneFrom = "none (no face and no head in the body pose)"
+        }
+        for f in heads {
             let fw = Float(f.w), fh = Float(f.h)
+            let bw = settings.hairBoxWidth * fw, bh = settings.hairBoxHeight * fh
             let cx = Float(f.x) + fw / 2, cy = Float(f.y) + fh / 2 - 0.25 * fh
-            let head = PixelRect(x: Int(cx - 1.3 * fw), y: Int(cy - 1.5 * fh), w: Int(2.6 * fw), h: Int(3.0 * fh)).clamped(w: W, h: H)
+            let head = PixelRect(x: Int(cx - bw / 2), y: Int(cy - bh / 2), w: Int(bw), h: Int(bh)).clamped(w: W, h: H)
             let ovalY = Float(f.y) + 0.325 * fh, a = fw / 2, b = 1.35 * fh / 2
             if head.isEmpty { continue }
             for qy in (head.y / 4) ..< min((head.maxY + 3) / 4, qh) {
@@ -444,8 +493,12 @@ public final class Matte {
                 }
             }
         }
-
-        if faces.isEmpty || !settings.hairOnly { hair = [Float](repeating: 1, count: qw * qh) }
+        // The body is never hair: hands, forearms and shoulders near the face get the plain edge's clean-up.
+        if let body = body, let faceHeight = heads.first.map({ Float($0.h) }), !heads.isEmpty {
+            let limbs = Matte.bodyCells(body, radius: settings.bodyNotHair * faceHeight, qw: qw, qh: qh)
+            for i in 0 ..< qw * qh { hair[i] *= 1 - limbs[i] }
+        }
+        if !settings.hairOnly { hair = [Float](repeating: 1, count: qw * qh) }
         hairFaces = Buf(hair)
         // Painted with the hair brush: the stroke is the hair zone, whatever the faces say.
         var painted: [Bool]?
@@ -472,6 +525,13 @@ public final class Matte {
             painted = marks
         }
         hairQ = Buf(hair)
+        if forced != nil && !forcedIsHair, let f = forced?.resized(w: qw, h: qh) {
+            // The Edge Brush: its stroke is held, but it is no hair zone for the light bound.
+            lightExcluded = Buf((0 ..< qw * qh).map { hairFaces.p[$0] * (1 - min(max(f.v[$0], 0), 1)) })
+        } else {
+            lightExcluded = Buf(hair)
+        }
+        if forced != nil { hairZoneFrom = forcedIsHair ? "the hair brush" : "the edge brush (faces only)" }
         classify(hair)
         if let painted = painted {
             for i in 0 ..< qw * qh where painted[i] { triq.p[i] = 1 }
@@ -546,6 +606,9 @@ public final class Matte {
             if sureIn.v[i] >= settings.foregroundThreshold { kinds.p[i] = 2 } else if sureOut.v[i] <= settings.backgroundThreshold { kinds.p[i] = 0 }
         }
         colourKind = kinds
+        // Certain subject within about ten pixels: three quarter-size cells.
+        let sureSubject = Gray(w: qw, h: qh, v: (0 ..< qw * qh).map { kinds.p[$0] == 2 ? 1 : 0 })
+        subjectNear = Buf(PlaneMath.extremum(sureSubject, radius: 3, smallest: false).v)
         fq = Buf(pushPull(weightFor: 2))
         bq = Buf(pushPull(weightFor: 0))
         fEdge = fq
@@ -1302,8 +1365,8 @@ public final class Matte {
 
     // MARK: Finish
 
-    /// 8-bit display values to linear light, near enough for a ratio.
-    static let toLinear = Buf<Float>((0 ..< 256).map { pow(Float($0) / 255, 2.2) })
+    /// 8-bit sRGB values to linear light, by the exact sRGB curve (masking spec v6, 1.2).
+    static let toLinear = Buf<Float>(sRGBToLinearTable)
 
     /// What the checks on a finished mask count, over the uncertain band.
     struct BandStats {
@@ -1468,6 +1531,12 @@ public final class Matte {
             guardCorrections = corrected.fixed
             log.append("colour guard: \(corrected.fixed) of \(corrected.checked) edge pixels had gained colour and were put back\(corrected.fixed > 0 ? guardNote : "")\(lightnessNote)")
         }
+        var bounded = (lowered: 0, drop: Float(0))
+        // Part of decontamination: with that off, the shares are the mask, as before.
+        if settings.lightBound && settings.decontaminate && haveOff {
+            bounded = boundLight(alpha8, shares)
+            log.append("light bound: \(bounded.lowered) pixels lowered, mean drop " + String(format: "%.3f", locale: Locale(identifier: "en_US_POSIX"), bounded.drop))
+        }
         let n = qw * qh
         var tri8 = [UInt8](repeating: 0, count: n), hair8 = [UInt8](repeating: 0, count: n), zones = [UInt8](repeating: 0, count: n)
         for i in 0 ..< n {
@@ -1484,7 +1553,11 @@ public final class Matte {
         out.lightnessCorrections = lightnessCorrections
         out.edgeOffset = edgeOffset(of: alpha8)
         out.edgeOffsetBefore = offsetBefore
+        out.lightBounded = bounded.lowered
+        out.lightBoundDrop = bounded.drop
+        out.hairZoneFrom = hairZoneFrom
         log.append("edge placement: " + out.edgeOffset.summary)
+        log.append("hair zone from \(hairZoneFrom)")
         return out
     }
 
@@ -1552,13 +1625,115 @@ public final class Matte {
         // background's light, strongly coloured: it showed as soon as the subject was darkened.
         let fromSubject: Float = luma(fl) * byColour, fromBackground: Float = luma(bl) * (1 - byColour)
         let toSubject: Float = fromSubject / max(fromSubject + fromBackground, 1e-6)
-        let own: SIMD3<Float> = pointwiseMax(fl * byColour + rest * toSubject, SIMD3<Float>(repeating: 0))
-        let each: SIMD3<Float> = pointwiseMin(own / pointwiseMax(Il, SIMD3<Float>(repeating: 1e-4)), SIMD3<Float>(repeating: 1))
-        let together: Float = min(luma(own) / max(luma(Il), 1e-4), 1)
+        let own: SIMD3<Float> = fl * byColour + rest * toSubject
+        let together: Float = min(max(luma(own) / max(luma(Il), 1e-4), 0), 1)
+        let each = Matte.unclipped(own: own, pixel: Il, together: together)
         let bright: Float = blownOut(B)
         let single = SIMD3<Float>(repeating: together)
         let model: SIMD3<Float> = each + (single - each) * bright
         return (plain + (model - plain) * trust, byColour)
+    }
+
+    /// The subject's share of each channel, `own` over the pixel's light, with nothing cut
+    /// off channel by channel (masking spec v6, 1.3): a channel over 1 scales all three
+    /// down together, and one below 0 moves all three towards the single share `together`
+    /// by just enough to bring it to 0. Either way the shares keep their hue. A channel
+    /// with next to no light of its own (a pure colour) says nothing about the split and
+    /// takes `together`; divided by almost nothing it would scale the other two to nothing.
+    @inline(__always)
+    static func unclipped(own: SIMD3<Float>, pixel Il: SIMD3<Float>, together: Float) -> SIMD3<Float> {
+        var each = SIMD3<Float>(repeating: together)
+        for c in 0 ..< 3 where Il[c] > 0.002 { each[c] = own[c] / Il[c] }
+        let lowest = each.min()
+        if lowest < 0 {
+            // Towards `together` (never below 0) far enough that the lowest channel reaches 0.
+            var t: Float = 0
+            for c in 0 ..< 3 where each[c] < 0 { t = max(t, -each[c] / max(together - each[c], 1e-6)) }
+            each += (SIMD3<Float>(repeating: together) - each) * min(t, 1)
+        }
+        let highest = each.max()
+        if highest > 1 { each /= highest }
+        return pointwiseMax(each, SIMD3<Float>(repeating: 0))
+    }
+
+    /// The quarter-size cells within `radius` photo pixels of a body pose's limbs and joints,
+    /// softened by a cell so the hair zone fades out round them.
+    static func bodyCells(_ body: BodyPose, radius: Float, qw: Int, qh: Int) -> [Float] {
+        let small = BodyPose(joints: body.joints.mapValues { BodyPose.Joint(x: $0.x / 4, y: $0.y / 4, confidence: $0.confidence) })
+        let hard = small.confirmed(radius: max(radius / 4, 1), w: qw, h: qh)
+        var soft = hard.map { $0 ? Float(1) : 0 }
+        soft = PlaneMath.extremum(Gray(w: qw, h: qh, v: soft), radius: 1, smallest: false).v
+        PlaneMath.boxBlur(&soft, w: qw, h: qh, radius: 1)
+        return soft
+    }
+
+    /// The subject light bound (masking spec v6, 1.1). Runs last, after the colour guard, so
+    /// nothing lifts a share above it again. Away from the hair zone, and only where the
+    /// subject's colour beside the edge can be believed (re-centring measured the edge
+    /// there, or certain subject is within about ten pixels), each channel's share is held
+    /// to (coverage × subject colour + tolerance) over the pixel's light, in linear light.
+    /// A green fringe pixel at the edge of a black sleeve then hands its green to the
+    /// background, and darkening the background takes it away. Shares are only lowered.
+    func boundLight(_ alpha8: Buf<UInt8>, _ shares: Buf<UInt8>) -> (lowered: Int, drop: Float) {
+        let b = band0, W = self.W, qw = self.qw
+        if b.isEmpty { return (0, 0) }
+        let src = photo.p, rowBytes = photo.rowBytes, lin = Matte.toLinear.p, t0 = tri0.p
+        let fp = fEdge.p, bp = bEdge.p, excluded = lightExcluded.p, near = subjectNear.p
+        let measured = knownQ?.p, inside = insideNear.count == qw * qh ? insideNear.p : nil
+        let tolerance = settings.lightBoundTolerance, floor = settings.lightBoundFloor
+        let lock = NSLock()
+        var lowered = 0
+        var dropped = 0.0
+        @inline(__always) func linear(_ c: SIMD3<Float>) -> SIMD3<Float> {
+            SIMD3(lin[Int(min(max(c.x, 0), 1) * 255)], lin[Int(min(max(c.y, 0), 1) * 255)], lin[Int(min(max(c.z, 0), 1) * 255)])
+        }
+        parallelRows(b.h) { rows in
+            var n = 0
+            var sum = 0.0
+            for by in rows {
+                let y = b.y + by
+                for x in b.x ..< b.maxX where t0[(y >> 2) * qw + (x >> 2)] == 1 {
+                    let a8 = alpha8.p[y * W + x]
+                    if a8 <= 1 { continue }
+                    let al = Float(a8) / 255
+                    // Part-covered pixels, and the inner tail's: all subject by the mask, but within reach of the edge.
+                    if a8 >= 254 {
+                        guard let inside = inside, smoothstep(0, 0.3, 1 - sample1(inside, x, y)) > 0 else { continue }
+                    }
+                    let keepOut = min(max(sample1(excluded, x, y), 0), 1)
+                    if keepOut >= 0.99 { continue }
+                    let believed = (measured.map { sample1($0, x, y) } ?? 0) > 0.05 || sample1(near, x, y) > 0.5
+                    if !believed { continue }
+                    let o = (y * W + x) * 4
+                    let s = SIMD3<Float>(Float(shares.p[o]), Float(shares.p[o + 1]), Float(shares.p[o + 2])) / 255
+                    let I = SIMD3<Float>(lin[Int(src[y * rowBytes + x * 4])], lin[Int(src[y * rowBytes + x * 4 + 1])], lin[Int(src[y * rowBytes + x * 4 + 2])])
+                    let f3 = sample3(fp, x, y), b3 = sample3(bp, x, y)
+                    let F = linear(f3), B = linear(b3)
+                    // The same coverage the guard's lightness bound uses: the mask's, or the
+                    // colour's where that is more and the two colours can be told apart.
+                    let across = F - B
+                    let byColour = min(max(dot3(I - B, across) / (dot3(across, across) + 1e-7), 0), 1)
+                    let told = Matte.apart(f3, b3, low: settings.colourLow, high: settings.colourHigh, floor0: settings.colourFloor,
+                                           floor1: settings.colourFull, plain: settings.colourPlain)
+                    let cover = al + max(byColour - al, 0) * told
+                    let tau = SIMD3<Float>(repeating: floor) + F * tolerance
+                    let most = pointwiseMin((F * cover + tau) / pointwiseMax(I, SIMD3<Float>(repeating: 1e-4)), SIMD3<Float>(repeating: 1))
+                    let held = pointwiseMin(s, most)
+                    let now = s + (held - s) * (1 - keepOut)
+                    let r = (now * 255).rounded(.toNearestOrAwayFromZero)
+                    let nr = UInt8(r.x), ng = UInt8(r.y), nb = UInt8(r.z)
+                    if nr == shares.p[o] && ng == shares.p[o + 1] && nb == shares.p[o + 2] { continue }
+                    shares.p[o] = nr; shares.p[o + 1] = ng; shares.p[o + 2] = nb
+                    n += 1
+                    sum += Double(((s - now).sum()) / 3)
+                }
+            }
+            lock.lock()
+            lowered += n
+            dropped += sum
+            lock.unlock()
+        }
+        return (lowered, lowered > 0 ? Float(dropped / Double(lowered)) : 0)
     }
 
     /// The colour guard (masking spec v5, 1.1). Every edge pixel whose channels have

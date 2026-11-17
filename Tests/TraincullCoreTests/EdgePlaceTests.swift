@@ -126,6 +126,7 @@ final class EdgePlaceTests: XCTestCase {
         var old = MatteSettings()
         old.recentre = false
         old.innerTail = false
+        old.lightBound = false
         let before = Matte(photo: scene.photo, coarse: scene.coarse, faces: [face], settings: old, firstPassPixel: 3.2).run(tier: .off)
         print("EDGE tail: brightest pixel inside the mask, against the subject's own brightness: \(worst(before)) → \(worst(out)) · \(out.log.filter { $0.hasPrefix("decontaminated") }.joined())")
         XCTAssertGreaterThan(worst(before), 1.3, "the rim this is about")

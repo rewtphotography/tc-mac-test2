@@ -353,13 +353,14 @@ extension Matte {
             if firm <= 0 { continue }
             for c in 0 ..< 3 {
                 // (Kept as display values, like the fields they stand in for.)
-                let f = pow(min(max(colours[c][i] / weight[i], 0), 1), 1 / 2.2), b = pow(min(max(colours[3 + c][i] / weight[i], 0), 1), 1 / 2.2)
+                let f = linearToSRGB(colours[c][i] / weight[i]), b = linearToSRGB(colours[3 + c][i] / weight[i])
                 fLocal.p[i * 3 + c] += (f - fLocal.p[i * 3 + c]) * firm
                 bLocal.p[i * 3 + c] += (b - bLocal.p[i * 3 + c]) * firm
             }
         }
         fEdge = fLocal
         bEdge = bLocal
+        knownQ = known
 
         let hair = hairQ.p, focus = focusQ?.p, tq = tri0.p
         let fallback = max(settings.steepen, 1)

@@ -216,6 +216,25 @@ func rgbAt(_ p: UnsafePointer<UInt8>, _ rowBytes: Int, _ x: Int, _ y: Int) -> SI
     return SIMD3(Float(p[i]), Float(p[i + 1]), Float(p[i + 2])) * (1 / 255)
 }
 
+/// The sRGB transfer curve (masking spec v6, 1.2): a display value, 0 to 1, to linear light.
+/// The engine works on an sRGB copy of the photo; until v6 it used a plain 2.2 power, which
+/// is up to a few per cent off in the shadows.
+@inline(__always)
+public func srgbToLinear(_ v: Float) -> Float {
+    let c = min(max(v, 0), 1)
+    return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4)
+}
+
+/// Linear light back to an sRGB display value, 0 to 1.
+@inline(__always)
+public func linearToSRGB(_ v: Float) -> Float {
+    let c = min(max(v, 0), 1)
+    return c <= 0.0031308 ? c * 12.92 : 1.055 * pow(c, 1 / 2.4) - 0.055
+}
+
+/// The curve for each 8-bit value.
+public let sRGBToLinearTable: [Float] = (0 ..< 256).map { srgbToLinear(Float($0) / 255) }
+
 @inline(__always)
 func luma(_ c: SIMD3<Float>) -> Float { 0.2126 * c.x + 0.7152 * c.y + 0.0722 * c.z }
 
