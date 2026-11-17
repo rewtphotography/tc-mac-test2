@@ -763,7 +763,14 @@ extension Refine {
         for l in labels where l > 0 { area[Int(l)] += 1 }
         // The colours either side of the edge round the box, and the pockets the gap test would open.
         let photo = c.photo.cropped(look)
-        let sides = sideColours(photo: photo, alpha: current, near: PlaneMath.extremum(box, radius: 20, smallest: false))
+        // The subject's colours from where the mask and the model agree it is subject (a mask
+        // that is too wide would otherwise lend its rim of background to "the subject"), the
+        // background's from where the mask says background.
+        let near = PlaneMath.extremum(box, radius: 20, smallest: false)
+        var agreed = current
+        for i in 0 ..< n where proposal.v[i] < 0.5 { agreed.v[i] = 0 }
+        let sides = (subject: sideColours(photo: photo, alpha: agreed, near: near).subject,
+                     background: sideColours(photo: photo, alpha: current, near: near).background)
         let gaps = openGaps(photo: photo, alpha: current, box: box)
         var opened = [Bool](repeating: false, count: n)
         for i in 0 ..< n where inside[i] && gaps.alpha.v[i] < 0.5 { opened[i] = true }
@@ -803,7 +810,7 @@ extension Refine {
                 }
                 if k > 0 {
                     dS /= k; dB /= k
-                    detail += String(format: " · colour %.3f from the background's, %.3f from the subject's", locale: Locale(identifier: "en_US_POSIX"), dB, dS)
+                    detail += (detail.isEmpty ? "" : " · ") + String(format: "colour %.3f from the background's, %.3f from the subject's", locale: Locale(identifier: "en_US_POSIX"), dB, dS)
                     if dB < 0.05 && dS > 0.2 { verdict = .colour }
                 }
             }

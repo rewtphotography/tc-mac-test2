@@ -1,7 +1,8 @@
 # Masking: handover
 
 Written at the end of the final masking round (alpha 15) for a session that has none of the
-earlier context. `CLAUDE.md` has the project's rules and `docs/NOTES.md` the history, release
+earlier context, and brought up to date for spec v6 (alpha 17): section 17 says what v6
+changed, and the sections it touches are corrected in place. `CLAUDE.md` has the project's rules and `docs/NOTES.md` the history, release
 by release; this file is the state of masking as it stands, how it works, what every number
 is, and what is next. The owner's specifications are in `docs/specs/` (v2 to v5, in order;
 each later one wins where they disagree).
@@ -26,9 +27,23 @@ In Edit mode, **Mask (Test)** at the bottom of the pane: Make Mask finds the pho
 subject and makes a soft mask of it; Show offers ways of looking at it (Background −3 EV
 is the one edges are judged in, at 200–400%); Subject, Background or Skin can then be
 given Exposure, Saturation and Warmth. Three tools refine a mask by hand: **Refine Edges**
-(drag a box), **Refine Hair** (paint), **Clean Edge** (paint). Option with any of them
-puts the automatic mask back. Masks last until the folder is closed; nothing is saved with
-the photo yet. Export 16-bit TIFF includes the adjustments.
+(drag a box; Shift: redraw everything in it), **Refine Hair** and **Edge Brush** (paint,
+with Strength and Tightness); Clean Edge is under Debug since v6. Option with any of them
+puts the automatic mask back (inside the automatic hand pass's squares, the mask as it was
+before that pass). Export 16-bit TIFF includes the adjustments.
+
+**How long a mask lasts** (corrected in alpha 17; until then only the last two photos kept
+theirs, and a third photo's mask silently took the first one's tool operations and local
+adjustments with it, out of the screen and out of its TIFF): a mask stays in memory until
+the folder is closed. Only a clean one (no tool operations, none waiting, no local
+adjustments) is let go, oldest first, once more than two are held. When macOS reports memory
+pressure, every mask not on screen is let go if clean or written to
+`~/Library/Caches/TrainCull/masks` (`MaskSpill.swift`) and read back when its frame is shown
+or exported; that folder is emptied when a folder is opened, when the app quits and when it
+starts. A frame with local adjustments whose mask can't be read back is made again and its
+tool operations done again; an export that can't get a frame's mask fails that frame and says
+why, rather than writing a TIFF without its adjustments. Nothing is saved with the photo
+itself yet.
 
 A mask is two pictures the size of the photo (`MaskResult`, `Masking.swift`):
 - `alpha`: how much of each pixel the subject covers, 8 bits.
@@ -55,21 +70,22 @@ A mask is two pictures the size of the photo (`MaskResult`, `Masking.swift`):
 | `ClosedForm.swift` | closed-form matting (the Max tier; used only by Refine Hair's colour-matting path and the Debug hair tiers) |
 | `Oklab.swift` | Oklab from linear RGB, chroma, hue difference, distance |
 | `Skin.swift` | the skin mask |
-| `Refine.swift` | the three tools' arithmetic: `Refine.edges`, `.hair`, `.clean`, `.restore`, `.paste`, `RefineStroke`, `CleanSettings`, `RefineContext`, `RefineResult` |
+| `Refine.swift` | the tools' arithmetic: `Refine.edges` (with `limitRemovals`, `regionBlur`: v6, 2.2), `.hair` (Refine Hair and the Edge Brush, `tighten`), `.clean`, `.restore`, `.paste`, `lookArea`, `RefineStroke`, `CleanSettings`, `RefineContext`, `RefineResult` |
 
 `Sources/TrainCull/` is the Mac app (compiled only by the build):
 
 | File | What is in it |
 |---|---|
 | `Models.swift` | `BundledModels`, `BiRefNetModel.shared` (subject) and `.matting` (hair), load, unload, `segment` |
-| `Masking.swift` | `Masking.base` (faces, sharpness, pose, the model passes), `birefnetPass`, `make`, `result`, the caches, `debugBundle`, `apply` (how a mask is used when rendering) |
+| `Masking.swift` | `Masking.base` (faces, sharpness, pose, the model passes), `birefnetPass`, `make`, `handPass` (v6, 4), `refineContext`, `result`, the caches, `debugBundle`, `apply` (how a mask is used when rendering) |
+| `MaskSpill.swift` | masks written to disk under memory pressure and read back (alpha 17) |
 | `Refining.swift` | `MaskTool`, `RefineOp`, `RefineUndo`, `Masking.look` (a model shown one area, in one pass or tiles), `Masking.refine`, `Masking.undone` |
-| `Session.swift` | the switches (`edgeSnap`, `decontamination`, `colourGuard`, `edgeRecentre`, …), `makeMask`, `applyTool`, `undoTool`, `refined` (each photo's automatic mask, list of operations and undo data), model lingering |
+| `Session.swift` | the switches (`edgeSnap`, `decontamination`, `colourGuard`, `edgeRecentre`, `lightBound`, `autoHands`, `ignoreFaces`, …), `makeMask`, `applyTool`, `undoTool`, `refined` (each photo's automatic mask, list of operations and undo data), `keep` / `evictClean` / `spillKept` / `ensureMask` / `remakeLost` (how long masks last), `maskForExport`, model lingering |
 | `LocalPane.swift` | the Mask (Test) panel and its Debug group |
 | `HeroView.swift` | the large image; `tool`, `marks`, `onBox`, `onStroke`, `drawTools` |
 | `Log.swift` | the log and its JSONL copy; `JobMeter` (time and memory of a job) |
 
-Tests: `Tests/TraincullCoreTests` (Linux and Mac; 109 tests, synthetic pictures only) and
+Tests: `Tests/TraincullCoreTests` (Linux and Mac; 121 tests, synthetic pictures only; v6's in `SpecV6Tests`) and
 `Tests/TrainCullTests` (Mac build only: runs both Core ML models on made-up pictures).
 
 ## 3. The pipeline, stage by stage
@@ -351,6 +367,8 @@ else is the default.
 | `innerTail`, `tailCoverage` | true, 0.7 | section 4.4 |
 | `costFalloff` | 50 | how fast trust in the shares falls with distance off the F–B line |
 | `colourGuard`, `guardChroma`, `guardHue` | true, 0.02, 15° | section 5 (Debug: Colour guard) |
+| `lightBound`, `lightBoundTolerance`, `lightBoundFloor` | true, 0.15, 0.01 | section 17, 1.1 (Debug: Subject light bound) |
+| `hairBoxWidth`, `hairBoxHeight`, `bodyNotHair` | 2.0, 2.4, 0.25 | section 17, 5 |
 | `guardLightness`, `guardLighter` | 0.04, true | section 5 |
 | `guardContrast`, `relaxGuards` | 0.6, false | guards on the hair tiers; off under the hair brush |
 | `snapPasses`, `snapRadius`, `snapLow`, `snapHigh` | 0, 6, 0.3, 0.7 | the old brightness snap (off since alpha 13: it left edges jagged) |
@@ -389,8 +407,9 @@ over 0.02, `OFFSET?` over 0.5 px. `Session.swift`: `modelLingers` 120 s.
 ## 11. Debug switches, debug bundle, log format
 
 **Debug group** (Mask (Test) → Debug): Hair tier (Off/Fast/High/Max; Off is the mask),
-Edge re-centre, Edge snap, Decontamination, Colour guard (each remakes this photo's edge
-without the model and replays the tool operations), Hair method (Automatic / Colour
+Edge re-centre, Edge snap, Decontamination, Colour guard, Subject light bound, Automatic hands
+(each remakes this photo's edge without the model and replays the tool operations), Ignore
+faces (remakes from scratch), Clean Edge in the tool menu, Hair method (Automatic / Colour
 matting / Matting model) with its two threshold sliders, Legacy Vision mask, Run model on
 (CPU + GPU / CPU + Neural Engine / All), Export Debug Bundle.
 
@@ -453,8 +472,9 @@ Photoshop's Select Subject masks for all eight are the owner's reference for *se
 - **A faint green tint** remains along 6303's fingers on the soft stand-in.
 - **With the subject darkened** instead of the background, a thin coloured line can show
   at bright-subject edges (6957's hand): the shares favour the subject's side.
-- **Hair zone**: a box round each face. Long hair below it is treated as a plain edge;
-  with no face the whole edge counts as hair and is neither snapped nor re-centred.
+- **Hair zone**: a box round each face (2.0 × 2.4 face sizes since v6), less the body. Long
+  hair below it is treated as a plain edge; with no face, the body pose's head places it, and
+  with neither there is none (section 17).
 - **Refine Hair thresholds** are uncalibrated (section 7).
 - The skin mask and the Zones view are not remade after a tool operation.
 - The hair tiers (Fast/High/Max) under Debug are the old automatic colour matting, kept
@@ -514,6 +534,8 @@ Photoshop's Select Subject masks for all eight are the owner's reference for *se
 
 ## 16. Next steps: Priority 5 (UI)
 
+(Alpha 16 built a and c; b, d and e are still not built, and spec v6 left them for later.)
+
 The owner's order.
 
 **Built in alpha 16: a and c** (see `docs/NOTES.md`, "Alpha 16"). b, d and e are not.
@@ -565,3 +587,114 @@ automatic gap check, automatic defringe, compressing the matting model.
 guard` and `lightness` on the eight photos, and whether the rim is gone on the real 6303,
 7451 and 6957. If it is not, the crops in a debug bundle will say which of section 4's
 causes is still at work.
+
+## 17. Spec v6 (alpha 17)
+
+`docs/specs/masking-spec-v6.md`, plus two addenda from the owner (filled pinholes; masks
+lost after two photos). **Everything below was checked on synthetic pictures only.** This
+session had none of the owner's photos or proxies, so there are no before/after crops at
+all, stand-in or real, and every acceptance item that names a photo is the owner's to check.
+The owner's alpha 15 figures (spec 0): edge offset +0.20 px on 6303, +0.22 px on 7451.
+
+**1.1 Subject light bound** (`Matte.boundLight`, `MatteSettings.lightBound`,
+`lightBoundTolerance` 0.15, `lightBoundFloor` 0.01). Runs last in `finish`, after the
+colour guard, so nothing raises a share past it. Band pixels with alpha over 0.004 (part
+covered, or fully covered within the inner tail's reach), away from `lightExcluded` (the
+hair zone; under the hair brush, the stroke; not an Edge Brush stroke), and only where the
+subject colour can be believed: re-centring measured the edge there (`knownQ` > 0.05) or
+certain subject lies within three quarter-size cells (`subjectNear`, about 12 px). Each
+channel's share ≤ (cover × F + 0.01 + 0.15 F) ÷ I in linear light, F the edge-local subject
+colour, cover as the guard's lightness bound has it. Only lowers. **Applies only with
+Decontamination on** (a choice made here: with it off the shares are the mask, which is what
+that switch is for). Log: `light bound: N pixels lowered, mean drop x`; JSON
+`light_bound_lowered`, `light_bound_mean_drop`. On a synthetic black disc with a one-pixel
+green fringe the green the subject keeps at the fringe falls from 0.0106 to 0.0062 (linear),
+the rest being inside the tolerance. Photo view with no adjustments: unchanged by
+construction (shares are used only by adjustments and the mask views).
+
+**1.2 One colour space.** `Masking.photo(from:)` draws the neutral render (Display P3) into
+sRGB before the engine sees it; the proxies were already sRGB. The exact sRGB curve
+(`srgbToLinear`, `linearToSRGB`, `sRGBToLinearTable` in `Planes.swift`) replaces every
+`pow(x, 2.2)` (`Matte.toLinear`, `Refine.toLinear`, `hairMethod`, `recentre`'s colours,
+`F.png`). `Imaging.ciContext` is given `extendedLinearSRGB` as its working space explicitly
+(the Mac's default; the log's first lines now name it). The debug bundle's pictures are
+tagged: photo pieces sRGB (now converted, as the engine sees them), masks and shares linear.
+
+**1.3** `Matte.unclipped`: shares unclipped, then scaled down together if a channel passes 1,
+or moved towards the single share just enough if one is below 0. A channel with under 0.002
+of light (linear) takes the single share: divided by almost nothing it would scale the other
+two to nothing.
+
+**2 Refine Edges.** `lookArea(box:faceHeight:)`: 15% each side or enough for a side of
+max(face height, 1024), moved inside the photo rather than cut. `limitRemovals`: the edge
+band is max(1.5 model pixels, 6 px) from the present mask's 0.5 line; what the answer would
+take out beyond it, region by region (connected), is taken out only if (a) the median blur
+of the sharpness map's edges inside the region shrunk by 3 px (`regionBlur`; never `dense`,
+never `SubjectSelect.edgeSharp`, which reads the region's boundary, the subject's own sharp
+edge) is at or over the focus limit (`SubjectRules.focusLimit`, the selection rules' own),
+with at least 30 such edges (counted on the map, scaled by its size); or (b) its focus can't
+be told and its mean Oklab distance is under 0.05 from the background's colours and over 0.2
+from the subject's; or (c) half of it is a pocket `openGaps` would open. Kept regions keep
+their present values, and so does the edge band round them (otherwise a rose the model
+dropped came back a band smaller). The subject's colours for (b) come from where the mask
+and the model agree (a mask 20 px too wide would lend its rim of ground to "the subject");
+the background's from where the mask says background. Shift: `replace`, alpha 15's
+behaviour, logged `mode: replace`. Log per box: the look area's size, one line per region of
+200 px or more with its verdict and figures, a count of smaller ones, the mean change along
+the box's border, and `BOXSEAM?` over 0.15.
+
+**3 Brushes.** Refine Hair takes Strength and Tightness (`Refine.tighten`: above 0 the floor
+rises to 0.4 at +1 and the rest is stretched; below 0 the top 0.4 at −1 goes solid); 1 and 0
+give exactly alpha 15's result. On colour matting's path Tightness is applied to its answer
+under the stroke (shares scaled with alpha) and Strength through the stroke's weight. The
+**Edge Brush** is the matting path with guards kept and `forcedIsHair: false`: the stroke is
+held as the model drew it but is no hair zone, so the light bound applies. Matting model only;
+without it the brush says so. Clean Edge: Debug → "Clean Edge in the tool menu". Choosing
+Refine Hair or the Edge Brush loads the matting model at once.
+
+**4 Automatic hand pass** (`Masking.handPass`, Debug "Automatic hands"). After the edge,
+for each wrist of the primary pose at `poseConfidence`: a square 1.3 face heights, 0.45 face
+heights beyond the wrist along elbow→wrist; the §2 logic on it (one look, tiles if large).
+Skipped with no face (nothing to size it by), no wrist, the square mostly off the frame, the
+wrist out of focus (sharpness map median within 0.3 face heights of it over the focus limit),
+or no mask edge in the square. The model's answers are kept on the `SubjectBase`, so a tier
+change or a Debug switch doesn't run the model on the hands again. What each square replaced
+is kept on the `MaskResult` (`beforeHands`) for Option-restore. Not an operation: not in Undo
+or Show edits; done again by Make and Remake. Logged per hand; JSON `hand_passes`. **Time on
+the owner's Mac not measured**: one model pass (about 0.9 s) and one engine run on the patch
+per hand, the first time.
+
+**5 Hair zone.** `hairBoxWidth` 2.0 and `hairBoxHeight` 2.4 face sizes (was 2.6 × 3.0). The
+primary pose's limbs and joints, 0.25 face heights either side (`bodyNotHair`), are taken out.
+No face: a stand-in face from the pose (`BodyPose.headBox`: centred on the nose, or 0.75 of
+its side above the neck; side 0.45 × shoulder width); no pose head either: no hair zone (it
+used to be "all hair", with no clean-up anywhere). The Zones view outlines the zone. Debug
+"Ignore faces" makes a mask as if no face had been found (it is part of the base's key).
+Logged: `hair zone from …`; JSON `hair_zone_from`. Three older tier tests use a synthetic
+"head" whose strands reach beyond the smaller box; they run with the old box size.
+
+**Addendum: filled pinholes** come out of `SubjectSelect.keep` at 1.0 (they were at 0.51,
+had no half-way line for the close-ups or re-centring to find, and stayed half see-through).
+
+**Acceptance, all for the owner** (Background −3 EV and On Black at 300%, base mask alone):
+6303 no green on fingers, cuff, hand, no teal on the sleeve; 7451 none on the sleeve or in
+the arm–waist gap; 6957's hands and hair, 7006's hair, 7473's window hair, footwear and the
+guard counts no worse; the `light bound` line for all eight. Boxes on 6957 (gap, fingers),
+6372 (tight on the rose, loose over rose and hand, the loose one again with Shift), footwear.
+Refine Hair on 7006 at Tightness +0.5; the Edge Brush along 6303's middle finger. 6957's
+hands with no boxes; 6303's peace sign no worse; the time Make Mask gains on all eight. 6303
+in the Zones view: hand and sleeves outside the zone; 7473's window hair unchanged; a photo
+with Ignore faces on gets its edge cleaned.
+
+**Known issues added by v6**
+- The light bound trusts the edge-local subject colour. Where that is wrong (a highlight on
+  the subject brighter than its colour beside the edge, by more than the 15% tolerance), the
+  bound darkens it once the background is darkened. Switch "Subject light bound" off to
+  confirm; then raise `lightBoundTolerance`.
+- A wide uniform fringe (two pixels or more) is read as the subject's own colour beside the
+  edge, and the bound then lets it stay (seen on a synthetic disc; a real lens fringe is about
+  one pixel).
+- A region the box would take out whose focus can't be measured and whose colour is near
+  neither side is kept: a box can then leave a piece the model rightly dropped. Shift does
+  what alpha 15 did.
+- The hand pass needs a face (to size its square) and a pose; with Ignore faces on, it is off.

@@ -55,6 +55,9 @@ public struct SubjectRules {
     /// How far either side of a limb's line counts as that limb, in face heights.
     public var capsule: Float = 0.35
     public var poseConfidence: Float = 0.3
+    /// Debug (spec v6, 5.4): the faces are not looked for, as if none had been found, to
+    /// try the no-face path on any photo. Read by the app.
+    public var ignoreFaces = false
 
     public init() {}
 

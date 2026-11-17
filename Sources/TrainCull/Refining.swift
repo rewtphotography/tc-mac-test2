@@ -5,13 +5,14 @@ import TraincullCore
 
 /// The mask tools (masking spec v5, section 2).
 enum MaskTool: String, CaseIterable {
-    case none, edges, hair, clean
+    case none, edges, hair, edgeBrush, clean
 
     var name: String {
         switch self {
         case .none: return "Off"
         case .edges: return "Refine Edges"
         case .hair: return "Refine Hair"
+        case .edgeBrush: return "Edge Brush"
         case .clean: return "Clean Edge"
         }
     }
@@ -19,11 +20,18 @@ enum MaskTool: String, CaseIterable {
     var hint: String {
         switch self {
         case .none: return ""
-        case .edges: return "Drag a box round fingers, footwear, a gap or a prop's edge. Hold Option while dragging to put the automatic mask back inside the box."
-        case .hair: return "Paint over curls or flowing hair. Hold Option while painting to put the automatic mask back."
+        case .edges: return "Drag a box round fingers, footwear, a gap or a prop's edge: the edge inside is refined, and only what is out of focus or plainly background is taken out. Hold Shift while dragging to let the model redraw everything inside the box. Hold Option to put the automatic mask back inside the box."
+        case .hair: return "Paint over curls or flowing hair. Raise Tightness to leave faint flyaways out. Hold Option while painting to put the automatic mask back."
+        case .edgeBrush: return "Paint along a hard edge (fingers, a sleeve, a waist) to have the matting model redraw it cleanly. Hold Option while painting to put the automatic mask back."
         case .clean: return "Paint along a hard edge that still has a rim. Hold Option while painting to put the automatic mask back."
         }
     }
+
+    /// The brushes that run the matting model, and take Strength and Tightness.
+    var usesMattingModel: Bool { self == .hair || self == .edgeBrush }
+
+    /// The tools in the menu: Clean Edge only when Debug asks for it (spec v6, 3.2).
+    static func menu(withClean: Bool) -> [MaskTool] { allCases.filter { $0 != .clean || withClean } }
 }
 
 /// How Refine Hair picks its method.
@@ -47,6 +55,11 @@ struct RefineOp {
     /// Option was held: put the automatic mask back here.
     var restore: Bool
     var clean = CleanSettings()
+    /// Shift with Refine Edges: the model's answer replaces everything inside the box (spec v6, 2.2).
+    var replace = false
+    /// Refine Hair and the Edge Brush: how far the matte is laid in, and its Tightness (spec v6, 3.1).
+    var strength: Float = 1
+    var tightness: Float = 0
 
     var mark: HeroNSView.Mark {
         if let box = box { return .box(CGRect(x: box.x, y: box.y, width: box.w, height: box.h), restore: restore) }
@@ -115,7 +128,7 @@ extension Masking {
         return PixelRect(x: x0, y: y0, w: x1 - x0, h: y1 - y0)
     }
 
-    private static func region(_ bytes: [UInt8], width W: Int, _ r: PixelRect, channels: Int) -> [UInt8] {
+    static func region(_ bytes: [UInt8], width W: Int, _ r: PixelRect, channels: Int) -> [UInt8] {
         var out = [UInt8](repeating: 0, count: r.w * r.h * channels)
         for y in 0 ..< r.h {
             let from = ((r.y + y) * W + r.x) * channels, to = y * r.w * channels
@@ -152,8 +165,8 @@ extension Masking {
         if let engine = keptMatte, engine.base === found { kept = engine.matte.photo }
         keptLock.unlock()
         guard let photo = kept ?? Masking.photo(from: reference) else { throw Failure("the rendered photo isn't in the expected 8-bit form") }
-        let context = RefineContext(photo: photo, faces: found.faces, defocus: found.ranking.sharpness?.dense,
-                                    subjectSharpness: found.ranking.primary?.sharp, settings: options.settings)
+        let context = refineContext(found, photo: photo, settings: options.settings, rules: rules)
+        let faceHeight = context.subjectFace?.h
 
         var alpha = alpha0, shares = shares0
         var touched: PixelRect?
@@ -173,11 +186,35 @@ extension Masking {
             guard let partial = partial, let quick = try? rebuilt(mask, alpha: alpha, shares: shares, summary: "\(op.tool.name): \(what)…") else { return }
             partial(quick)
         }
+        /// The matting model's look under a stroke, laid in: Refine Hair, or the Edge Brush (`edge`).
+        func matte(_ stroke: RefineStroke, edge: Bool) throws {
+            let area = Refine.lookArea(stroke: stroke, w: W, h: H)
+            progress("Matting model")
+            let answer = try look(.matting, reference: reference, area: area, tiled: false, what: "\(name) \(edge ? "edge" : "hair")")
+            lay(Refine.hair(stroke: stroke, look: area, answer: answer, alpha: alpha0, context: context,
+                            strength: op.strength, tightness: op.tightness, edge: edge))
+            if wantsTiles(area) {
+                show("first look")
+                progress("Matting model, in tiles")
+                let fine = try look(.matting, reference: reference, area: area, tiled: true, what: "\(name) \(edge ? "edge" : "hair")")
+                lay(Refine.hair(stroke: stroke, look: area, answer: fine, alpha: alpha0, context: context,
+                                strength: op.strength, tightness: op.tightness, edge: edge))
+            }
+        }
 
         if op.restore {
             // Option: the automatic mask back, inside the box or under the stroke.
-            guard let baseAlpha = bytes(of: automatic.alpha, count: W * H), let baseShares = bytes(of: automatic.shares, count: W * H * 4) else {
+            guard var baseAlpha = bytes(of: automatic.alpha, count: W * H), var baseShares = bytes(of: automatic.shares, count: W * H * 4) else {
                 throw Failure("the automatic mask isn't to hand")
+            }
+            // Inside the automatic hand pass's squares, back to the mask as it was before the pass.
+            for undo in automatic.beforeHands.reversed() {
+                let r = undo.rect
+                for y in 0 ..< r.h {
+                    let to = (r.y + y) * W + r.x
+                    baseAlpha.replaceSubrange(to ..< to + r.w, with: undo.alpha[y * r.w ..< (y + 1) * r.w])
+                    baseShares.replaceSubrange(to * 4 ..< (to + r.w) * 4, with: undo.shares[y * r.w * 4 ..< (y + 1) * r.w * 4])
+                }
             }
             let area: PixelRect, weight: Gray
             if let box = op.box {
@@ -201,10 +238,10 @@ extension Masking {
                 var grown = 0
                 var stopped = "the subject stays inside the box"
                 while true {
-                    let area = Refine.lookArea(box: box, w: W, h: H)
+                    let area = Refine.lookArea(box: box, w: W, h: H, faceHeight: faceHeight)
                     progress("Looking closer")
                     let answer = try look(.shared, reference: reference, area: area, tiled: false, what: "\(name) box")
-                    let made = Refine.edges(box: box, look: area, answer: answer, alpha: alpha0, context: context)
+                    let made = Refine.edges(box: box, look: area, answer: answer, alpha: alpha0, context: context, replace: op.replace)
                     latest = made
                     let off = made.runsOff
                     if !(off.left || off.right || off.top || off.bottom) { break }
@@ -222,7 +259,8 @@ extension Masking {
                 }
                 guard let result = latest else { throw Failure("the box couldn't be worked on") }
                 lay(result)
-                let area = Refine.lookArea(box: box, w: W, h: H)
+                var boxWarnings = result.warnings
+                let area = Refine.lookArea(box: box, w: W, h: H, faceHeight: faceHeight)
                 let detail = 100 * Double(min(BiRefNetModel.shared.inputSide, max(area.w, area.h))) / Double(max(area.w, area.h))
                 var passes = "one pass, the model saw \(Int(detail))% of the photo's detail"
                 if wantsTiles(area) {
@@ -233,7 +271,9 @@ extension Masking {
                     var covered = 0
                     for v in fine.v where v >= 0.5 { covered += 1 }
                     let share = 100 * Double(covered) / Double(max(fine.v.count, 1))
-                    lay(Refine.edges(box: box, look: area, answer: fine, alpha: alpha0, context: context))
+                    let tiledResult = Refine.edges(box: box, look: area, answer: fine, alpha: alpha0, context: context, replace: op.replace)
+                    lay(tiledResult)
+                    boxWarnings = tiledResult.warnings
                     let tiled = changed
                     passes = "one pass (\(single) px changed), then tiles of up to 1536 px (\(tiled) px changed; the tiles call "
                         + String(format: "%.0f", locale: Locale(identifier: "en_US_POSIX"), share) + "% of the area subject)"
@@ -243,9 +283,11 @@ extension Masking {
                     if tiled == 0 && single > 0 {
                         Log.warn("\(name): TILES? the tiled look changed nothing where the single look changed \(single) px; the single look is kept")
                         lay(result)
+                        boxWarnings = result.warnings
                         passes += " · the tiles changed nothing: the single look is kept"
                     }
                 }
+                for warning in boxWarnings { Log.warn("\(name): \(warning)") }
                 notes.insert("\(passes) · growth: \(grown) extension(s), \(stopped)", at: 0)
             case .clean:
                 guard let stroke = op.stroke else { throw Failure("no stroke was painted") }
@@ -265,21 +307,18 @@ extension Masking {
                 if colour {
                     method = "Refine Hair, colour matting"
                     progress("Colour matting")
-                    lay(Refine.hair(stroke: stroke, look: nil, answer: nil, alpha: alpha0, context: context, progress: progress))
+                    lay(Refine.hair(stroke: stroke, look: nil, answer: nil, alpha: alpha0, context: context,
+                                    strength: op.strength, tightness: op.tightness, progress: progress))
                 } else {
                     method = "Refine Hair, matting model"
-                    let area = Refine.lookArea(stroke: stroke, w: W, h: H)
-                    progress("Matting model")
-                    let answer = try look(.matting, reference: reference, area: area, tiled: false, what: "\(name) hair")
-                    lay(Refine.hair(stroke: stroke, look: area, answer: answer, alpha: alpha0, context: context))
-                    if wantsTiles(area) {
-                        show("first look")
-                        progress("Matting model, in tiles")
-                        let fine = try look(.matting, reference: reference, area: area, tiled: true, what: "\(name) hair")
-                        lay(Refine.hair(stroke: stroke, look: area, answer: fine, alpha: alpha0, context: context))
-                    }
+                    try matte(stroke, edge: false)
                 }
                 notes.insert(why, at: 0)
+            case .edgeBrush:
+                guard let stroke = op.stroke else { throw Failure("no stroke was painted") }
+                guard BiRefNetModel.matting.isAvailable else { throw Failure("the matting model isn't in this build") }
+                method = "Edge Brush, matting model"
+                try matte(stroke, edge: true)
             case .none:
                 throw Failure("no tool is chosen")
             }

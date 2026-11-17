@@ -190,6 +190,31 @@ final class SpecV6Tests: XCTestCase {
         XCTAssertTrue(limited.log.contains { $0.contains("kept:") })
     }
 
+    /// A mask 20 pixels too wide on a plain ground, no sharpness to go by: the ring is the
+    /// background's colour, and a box takes it out.
+    func testBoxTakesOutARimOfPlainBackground() {
+        let w = 240, h = 240
+        var px = [UInt8](repeating: 255, count: w * h * 4)
+        var current = Gray(w: w, h: h), proposal = Gray(w: w, h: h)
+        for y in 0 ..< h {
+            for x in 0 ..< w {
+                let i = y * w + x
+                let r = ((Float(x) - 120) * (Float(x) - 120) + (Float(y) - 120) * (Float(y) - 120)).squareRoot()
+                let v: SIMD3<Float> = r < 80 ? SIMD3(0.35, 0.15, 0.12) : SIMD3(0.75, 0.80, 0.85)
+                for ch in 0 ..< 3 { px[i * 4 + ch] = UInt8(v[ch] * 255) }
+                current.v[i] = r < 100 ? 1 : 0
+                proposal.v[i] = r < 80 ? 1 : 0
+            }
+        }
+        let photo = Photo(w: w, h: h, rowBytes: w * 4, px: px)
+        let limited = Refine.limitRemovals(proposal: proposal, current: current, box: Gray(w: w, h: h, fill: 1),
+                                           look: PixelRect(x: 0, y: 0, w: w, h: h), modelPixel: 2, context: RefineContext(photo: photo, faces: []))
+        print("V6 rim: \(limited.log)")
+        XCTAssertEqual(limited.proposal.v[120 * w + 120 + 88], 0, "the rim of ground goes")
+        XCTAssertEqual(limited.proposal.v[120 * w + 120], 1)
+        XCTAssertTrue(limited.log.contains { $0.contains("colour is the background's") })
+    }
+
     /// The look area: at least a face height and 1024 pixels a side, the box inside it, and
     /// moved rather than cut at the photo's edge.
     func testLookAreaGivesTheModelContext() {

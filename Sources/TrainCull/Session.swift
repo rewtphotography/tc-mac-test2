@@ -139,7 +139,36 @@ final class Session: ObservableObject {
     @Published var colourGuard = true { didSet { if colourGuard != oldValue { edgeStepChanged("colour guard", colourGuard) } } }
     @Published var edgeRecentre = true { didSet { if edgeRecentre != oldValue { edgeStepChanged("edge re-centre", edgeRecentre) } } }
     /// The mask tools: which is chosen, the brush, and the Clean Edge and Refine Hair settings.
-    @Published var maskTool = MaskTool.none { didSet { if maskTool != oldValue { toolChanged() } } }
+    @Published var maskTool = MaskTool.none {
+        didSet {
+            if maskTool != oldValue {
+                toolChanged()
+                // The matting model loaded now, so the first stroke doesn't wait 7 to 8 s for it.
+                if maskTool.usesMattingModel && BiRefNetModel.matting.isAvailable && !BiRefNetModel.matting.isLoaded {
+                    Log.note("model", "\(maskTool.name) chosen: making the matting model ready")
+                    maskQueue.async { BiRefNetModel.matting.prewarm() }
+                }
+            }
+        }
+    }
+    /// Refine Hair and the Edge Brush: how far the matte is laid in, and how tight (spec v6, 3.1).
+    @Published var brushStrength: Double = 1
+    @Published var brushTightness: Double = 0
+    /// Debug (spec v6, section 6): the subject light bound, the automatic hand pass, faces
+    /// ignored (to try the no-face path on any photo), and Clean Edge in the tool menu.
+    @Published var lightBound = true { didSet { if lightBound != oldValue { edgeStepChanged("subject light bound", lightBound) } } }
+    @Published var autoHands = true { didSet { if autoHands != oldValue { edgeStepChanged("automatic hands", autoHands) } } }
+    @Published var ignoreFaces = false {
+        didSet {
+            if ignoreFaces != oldValue {
+                Log.note("mask", "debug: ignore faces \(ignoreFaces ? "on" : "off")")
+                if currentMask != nil { makeMask(fresh: true, trigger: "ignore faces switched \(ignoreFaces ? "on" : "off")") }
+            }
+        }
+    }
+    @Published var showCleanEdge = false {
+        didSet { if !showCleanEdge && maskTool == .clean { maskTool = .none } }
+    }
     /// The brush's radius, in pixels of the photo.
     @Published var brushSize: Double = 60 { didSet { if brushSize != oldValue { toolChanged() } } }
     /// Show edits: every box and stroke on this photo stays drawn over it. Off, only the one being
@@ -599,10 +628,12 @@ final class Session: ObservableObject {
         }
         view.acceptsClick = { [weak self] in self?.clicked(index) ?? true }
         if index == 0 {
-            view.onBox = { [weak self] rect, restore in
+            view.onBox = { [weak self] rect, restore, replace in
                 guard let self = self else { return }
                 let box = PixelRect(x: Int(rect.minX), y: Int(rect.minY), w: max(Int(rect.width), 1), h: max(Int(rect.height), 1))
-                self.userTool(RefineOp(tool: self.maskTool, box: box, stroke: nil, restore: restore))
+                var op = RefineOp(tool: self.maskTool, box: box, stroke: nil, restore: restore)
+                op.replace = replace
+                self.userTool(op)
             }
             view.onStroke = { [weak self] points, radius, restore in
                 guard let self = self else { return }
@@ -610,6 +641,8 @@ final class Session: ObservableObject {
                 var op = RefineOp(tool: self.maskTool, box: nil, stroke: stroke, restore: restore)
                 op.clean.strength = Float(self.cleanStrength)
                 op.clean.tightness = Float(self.cleanTightness)
+                op.strength = Float(self.brushStrength)
+                op.tightness = Float(self.brushTightness)
                 self.userTool(op)
             }
             toolChanged()
@@ -1154,6 +1187,7 @@ final class Session: ObservableObject {
     private var subjectRules: SubjectRules {
         var rules = SubjectRules()
         rules.focusStrictness = focusStrictness.factor
+        rules.ignoreFaces = ignoreFaces
         return rules
     }
 
@@ -1172,7 +1206,7 @@ final class Session: ObservableObject {
         maskRun += 1
         maskJobs += 1
         let run = maskRun, job = maskJobs
-        let tier = maskTier, source = subjectSource, rules = subjectRules, settings = edgeSettings
+        let tier = maskTier, source = subjectSource, rules = subjectRules, settings = edgeSettings, hands = autoHands
         let url = item.url, id = item.id, name = item.name
         let known = faces[id]
         making = id
@@ -1198,7 +1232,7 @@ final class Session: ObservableObject {
             let meter = JobMeter()
             let working = CFAbsoluteTimeGetCurrent()
             let result = Result { () -> MaskResult in
-                try Masking.make(url: url, tier: tier, faces: known, settings: settings, rules: rules, subject: source, progress: { text in
+                try Masking.make(url: url, tier: tier, faces: known, settings: settings, rules: rules, subject: source, hands: hands, progress: { text in
                     DispatchQueue.main.async { if run == self.maskRun { self.maskStatus = "\(text)…" } }
                 }, partial: { first in
                     // The snapped edge, shown while the hair is still being refined.
@@ -1288,6 +1322,7 @@ final class Session: ObservableObject {
         settings.decontaminate = decontamination
         settings.colourGuard = colourGuard
         settings.recentre = edgeRecentre
+        settings.lightBound = lightBound
         return settings
     }
 
@@ -1307,7 +1342,7 @@ final class Session: ObservableObject {
         switch maskTool {
         case .none: view.tool = .none
         case .edges: view.tool = .box
-        case .hair, .clean: view.tool = .brush(radius: CGFloat(brushSize))
+        case .hair, .edgeBrush, .clean: view.tool = .brush(radius: CGFloat(brushSize))
         }
         let ops = refined[selected]?.ops ?? []
         // Earlier boxes and strokes only when asked for (Show edits); never outside the edit view.
@@ -1600,7 +1635,7 @@ final class Session: ObservableObject {
         let rules = subjectRules, source = subjectSource, mask = currentMask
         let ops = refined[item.id]?.ops ?? []
         let switches = ["edge_snap": edgeSnap, "decontamination": decontamination, "colour_guard": colourGuard, "edge_recentre": edgeRecentre,
-                        "legacy_vision": legacyVision]
+                        "legacy_vision": legacyVision, "subject_light_bound": lightBound, "automatic_hands": autoHands, "ignore_faces": ignoreFaces]
         say("Writing the debug bundle for \(item.name)…")
         exportQueue.async {
             do {
@@ -1693,7 +1728,7 @@ final class Session: ObservableObject {
             var ops: [RefineOp]
             var faces: DetectedFaces?
         }
-        let tier = maskTier, settings = edgeSettings, rules = subjectRules, subject = subjectSource, options = refineOptions
+        let tier = maskTier, settings = edgeSettings, rules = subjectRules, subject = subjectSource, options = refineOptions, hands = autoHands
         let jobs = items.map { item -> (url: URL, name: String, adjust: [String: Float], shot: ShotInfo?, local: LocalRender?, edits: LocalEdits, needs: MaskSource?) in
             if item.local.isNeutral || kind != .tiff { return (item.url, item.name, item.adjust, item.info?.shot, nil, item.local, nil) }
             if let mask = masks.first(where: { $0.id == item.id })?.mask {
@@ -1725,7 +1760,7 @@ final class Session: ObservableObject {
                         var local = job.local
                         if let source = job.needs {
                             local = try self.maskForExport(job.url, job.name, edits: job.edits, source: source.spilled, ops: source.ops, faces: source.faces,
-                                                           tier: tier, settings: settings, rules: rules, subject: subject, options: options)
+                                                           tier: tier, settings: settings, rules: rules, subject: subject, hands: hands, options: options)
                         }
                         let out: URL
                         switch kind {
@@ -1764,7 +1799,7 @@ final class Session: ObservableObject {
     /// back from disk, or made again with its tool operations done again. Throws, with the
     /// reason, if neither works: the frame is then not exported rather than exported without them.
     private func maskForExport(_ url: URL, _ name: String, edits: LocalEdits, source: URL?, ops: [RefineOp], faces known: DetectedFaces?,
-                               tier: MatteTier, settings: MatteSettings, rules: SubjectRules, subject: SubjectSource,
+                               tier: MatteTier, settings: MatteSettings, rules: SubjectRules, subject: SubjectSource, hands: Bool,
                                options: RefineOptions) throws -> LocalRender {
         let started = CFAbsoluteTimeGetCurrent()
         if let folder = source {
@@ -1780,7 +1815,7 @@ final class Session: ObservableObject {
             // On the mask queue, one job at a time with the app's own mask work.
             let mask: MaskResult = try maskQueue.sync {
                 let base = try Masking.make(url: url, tier: tier, faces: known, settings: settings, rules: rules, subject: subject,
-                                            progress: { _ in }, cancelled: { false })
+                                            hands: hands, progress: { _ in }, cancelled: { false })
                 var mask = base
                 for op in ops {
                     mask = try Masking.refine(url: url, mask: mask, automatic: base, op: op, options: options, faces: known, rules: rules,
@@ -1903,7 +1938,7 @@ final class Session: ObservableObject {
         if let window = window, NSApp.keyWindow !== window { return false }
         guard folder != nil, !frames.isEmpty else { return false }
         // With a brush chosen, [ and ] make it smaller and larger.
-        if maskTool == .hair || maskTool == .clean, let key = event.charactersIgnoringModifiers, key == "[" || key == "]" {
+        if maskTool == .hair || maskTool == .edgeBrush || maskTool == .clean, let key = event.charactersIgnoringModifiers, key == "[" || key == "]" {
             brushSize = min(max(brushSize * (key == "]" ? 1.2 : 1 / 1.2), 4), 600)
             return true
         }

@@ -127,7 +127,7 @@ Bridge, Photoshop or Lightroom has it)
   folder tree, a calibration table mapping Apple's values to Camera Raw's.
 - Subject, hair and skin masks: see "Masking" below.
 
-## What is built (alpha 15)
+## What is built (alpha 17)
 
 Folder opening (button, File menu, drag and drop, recents, drives), resizable left pane,
 thumbnails with rating, label and reject marks, the large image with raw render and face
@@ -186,12 +186,14 @@ Same folder and Mac, two and a half minutes of use:
    200–300%: is the pale rim gone on 6303's fingers and sleeve, 7451's waist and arm,
    6957's hand and waist? The log's new `edge placement` line gives the offset and the edge
    widths on the real photos; nothing in alpha 15 has been seen on one.
-3. Priority 5 of the final masking round: the tool overlay bug and Show edits are built
-   (alpha 16); the edit stack, the history panel and reorder mode are not. Written out as
-   steps in `MASKING.md`, section 16.
-4. Tune when Refine Hair may use colour matting, on seamless-backdrop shots from the owner.
-5. Soft-focus and closed-eyes flags from Apple's face landmarks.
-6. A Settings window (label names, editor choice), Undo after reject.
+3. The owner checks spec v6 (alpha 17) on the eight photos: the acceptance list is in
+   `MASKING.md`, section 17; and the mask-keeping fix on four photos.
+4. Priority 5 of the final masking round: the tool overlay bug and Show edits are built
+   (alpha 16); the edit stack, the history panel and reorder mode are not (spec v6 left them
+   for later). Written out as steps in `MASKING.md`, section 16.
+5. Tune when Refine Hair may use colour matting, on seamless-backdrop shots from the owner.
+6. Soft-focus and closed-eyes flags from Apple's face landmarks.
+7. A Settings window (label names, editor choice), Undo after reject.
 
 ## Masking (a test build of phases 1 and 2)
 
@@ -803,6 +805,46 @@ starts in the single, side-by-side and Edit views. The mask panel is below the f
 screenshots and the build draws no boxes or strokes, so the fade and Show edits are first
 seen by the owner.
 
+## Masking spec v6 (alpha 17)
+
+`docs/specs/masking-spec-v6.md`, from the owner's alpha 15 testing on real photos (the wide
+rim is gone: edge offset +0.20 px on 6303, +0.22 on 7451), plus two addenda in the same
+build: filled pinholes, and a data-loss bug in how long masks were kept. **Everything is in
+`MASKING.md`, section 17**, with what each item does and how it differs from the spec. In short:
+
+- **Adopted as written:** the subject light bound (1.1), one colour space (1.2), shares
+  without per-channel clipping (1.3), Refine Edges' look area and limits with Shift for the
+  old behaviour (2), Strength and Tightness on Refine Hair, the Edge Brush, Clean Edge under
+  Debug (3), the automatic hand pass (4), the hair zone fitted to the head and never the body,
+  with the pose's head or no zone when there is no face (5), the Debug switches and the
+  synthetic tests (6), filled pinholes at 1.0, region focus from edges inside the shrunk
+  region (not `edgeSharp`).
+- **Changed, and why:** the light bound applies only with Decontamination on (that switch
+  means "shares are the mask"); a region a box keeps keeps the edge band round it too (else a
+  dropped rose came back smaller); the subject colour for a box's colour test comes from
+  where mask and model agree (an over-wide mask lent its rim of ground to "the subject"); the
+  look area is moved inside the photo rather than cut; on colour matting's path Tightness acts
+  on its answer and Strength through the stroke's weight; the hand pass is skipped without a
+  face; a stand-in head from the pose is 0.45 shoulder widths square.
+- **Not done, and why:** before/after crops of the owner's photos, and every acceptance item
+  that names one: this session had none of the photos or proxies (they were only ever in an
+  earlier session's scratch space). The light-bound counts for the eight photos and the time
+  the hand pass adds will be in the owner's log.
+
+**The data-loss bug (addendum 2).** Only the last two photos kept their masks: a third
+photo's mask silently dropped the first's, with its tool operations, and its local
+adjustments stopped showing and were left out of its TIFF. Now a mask with tool operations or
+local adjustments is never let go; clean ones are, beyond two. Under memory pressure masks not
+on screen are written to `~/Library/Caches/TrainCull/masks` and read back when shown or
+exported; that folder is emptied when a folder is opened, at quit and at start. An export
+reads a mask back, or makes it again with its operations replayed, or fails that frame with
+the reason; it never writes a TIFF without the frame's adjustments. Every let-go, write, read
+and remake is logged (`mask` lines). Also: a tool used while the frame's mask is being made
+waits and runs after the replayed operations; choosing Refine Hair or the Edge Brush loads
+the matting model at once. Not tested by the build (it has no photos with tool operations);
+the owner's check: mask, adjust and add tool operations to four photos in turn, go back to
+the first, then export all four.
+
 ## Still to design
 
 The owner will share screenshots of how they use Bridge. Until then these are open: where
@@ -825,6 +867,14 @@ shown, how several frames are selected for the editor, the font, the overall loo
   screen, and fades when its own job ends.
 - The tools work on the mask of the photo being shown and are kept until the folder is
   closed, like the mask itself; nothing of them is saved with the photo yet.
+- Masks with tool operations or local adjustments all stay in memory (about 330 MB each at
+  33 MP with operations: the mask and the automatic one) until macOS reports memory pressure;
+  then those not on screen go to disk, about the same size each, and come back in a second
+  or so when shown. A frame shown just after may appear for a moment without its adjustments.
+- A remade mask for an export (only if one on disk can't be read) runs the model again: tens
+  of seconds for a frame with several tool operations.
+- The automatic hand pass adds up to two model passes to the first Make Mask of a photo.
+- Ignore faces (Debug) remakes the mask from scratch, model included.
 - A Refine Edges box over a large area (more than about 1,840 px across at full size)
   shows a quick result first and the tiled one a few seconds later.
 - The first Refine Hair stroke loads the hair-matting model (a second or two, about as
