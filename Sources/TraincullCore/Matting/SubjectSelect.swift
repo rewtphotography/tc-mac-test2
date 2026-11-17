@@ -67,6 +67,14 @@ public struct SubjectRules {
         let t = min(max((fh - 0.05) / 0.15, 0), 1)
         return (1.0 - 0.8 * t) * focusStrictness
     }
+
+    /// The most blurred a part may be and still count as in focus with the subject (the
+    /// limit `keep` uses), in the sharpness map's units. `faceHeight` and `frameHeight` in
+    /// the map's pixels.
+    public func focusLimit(subjectSharpness sp: Float, faceHeight: Int?, frameHeight: Int) -> Float {
+        let strict = max(faceHeight.map { strictness(faceHeight: $0, frameHeight: frameHeight) } ?? focusStrictness, 0.05)
+        return sp + sharpAllowance / strict
+    }
 }
 
 public enum SubjectSelect {
@@ -202,7 +210,7 @@ public enum SubjectSelect {
         // Everything is judged against the subject's own face (its eyes), not a fixed number.
         let sp = face.flatMap { map.faceSharp($0) } ?? edgeSharp(piece(primary), map) ?? 1
         let strict = max(face.map { rules.strictness(faceHeight: $0.h, frameHeight: h) } ?? rules.focusStrictness, 0.05)
-        let limit = sp + rules.sharpAllowance / strict
+        let limit = rules.focusLimit(subjectSharpness: sp, faceHeight: face?.h, frameHeight: h)
         decision.subjectSharpness = sp
         decision.strictness = strict
         decision.limit = limit

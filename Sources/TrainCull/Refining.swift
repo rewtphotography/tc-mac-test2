@@ -130,7 +130,7 @@ extension Masking {
             throw Failure("the mask couldn't be stored")
         }
         return MaskResult(width: mask.width, height: mask.height, alpha: a, shares: s, skin: mask.skin, trimap: mask.trimap, coarse: mask.coarse,
-                          debug: mask.debug, tier: mask.tier, edge: mask.edge, summary: summary)
+                          debug: mask.debug, tier: mask.tier, edge: mask.edge, summary: summary, beforeHands: mask.beforeHands)
     }
 
     /// Applies one tool operation to a frame's mask. `automatic` is the mask as Make Mask left

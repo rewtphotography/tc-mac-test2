@@ -105,13 +105,17 @@ final class MaskResult {
     let tier: MatteTier
     let edge: EdgeQuality
     let summary: String
+    /// What the automatic hand pass replaced (spec v6, section 4): Option with a tool puts
+    /// the mask back as it was before the hand pass inside these.
+    let beforeHands: [RefineUndo]
 
     init(width: Int, height: Int, alpha: CGImage, shares: CGImage, skin: CGImage?, trimap: CGImage, coarse: CGImage, debug: CGImage? = nil,
-         tier: MatteTier, edge: EdgeQuality = EdgeQuality(), summary: String) {
+         tier: MatteTier, edge: EdgeQuality = EdgeQuality(), summary: String, beforeHands: [RefineUndo] = []) {
         self.width = width; self.height = height
         self.alpha = alpha; self.shares = shares; self.skin = skin
         self.trimap = trimap; self.coarse = coarse; self.debug = debug
         self.tier = tier; self.edge = edge; self.summary = summary
+        self.beforeHands = beforeHands
     }
 
     func picture(for area: LocalArea) -> CGImage? { area == .skin ? skin : shares }

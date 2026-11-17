@@ -197,13 +197,31 @@ final class Session: ObservableObject {
     private var faces: [Int: DetectedFaces] = [:]
     private var chosenFace: [Int: Int] = [:]
     private var rawCache: [(id: Int, values: [String: Float], stamp: Int, image: CGImage)] = []
-    /// The masks of the last two frames that had one made. Each is about as large as a raw render.
+    /// The masks held in memory, oldest first. Each is about as large as a raw render. A
+    /// mask with tool operations or local adjustments is never let go: only clean ones are,
+    /// beyond the last `keptCleanMasks`, and under memory pressure the others are written to
+    /// disk (`spilled`) and read back when their frame is shown or exported (spec v6 addendum).
     private var masks: [(id: Int, mask: MaskResult)] = []
+    static let keptCleanMasks = 2
     private var maskRun = 0
     private var maskJobs = 0
     /// For each frame with a mask: the mask as Make Mask left it, what the tools have done
     /// since, and what each replaced.
     private var refined: [Int: (automatic: MaskResult, ops: [RefineOp], undos: [RefineUndo])] = [:]
+    /// Frames whose mask was written to disk under memory pressure, with their tool operations.
+    private var spilled: [Int: (folder: URL, ops: [RefineOp])] = [:]
+    private var reloading = Set<Int>()
+    /// Tool operations of frames whose mask could be neither kept nor read back: the mask is
+    /// made again and these are done again on it.
+    private var lostOps: [Int: [RefineOp]] = [:]
+    private var remaking = Set<Int>()
+    /// Tool jobs queued or running, by frame. A frame with any is never let go or spilled.
+    private var toolJobsPending: [Int: Int] = [:]
+    /// Tool operations asked for while the frame's mask was being made: done after the replayed ones.
+    private var waitingOps: [Int: [RefineOp]] = [:]
+    /// The frame a Make or Remake job is running for.
+    private var making: Int?
+    private let spillQueue = DispatchQueue(label: "spill", qos: .utility)
     /// Frames whose camera settings have been written to the log this session.
     private var introduced = Set<Int>()
     /// The render cache: at most this many bytes of finished pictures, least recently shown out first.
@@ -253,6 +271,8 @@ final class Session: ObservableObject {
     init() {
         Log.shared.writeHeader()
         MemoryMonitor.shared.start()
+        let stale = MaskSpill.clear()
+        if stale > 0 { Log.note("mask", "\(stale) mask(s) left on disk by an earlier run removed from \(MaskSpill.root.path)") }
         recents = (UserDefaults.standard.stringArray(forKey: "recentFolders") ?? [])
             .map { URL(fileURLWithPath: $0) }
             .filter { FileManager.default.fileExists(atPath: $0.path) }
@@ -264,6 +284,8 @@ final class Session: ObservableObject {
         NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
             self?.flushSave()
             self?.sidecarQueue.sync {}
+            self?.spillQueue.sync {}
+            MaskSpill.clear()
             Log.note("memory", MemoryMonitor.shared.sentence)
             Log.note("app", "quit")
             Log.shared.flush()
@@ -277,14 +299,15 @@ final class Session: ObservableObject {
             let maskBytes = self.masks.reduce(0) { $0 + $1.mask.width * $1.mask.height * 6 }
             defer { self.evictions = 0 }
             let model: String = BiRefNetModel.shared.isLoaded ? "loaded" : "not loaded"
-            let renders: String = "render \(self.rawCache.count) / \(MemoryStats.plain(UInt64(renderBytes))) · masks \(self.masks.count) / \(MemoryStats.plain(UInt64(maskBytes)))"
+            let renders: String = "render \(self.rawCache.count) / \(MemoryStats.plain(UInt64(renderBytes))) · masks \(self.masks.count) / \(MemoryStats.plain(UInt64(maskBytes))), \(self.spilled.count) on disk"
             return "summary · \(renders) · evictions \(self.evictions) · \(Masking.keptSummary) · model \(model)"
         }
         // Short of memory, the model and everything kept for remaking masks are let go; they
         // come back when next needed.
         let pressure = DispatchSource.makeMemoryPressureSource(eventMask: [.warning, .critical], queue: .main)
         pressure.setEventHandler { [weak self] in
-            Log.warn("the Mac is short of memory (\(MemoryStats.plain(MemoryMonitor.footprint())) in use here): letting go of the model and the masking caches")
+            Log.warn("the Mac is short of memory (\(MemoryStats.plain(MemoryMonitor.footprint())) in use here): letting go of the model and the masking caches, and writing kept masks to disk")
+            self?.spillKept("memory pressure")
             self?.maskQueue.async {
                 BiRefNetModel.shared.unload("memory pressure")
                 BiRefNetModel.matting.unload("memory pressure")
@@ -389,6 +412,17 @@ final class Session: ObservableObject {
         Masking.forgetAll("another folder")
         masks = []
         refined = [:]
+        spilled = [:]
+        reloading = []
+        lostOps = [:]
+        remaking = []
+        toolJobsPending = [:]
+        waitingOps = [:]
+        making = nil
+        spillQueue.async {
+            let had = MaskSpill.clear()
+            if had > 0 { Log.note("mask", "\(had) mask(s) on disk removed: the folder was closed") }
+        }
         maskTool = .none
         maskRun += 1
         maskBusy = false
@@ -675,6 +709,7 @@ final class Session: ObservableObject {
         let name = item.name
         let formats = self.formats
         let adjust = item.adjust
+        ensureMask(item)
         let local = localRender(for: item)
         let stamp = renderKey(item)
         let started = CFAbsoluteTimeGetCurrent()
@@ -1140,6 +1175,12 @@ final class Session: ObservableObject {
         let tier = maskTier, source = subjectSource, rules = subjectRules, settings = edgeSettings
         let url = item.url, id = item.id, name = item.name
         let known = faces[id]
+        making = id
+        // Operations waiting on another frame's job that this one takes the place of: that job won't finish.
+        for (other, ops) in waitingOps where other != id {
+            Log.note("tool", "\(ops.count) tool operation(s) waiting for frame \(other + 1)'s mask dropped: another mask job took its place")
+            waitingOps[other] = nil
+        }
         maskStatus = "Starting…"
         let requested = CFAbsoluteTimeGetCurrent()
         let how: String = fresh ? "from scratch" : "from what is kept"
@@ -1190,17 +1231,25 @@ final class Session: ObservableObject {
                     return
                 }
                 self.maskBusy = false
+                self.making = nil
+                self.remaking.remove(id)
                 let still = self.selected == id
                 switch result {
                 case let .success(mask):
                     Log.note("job", "#\(job) completed in \(took) · image selected at completion: \(still ? "yes" : "no (\(self.current?.name ?? "none"))")")
-                    self.keep(mask, for: item)
-                    // What the tools had done to the mask this one replaces is done again on it.
-                    let again = self.refined[id]?.ops ?? []
+                    // What the tools had done to the mask this one replaces is done again on it
+                    // (or, for a mask that was lost, what they had done to that).
+                    let again = self.refined[id]?.ops ?? self.lostOps.removeValue(forKey: id) ?? []
                     self.refined[id] = (mask, [], [])
+                    self.keep(mask, for: item)
                     if !again.isEmpty {
                         Log.note("tool", "\(name): doing \(again.count) tool operation(s) again on the new mask")
                         for op in again { self.applyTool(op, to: item, trigger: "replay") }
+                    }
+                    // And then whatever was asked for while the mask was being made.
+                    if let waiting = self.waitingOps.removeValue(forKey: id), !waiting.isEmpty {
+                        Log.note("tool", "\(name): doing \(waiting.count) tool operation(s) asked for while the mask was being made")
+                        for op in waiting { self.applyTool(op, to: item, trigger: "asked for during the remake") }
                     }
                     if still { self.toolChanged() }
                     if still {
@@ -1211,6 +1260,9 @@ final class Session: ObservableObject {
                     }
                 case let .failure(error):
                     Log.note("job", "#\(job) failed after \(took): \(error)")
+                    if let waiting = self.waitingOps.removeValue(forKey: id), !waiting.isEmpty {
+                        Log.warn("\(name): \(waiting.count) tool operation(s) asked for during the mask job not done: the job failed")
+                    }
                     if still { self.maskStatus = "No mask: \(error)." }
                 }
             }
@@ -1218,6 +1270,16 @@ final class Session: ObservableObject {
     }
 
     // MARK: Mask tools
+
+    /// The tools' settings as the panel has them.
+    private var refineOptions: RefineOptions {
+        var options = RefineOptions()
+        options.settings = edgeSettings
+        options.hairMethod = hairMethod
+        options.contrastNeeded = Float(hairContrast)
+        options.textureAllowed = Float(hairTexture)
+        return options
+    }
 
     /// The edge engine's settings as the Debug switches have them.
     private var edgeSettings: MatteSettings {
@@ -1260,6 +1322,15 @@ final class Session: ObservableObject {
 
     /// A box or stroke from the large image: its mark stays there until the job is done.
     private func userTool(_ op: RefineOp) {
+        // While this frame's mask is being made again, a tool would run before the older
+        // operations replayed on the new mask: it waits for them instead.
+        if making == selected, let item = current {
+            waitingOps[item.id, default: []].append(op)
+            Log.note("tool", "\(item.name): \(op.tool.name) waits for the mask being made")
+            maskStatus = "\(op.tool.name) will run once the mask has been made."
+            slots[0].view?.fadePending()
+            return
+        }
         if let job = applyTool(op) {
             pendingJob = (job, selected)
         } else {
@@ -1278,15 +1349,12 @@ final class Session: ObservableObject {
     @discardableResult
     func applyTool(_ op: RefineOp, to given: FrameItem? = nil, trigger: String = "user") -> Int? {
         guard op.tool != .none, let item = given ?? current, masks.contains(where: { $0.id == item.id }) else { return nil }
+        toolJobsPending[item.id, default: 0] += 1
         maskJobs += 1
         let job = maskJobs
         let url = item.url, id = item.id, name = item.name
         let known = faces[id], rules = subjectRules, source = subjectSource
-        var options = RefineOptions()
-        options.settings = edgeSettings
-        options.hairMethod = hairMethod
-        options.contrastNeeded = Float(hairContrast)
-        options.textureAllowed = Float(hairTexture)
+        let options = refineOptions
         maskBusy = true
         maskStatus = "\(op.tool.name)…"
         let requested = CFAbsoluteTimeGetCurrent()
@@ -1300,7 +1368,7 @@ final class Session: ObservableObject {
                 automatic = self.refined[id]?.automatic
             }
             guard let now = mask, let base = automatic else {
-                DispatchQueue.main.async { self.maskBusy = false; self.toolJobEnded(job) }
+                DispatchQueue.main.async { self.maskBusy = false; self.toolJobEnded(job); self.toolDone(id) }
                 Log.note("job", "#\(job) dropped: the frame has no mask any more")
                 return
             }
@@ -1327,6 +1395,7 @@ final class Session: ObservableObject {
             DispatchQueue.main.async {
                 self.maskBusy = false
                 self.toolJobEnded(job)
+                self.toolDone(id)
                 let still = self.selected == id
                 switch result {
                 case let .success(done):
@@ -1376,15 +1445,152 @@ final class Session: ObservableObject {
         }
     }
 
-    /// Holds a frame's mask: the last two frames' are kept.
+    /// Holds a frame's mask. Clean masks beyond the last two are let go, oldest first; one
+    /// with tool operations or local adjustments never is.
     private func keep(_ mask: MaskResult, for item: FrameItem) {
         masks.removeAll { $0.id == item.id }
         masks.append((item.id, mask))
-        if masks.count > 2 { masks.removeFirst() }
-        // The tools' history goes with a mask that is no longer kept.
-        for id in refined.keys where !masks.contains(where: { $0.id == id }) { refined[id] = nil }
+        if let old = spilled.removeValue(forKey: item.id) {
+            spillQueue.async { try? FileManager.default.removeItem(at: old.folder) }
+        }
+        evictClean()
         maskTick += 1
         item.localStamp += 1
+    }
+
+    private func frameItem(_ id: Int) -> FrameItem? {
+        frames.indices.contains(id) && frames[id].id == id ? frames[id] : frames.first { $0.id == id }
+    }
+
+    /// A mask that can be let go without losing anything: no tool operations, none waiting,
+    /// and no local adjustments.
+    private func isClean(_ id: Int) -> Bool {
+        (refined[id]?.ops.isEmpty ?? true) && toolJobsPending[id, default: 0] == 0 && waitingOps[id] == nil
+            && (frameItem(id)?.local.isNeutral ?? true)
+    }
+
+    /// The frames on screen: their masks stay in memory.
+    private var onScreen: Set<Int> {
+        var ids: Set<Int> = [selected]
+        for slot in slots { if let id = slot.frame { ids.insert(id) } }
+        return ids
+    }
+
+    private func evictClean() {
+        var i = 0
+        let shown = onScreen
+        while masks.count > Session.keptCleanMasks && i < masks.count {
+            let id = masks[i].id
+            if !shown.contains(id) && isClean(id) {
+                masks.remove(at: i)
+                refined[id] = nil
+                Log.note("mask", "\(frameItem(id)?.name ?? "frame \(id + 1)"): mask let go (no tool operations or local adjustments; Make Mask brings it back) · \(masks.count) kept in memory, \(spilled.count) on disk")
+            } else {
+                i += 1
+            }
+        }
+    }
+
+    private func toolDone(_ id: Int) {
+        let left = toolJobsPending[id, default: 1] - 1
+        toolJobsPending[id] = left > 0 ? left : nil
+    }
+
+    /// Under memory pressure: every mask not on screen is let go if clean, or written to disk.
+    /// It stays in memory until it is safely written, and is dropped only if nothing changed meanwhile.
+    private func spillKept(_ why: String) {
+        let shown = onScreen
+        for (id, mask) in masks where !shown.contains(id) {
+            if isClean(id) {
+                masks.removeAll { $0.id == id }
+                refined[id] = nil
+                Log.note("mask", "\(frameItem(id)?.name ?? "frame \(id + 1)"): mask let go (\(why); it had no tool operations or local adjustments)")
+                continue
+            }
+            guard let state = refined[id] else { continue }
+            let folder = MaskSpill.folder(for: id)
+            let opsCount = state.ops.count
+            let name = frameItem(id)?.name ?? "frame \(id + 1)"
+            spillQueue.async {
+                let started = CFAbsoluteTimeGetCurrent()
+                do {
+                    try MaskSpill.write(mask: mask, automatic: state.automatic, undos: state.undos, to: folder)
+                    let size = MemoryStats.plain(MaskSpill.size(of: folder))
+                    DispatchQueue.main.async {
+                        guard let at = self.masks.firstIndex(where: { $0.id == id }), self.masks[at].mask === mask,
+                              let now = self.refined[id], now.ops.count == opsCount, self.toolJobsPending[id] == nil, !self.onScreen.contains(id) else {
+                            Log.note("mask", "\(name): mask written to disk but kept in memory: it changed or came on screen meanwhile")
+                            self.spillQueue.async { try? FileManager.default.removeItem(at: folder) }
+                            return
+                        }
+                        self.masks.remove(at: at)
+                        self.refined[id] = nil
+                        self.spilled[id] = (folder, now.ops)
+                        Log.note("mask", "\(name): mask written to disk (\(why)) with \(opsCount) tool operation(s), \(size) in \(Log.seconds(since: started))")
+                    }
+                } catch {
+                    try? FileManager.default.removeItem(at: folder)
+                    Log.warn("\(name): mask couldn't be written to disk (\(error)); it stays in memory")
+                }
+            }
+        }
+    }
+
+    /// Makes sure a frame about to be shown has its mask: read back from disk, or made again
+    /// when it was lost and the frame has adjustments or tool operations that need it.
+    private func ensureMask(_ item: FrameItem) {
+        let id = item.id
+        if masks.contains(where: { $0.id == id }) { return }
+        if let entry = spilled[id] {
+            if reloading.contains(id) { return }
+            reloading.insert(id)
+            spillQueue.async {
+                let started = CFAbsoluteTimeGetCurrent()
+                let read = Result { try MaskSpill.read(entry.folder) }
+                DispatchQueue.main.async {
+                    self.reloading.remove(id)
+                    guard self.spilled[id]?.folder == entry.folder else { return }
+                    self.spilled[id] = nil
+                    self.spillQueue.async { try? FileManager.default.removeItem(at: entry.folder) }
+                    switch read {
+                    case let .success(back):
+                        self.refined[id] = (back.automatic, entry.ops, back.undos)
+                        self.keep(back.mask, for: item)
+                        Log.note("mask", "\(item.name): mask read back from disk with \(entry.ops.count) tool operation(s) in \(Log.seconds(since: started))")
+                        self.maskShown(item)
+                    case let .failure(error):
+                        Log.warn("\(item.name): the mask on disk couldn't be read (\(error)); it will be made again and its \(entry.ops.count) tool operation(s) done again")
+                        self.lostOps[id] = entry.ops
+                        self.remakeLost(item)
+                    }
+                }
+            }
+            return
+        }
+        if lostOps[id] != nil || !item.local.isNeutral { remakeLost(item) }
+    }
+
+    /// A frame with local adjustments or tool operations whose mask is gone: made again, and
+    /// its operations replayed. Only for the frame being edited (Make works on that one).
+    private func remakeLost(_ item: FrameItem) {
+        guard item.id == selected, !remaking.contains(item.id), making == nil else { return }
+        remaking.insert(item.id)
+        Log.note("mask", "\(item.name): its mask is gone though it has local adjustments or tool operations: making it again")
+        makeMask(fresh: false, trigger: "mask lost, made again")
+    }
+
+    /// A frame's mask came back: whatever shows it is drawn again.
+    private func maskShown(_ item: FrameItem) {
+        if item.id == selected {
+            if !maskBusy { maskStatus = currentMask?.summary }
+            toolChanged()
+        }
+        if item.id == selected && compare == nil {
+            renderTrigger = "mask read back"
+            refreshLocal(item)
+            return
+        }
+        for index in slots.indices where slots[index].frame == item.id { show(index, keepZoom: true) }
     }
 
     /// Writes the current frame's mask debug bundle next to the raw and shows it in the Finder.
@@ -1480,10 +1686,22 @@ final class Session: ObservableObject {
         let total = items.count
         exportStatus = "Exporting 0 / \(total)"
         let formats = self.formats
-        let jobs = items.map { item -> (url: URL, name: String, adjust: [String: Float], shot: ShotInfo?, local: LocalRender?) in
-            var local = localRender(for: item)
-            if local?.edits.isNeutral == true { local = nil }
-            return (item.url, item.name, item.adjust, item.info?.shot, local)
+        // A frame's local adjustments need its mask: in memory, else on disk, else made again
+        // (with its tool operations done again). They are never left out without a word.
+        struct MaskSource {
+            var spilled: URL?
+            var ops: [RefineOp]
+            var faces: DetectedFaces?
+        }
+        let tier = maskTier, settings = edgeSettings, rules = subjectRules, subject = subjectSource, options = refineOptions
+        let jobs = items.map { item -> (url: URL, name: String, adjust: [String: Float], shot: ShotInfo?, local: LocalRender?, edits: LocalEdits, needs: MaskSource?) in
+            if item.local.isNeutral || kind != .tiff { return (item.url, item.name, item.adjust, item.info?.shot, nil, item.local, nil) }
+            if let mask = masks.first(where: { $0.id == item.id })?.mask {
+                return (item.url, item.name, item.adjust, item.info?.shot, LocalRender(mask: mask, edits: item.local, view: .photo, area: .subject), item.local, nil)
+            }
+            let ops = spilled[item.id]?.ops ?? lostOps[item.id] ?? refined[item.id]?.ops ?? []
+            return (item.url, item.name, item.adjust, item.info?.shot, nil, item.local,
+                    MaskSource(spilled: spilled[item.id]?.folder, ops: ops, faces: faces[item.id]))
         }
         Log.note("export", "\(total) \(kind.noun)(s) requested")
         exportQueue.async {
@@ -1504,10 +1722,15 @@ final class Session: ObservableObject {
                 // Each export gives its memory back before the next one starts.
                 autoreleasepool {
                     do {
+                        var local = job.local
+                        if let source = job.needs {
+                            local = try self.maskForExport(job.url, job.name, edits: job.edits, source: source.spilled, ops: source.ops, faces: source.faces,
+                                                           tier: tier, settings: settings, rules: rules, subject: subject, options: options)
+                        }
                         let out: URL
                         switch kind {
                         case .jpeg: out = try Export.embeddedJpeg(job.url, formats)
-                        case .tiff: out = try Export.developedTiff(job.url, job.adjust, shot: job.shot, local: job.local)
+                        case .tiff: out = try Export.developedTiff(job.url, job.adjust, shot: job.shot, local: local)
                         }
                         saved.append(out)
                         let size = (try? out.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
@@ -1534,6 +1757,42 @@ final class Session: ObservableObject {
                 self.exportStatus = nil
                 self.say(summary)
             }
+        }
+    }
+
+    /// The mask a frame's local adjustments need for an export, when it isn't in memory: read
+    /// back from disk, or made again with its tool operations done again. Throws, with the
+    /// reason, if neither works: the frame is then not exported rather than exported without them.
+    private func maskForExport(_ url: URL, _ name: String, edits: LocalEdits, source: URL?, ops: [RefineOp], faces known: DetectedFaces?,
+                               tier: MatteTier, settings: MatteSettings, rules: SubjectRules, subject: SubjectSource,
+                               options: RefineOptions) throws -> LocalRender {
+        let started = CFAbsoluteTimeGetCurrent()
+        if let folder = source {
+            do {
+                let back = try MaskSpill.read(folder)
+                Log.note("mask", "\(name): mask read back from disk for the export in \(Log.seconds(since: started))")
+                return LocalRender(mask: back.mask, edits: edits, view: .photo, area: .subject)
+            } catch {
+                Log.warn("\(name): the mask on disk couldn't be read for the export (\(error)); making it again")
+            }
+        }
+        do {
+            // On the mask queue, one job at a time with the app's own mask work.
+            let mask: MaskResult = try maskQueue.sync {
+                let base = try Masking.make(url: url, tier: tier, faces: known, settings: settings, rules: rules, subject: subject,
+                                            progress: { _ in }, cancelled: { false })
+                var mask = base
+                for op in ops {
+                    mask = try Masking.refine(url: url, mask: mask, automatic: base, op: op, options: options, faces: known, rules: rules,
+                                              subject: subject, progress: { _ in }, partial: nil).mask
+                }
+                return mask
+            }
+            Log.note("mask", "\(name): mask made again for the export with \(ops.count) tool operation(s) done again, in \(Log.seconds(since: started))")
+            return LocalRender(mask: mask, edits: edits, view: .photo, area: .subject)
+        } catch {
+            Log.warn("\(name): not exported: it has local adjustments and its mask couldn't be made again (\(error))")
+            throw Masking.Failure("its local adjustments need its mask, which couldn't be made again (\(error))")
         }
     }
 
