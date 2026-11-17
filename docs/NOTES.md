@@ -847,11 +847,11 @@ the first, then export all four.
 
 **The automated build (alpha 17):** the Mac part first waited fifteen minutes for a Mac and
 was cancelled by GitHub (as with alpha 15); run again, the app compiled first time, all Mac
-tests passed (among them the box through the new limits taking out a 20 px rim of ground,
-and the pipeline with the hand pass, which finds no pose on made-up pictures and says so),
+tests passed (among them the box through the new limits taking out a 20 px rim of ground;
+the pipeline test runs with the hand pass off),
 and the app starts in the single, side-by-side and Edit views. Its log now names Core Image's
 working space: extended linear sRGB. The download is 820 MB. Not exercised by the build: the
-tools by hand, the hand pass on a real pose, writing masks to disk under memory pressure.
+tools by hand, the hand pass at all, writing masks to disk under memory pressure.
 
 ## Still to design
 
