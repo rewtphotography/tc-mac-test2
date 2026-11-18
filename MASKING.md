@@ -972,7 +972,7 @@ the owner's 6303 skin (113, 82, 72) and background (158, 202, 167)):
   alpha 21's handling; no background repaint. (g0) white on white: the same.
 - (q) black sleeve on dark grey (428 px gated: the grey is lighter), green on green: 0 px cut.
 - Soft 6-px ramp against bright green whose colours fit its coverage: 0 change.
-- (f) dark disc on white with lens blur, through the engine: 24 px cut, at most 1 of 255;
+- (f) dark disc on white with lens blur, through the engine: 50 px cut, at most 2 of 255;
   with the rule off, alpha identical to the switch off.
 - (v) switch off: section 18's hashes. All 136 core tests pass.
 - Mac (`RepaintRenderTests`): to follow from the build.
