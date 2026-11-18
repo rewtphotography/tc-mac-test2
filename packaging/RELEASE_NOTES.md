@@ -8,30 +8,20 @@ An alpha build of TrainCull for Mac (Apple silicon, macOS 15 or later).
    **Done**, then open **System Settings → Privacy & Security**, scroll down to the message
    about TrainCull and click **Open Anyway**. This is needed once for each new build.
 
-**New in this build: masking spec v6, and a fix for lost masks**
+**New in this build: the green, teal and yellow edge line, second try**
 
-- **Masks are no longer lost.** Until now only the last two photos kept their masks: a third
-  photo quietly dropped the first one's mask, its tool boxes and strokes, and its Subject /
-  Background / Skin adjustments stopped showing and were left out of its TIFF. Now a photo
-  with tools or adjustments keeps its mask until you close the folder, and an export either
-  includes its adjustments or says it couldn't.
-- **No green or teal line at hard edges** in Background −3 EV and On Black: at the edge the
-  subject keeps no light its own colour doesn't have. Debug: **Subject light bound**.
-- **Refine Edges refines the edge** and no longer re-decides the whole box: it only takes out
-  what is out of focus or plainly background, and the model sees more round a small box.
-  **Hold Shift** while dragging for the old behaviour.
-- **Refine Hair** has **Strength** and **Tightness** (raise Tightness to leave flyaways out).
-- **Edge Brush** replaces Clean Edge in the tool menu: paint along a hard edge (fingers, a
-  sleeve). Clean Edge is under Debug.
-- **Hands are refined automatically** when you click Make Mask. Debug: **Automatic hands**.
-- **The hair zone** is smaller and never covers hands or arms; the Zones view outlines it.
-  A photo with no face now gets its edges cleaned. Debug: **Ignore faces** to try that.
-- Small see-through spots inside the subject are filled solid.
-- A tool used while a mask is being remade now waits for it; the first Refine Hair stroke no
-  longer waits for the model to load.
+- In alpha 17 the **Subject light bound** ran but changed nothing you could see: it only
+  stopped an edge pixel being *brighter* than the subject, and the teal, olive and yellow
+  pixels were no brighter, just the wrong colour. Now the subject's part of each edge pixel
+  keeps the subject's own colour and is no lighter than it; the rest goes with the
+  background. Debug: **Subject light bound** (on), to compare.
+- A second cause of the teal line on 7451's black sleeve is fixed: one colour channel of the
+  edge was being set to nothing on its own.
+- The log's `light bound` line now says how many pixels were moved and by how much colour.
 
-Checked here only on made-up pictures: please try 6303, 7451 and 6957 with the base mask
-alone (Background −3 EV and On Black at 300%), a few boxes and strokes, and send the log.
+Please look at 7451 (sleeves, the skin in the arm–waist gap, the right waist) and 6303
+(fingers, cuff, sleeve) in **On Black** and **Background −3 EV** at 300%, base mask alone, and
+check that hair edges look the same as before. Then send the log.
 
 **The masking test:** open **Edit** and scroll to **Mask (Test)**. Click **Make Mask**.
 **Show** switches between the photo, a red overlay, the mask, On Black, On White,

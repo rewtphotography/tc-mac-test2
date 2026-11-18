@@ -940,8 +940,10 @@ extension Refine {
                         let a = Float(matted.alpha[i]) / 255
                         let t = tighten(a, tight)
                         matted.alpha[i] = UInt8((t * 255).rounded())
-                        let k = a > 0.004 ? t / a : 0
-                        for ch in 0 ..< 3 { matted.shares[i * 4 + ch] = UInt8(min(Float(matted.shares[i * 4 + ch]) * k, 255).rounded()) }
+                        // All three by the same factor, and never so far that one passes 255.
+                        let most = Float(max(matted.shares[i * 4], max(matted.shares[i * 4 + 1], matted.shares[i * 4 + 2])))
+                        let k = a > 0.004 ? min(t / a, 255 / max(most, 1)) : 0
+                        for ch in 0 ..< 3 { matted.shares[i * 4 + ch] = UInt8((Float(matted.shares[i * 4 + ch]) * k).rounded()) }
                     }
                 }
             }

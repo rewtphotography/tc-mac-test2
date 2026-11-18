@@ -853,6 +853,18 @@ and the app starts in the single, side-by-side and Edit views. Its log now names
 working space: extended linear sRGB. The download is 820 MB. Not exercised by the build: the
 tools by hand, the hand pass at all, writing masks to disk under memory pressure.
 
+## Alpha 18: the light bound reshaped
+
+The owner's alpha 17 log and debug bundle of 7451: the light bound ran (37,771 pixels) and
+changed nothing visible. Teal on the black sleeve, olive on the skin in the arm–waist gap,
+yellow on the right waist, none of them brighter than the subject in any channel. Built as
+the owner specified: the subject's part of each edge pixel held to the subject's colour in
+Oklab (lightness, then hue and chroma within 0.02), run last. The red share of exactly 0 on
+the sleeve was alpha 17's own handling of a negative fit channel (moved until it reached 0);
+it now gives one share to all three, and the two other per-channel steps found are gone.
+Details in `MASKING.md` section 17. Checked on synthetic discs (three new tests); not on the
+owner's photos, which this session doesn't have.
+
 ## Still to design
 
 The owner will share screenshots of how they use Bridge. Until then these are open: where

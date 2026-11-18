@@ -62,15 +62,11 @@ final class SpecV6Tests: XCTestCase {
         }
         let before = green(without), after = green(with)
         print("V6 light bound: green kept at the fringe \(before) → \(after) · \(with.log.filter { $0.hasPrefix("light bound") }.joined())")
-        XCTAssertGreaterThan(with.lightBounded, 50, "the bound lowered the fringe's shares")
+        XCTAssertGreaterThan(with.lightBounded, 50, "the bound moved the fringe's shares")
         XCTAssertGreaterThan(before, 0.01, "without the bound the subject keeps the fringe's green")
         XCTAssertLessThan(after, 0.7 * before, "the fringe's green goes with the background, down to the bound's tolerance")
         XCTAssertLessThan(after, 0.008)
         XCTAssertTrue(with.log.contains { $0.hasPrefix("light bound:") })
-        // Only ever lowers.
-        var raised = 0
-        for i in 0 ..< 200 * 200 * 4 where i % 4 != 3 && Int(with.shares[i]) > Int(without.shares[i]) + 1 { raised += 1 }
-        XCTAssertEqual(raised, 0)
         XCTAssertEqual(with.alpha, without.alpha, "the mask itself is the same")
         // Inside the subject nothing changes.
         XCTAssertEqual(with.shares[(100 * 200 + 100) * 4 + 1], 255)
@@ -95,16 +91,128 @@ final class SpecV6Tests: XCTestCase {
         XCTAssertEqual(each.max(), 1, accuracy: 1e-6)
         XCTAssertEqual(each.x / each.y, (0.5 / 0.25) / (0.2 / 0.3), accuracy: 1e-4, "the ratio between channels is kept")
         XCTAssertEqual(each.y / each.z, 2, accuracy: 1e-4)
-        // Below 0 in one channel: moved towards the single share just far enough.
+        // Below 0 in one channel: the fit doesn't explain the pixel, and one share serves all
+        // three (never a red share of 0 beside green and blue ones).
         let negative = Matte.unclipped(own: SIMD3(-0.06, 0.2, 0.2), pixel: SIMD3(0.3, 0.3, 0.3), together: 0.4)
-        XCTAssertEqual(negative.min(), 0, accuracy: 1e-5)
-        XCTAssertLessThan(negative.y, 0.2 / 0.3, "the others moved towards the single share too")
-        XCTAssertEqual(negative.y, negative.z, accuracy: 1e-6)
+        XCTAssertEqual(negative, SIMD3<Float>(repeating: 0.4))
         // A channel with no light of its own takes the single share instead of blowing the others away.
         let dark = Matte.unclipped(own: SIMD3(0.2, 0.1, 0.00001), pixel: SIMD3(0.4, 0.2, 0.0001), together: 0.5)
         XCTAssertEqual(dark.x, 0.5, accuracy: 1e-5)
         XCTAssertEqual(dark.y, 0.5, accuracy: 1e-5)
         XCTAssertEqual(dark.z, 0.5, accuracy: 1e-5)
+    }
+
+    // MARK: 1.1 as reshaped after alpha 17: the subject's part of an edge pixel keeps the subject's colour
+
+    /// A disc of `subject` on white with a one-pixel ring of `ring` just inside its edge,
+    /// where a lens's fringe lies on the owner's photos (alpha 255 there).
+    private func ringedDisc(subject: SIMD3<Float>, ring: SIMD3<Float>, size: Int = 200, radius: Float = 60) -> (photo: Photo, coarse: Gray) {
+        let c = Float(size) / 2
+        var px = [UInt8](repeating: 255, count: size * size * 4)
+        var truth = Gray(w: size, h: size)
+        let light = SIMD3<Float>(0.97, 0.97, 0.97)
+        for y in 0 ..< size {
+            for x in 0 ..< size {
+                let dx = Float(x) + 0.5 - c, dy = Float(y) + 0.5 - c
+                let r = (dx * dx + dy * dy).squareRoot()
+                let a = min(max(radius - r + 0.5, 0), 1)
+                truth.v[y * size + x] = a
+                var v = subject * a + light * (1 - a)
+                if r > radius - 1.4 && r <= radius - 0.4 { v = ring }
+                for ch in 0 ..< 3 { px[(y * size + x) * 4 + ch] = UInt8(min(max(v[ch], 0), 1) * 255 + 0.5) }
+            }
+        }
+        PlaneMath.boxBlur(&truth.v, w: size, h: size, radius: 2)
+        return (Photo(w: size, h: size, rowBytes: size * 4, px: px), truth)
+    }
+
+    /// The subject's part (pixel × shares, linear) of each ring pixel the mask covers, in Oklab.
+    private func portions(_ out: MatteOutput, _ photo: Photo, radius: Float = 60) -> [SIMD3<Float>] {
+        var list: [SIMD3<Float>] = []
+        let lin = Matte.toLinear.p
+        for y in 0 ..< photo.h {
+            for x in 0 ..< photo.w {
+                let dx = Float(x) + 0.5 - Float(photo.w) / 2, dy = Float(y) + 0.5 - Float(photo.h) / 2
+                let r = (dx * dx + dy * dy).squareRoot()
+                guard r > radius - 1.4 && r <= radius - 0.4, out.alpha[y * photo.w + x] >= 128 else { continue }
+                let o = (y * photo.w + x) * 4
+                let c = photo.rgb(x, y)
+                let I = SIMD3(lin[Int(c.x * 255)], lin[Int(c.y * 255)], lin[Int(c.z * 255)])
+                let s = SIMD3(Float(out.shares[o]), Float(out.shares[o + 1]), Float(out.shares[o + 2])) / 255
+                list.append(Oklab.from(linear: I * s))
+            }
+        }
+        return list
+    }
+
+    func testOklabRoundTrip() {
+        for c in [SIMD3<Float>(0.012, 0.012, 0.012), SIMD3(0.3, 0.1, 0.05), SIMD3(0.0, 0.2, 0.15), SIMD3(1, 1, 1)] {
+            let back = Oklab.toLinear(Oklab.from(linear: c))
+            XCTAssertEqual(back.x, c.x, accuracy: 1e-4); XCTAssertEqual(back.y, c.y, accuracy: 1e-4); XCTAssertEqual(back.z, c.z, accuracy: 1e-4)
+        }
+    }
+
+    /// (a) A dark neutral subject (0.012 linear) on white, with a teal edge pixel (red low,
+    /// green and blue high): the subject's part of it comes out neutral.
+    func testTealEdgeOfADarkNeutralSubjectComesOutNeutral() {
+        let dark = SIMD3<Float>(repeating: linearToSRGB(0.012))
+        let scene = ringedDisc(subject: dark, ring: SIMD3(0.04, 0.20, 0.17))
+        var off = MatteSettings()
+        off.lightBound = false
+        let with = Matte(photo: scene.photo, coarse: scene.coarse, faces: [farFace]).run(tier: .off)
+        let without = Matte(photo: scene.photo, coarse: scene.coarse, faces: [farFace], settings: off).run(tier: .off)
+        let after = portions(with, scene.photo), before = portions(without, scene.photo)
+        XCTAssertGreaterThan(after.count, 100)
+        let worstAfter = after.map { Oklab.chroma($0) }.max() ?? 1, worstBefore = before.map { Oklab.chroma($0) }.max() ?? 0
+        print("V6 teal: chroma of the subject's part, worst \(worstBefore) → \(worstAfter) · \(with.log.filter { $0.hasPrefix("light bound") }.joined())")
+        XCTAssertGreaterThan(worstBefore, 0.03, "without the rule the subject's part is teal")
+        XCTAssertLessThan(worstAfter, 0.025, "with it, neutral (within the rule's 0.02)")
+        XCTAssertTrue(with.log.contains { $0.contains("mean ΔE") })
+    }
+
+    /// (b) A skin subject on white with an olive edge pixel: the subject's part comes out skin-hued.
+    func testOliveEdgeOfSkinComesOutSkinHued() {
+        let skin = SIMD3<Float>(155, 113, 85) / 255
+        let scene = ringedDisc(subject: skin, ring: SIMD3<Float>(113, 107, 79) / 255)
+        let out = Matte(photo: scene.photo, coarse: scene.coarse, faces: [farFace]).run(tier: .off)
+        let F = Oklab.from(linear: SIMD3(srgbToLinear(skin.x), srgbToLinear(skin.y), srgbToLinear(skin.z)))
+        let olive = Oklab.from(linear: SIMD3(srgbToLinear(113 / 255), srgbToLinear(107 / 255), srgbToLinear(79 / 255)))
+        XCTAssertGreaterThan(Oklab.hueApart(olive, F), 30, "the ring really is another hue")
+        let after = portions(out, scene.photo)
+        XCTAssertGreaterThan(after.count, 100)
+        var worst: Float = 0
+        for p in after {
+            let r = min(p.x / F.x, 1.5)
+            let d = SIMD2(p.y - F.y * r, p.z - F.z * r)
+            worst = max(worst, (d * d).sum().squareRoot() - 0.02 * r)
+        }
+        print("V6 olive: worst (a, b) beyond the allowed distance from skin \(worst)")
+        XCTAssertLessThan(worst, 0.004, "the subject's part keeps the skin's hue and chroma")
+        for p in after where Oklab.chroma(p) > 0.02 { XCTAssertLessThan(Oklab.hueApart(p, F), 15) }
+    }
+
+    /// (c) No share vector ever has one channel at 0 while another is above 0.1, on any of
+    /// the scenes here, hair zone and colour-matting tiers included.
+    func testNoShareChannelIsZeroBesideAnother() {
+        var outs: [MatteOutput] = []
+        let dark = SIMD3<Float>(repeating: linearToSRGB(0.012))
+        for scene in [ringedDisc(subject: dark, ring: SIMD3(0.04, 0.20, 0.17)), ringedDisc(subject: SIMD3<Float>(155, 113, 85) / 255, ring: SIMD3<Float>(113, 107, 79) / 255), fringedDisc()] {
+            outs.append(Matte(photo: scene.photo, coarse: scene.coarse, faces: [farFace]).run(tier: .off))
+            outs.append(Matte(photo: scene.photo, coarse: scene.coarse, faces: []).run(tier: .off))
+        }
+        let hairy = Scene()
+        for tier in MatteTier.allCases { outs.append(Matte(photo: hairy.photo, coarse: hairy.coarse, faces: [hairy.face], settings: Scene.roomy).run(tier: tier)) }
+        var bad = 0, checked = 0
+        for out in outs {
+            for i in 0 ..< out.w * out.h {
+                let r = out.shares[i * 4], g = out.shares[i * 4 + 1], b = out.shares[i * 4 + 2]
+                let lo = min(r, min(g, b)), hi = max(r, max(g, b))
+                if hi > 0 { checked += 1 }
+                if lo == 0 && hi > 25 { bad += 1 }
+            }
+        }
+        print("V6 shares: \(bad) of \(checked) share vectors with a channel at 0 beside one over 0.1")
+        XCTAssertEqual(bad, 0)
     }
 
     // MARK: 1.2 The sRGB curve

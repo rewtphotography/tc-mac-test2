@@ -686,7 +686,44 @@ hands with no boxes; 6303's peace sign no worse; the time Make Mask gains on all
 in the Zones view: hand and sleeves outside the zone; 7473's window hair unchanged; a photo
 with Ignore faces on gets its edge cleaned.
 
+**The light bound reshaped (alpha 18).** On the owner's 7451 the first form lowered
+37,771 pixels and changed nothing visible: it held each channel's brightness, and the teal
+pixels on the black sleeve (0, 32, 28 through the shares, beside a sleeve of 29, 26, 25), the
+olive ones on the skin in the arm–waist gap and the yellow ones on the right waist were no
+brighter than the subject in any channel, only the wrong balance of channels. Its absolute
+tolerance (0.01 linear, about 25/255) was also as large as the sleeve itself. Now
+(`Matte.holdPortion`): the subject's part of the pixel, P = I × shares in linear light, is
+put in Oklab; its lightness is held to 1.1 × that of coverage × F plus 0.005
+(`portionLightness`, `portionLightnessPlus`), by scaling the Oklab vector (which keeps the
+hue); its (a, b) must lie within 0.02 (`portionHue`) of F's (a, b), both scaled by P's
+lightness over F's, and is moved to the nearest point within if not; out-of-gamut results
+are pulled back towards F at the same lightness until in; the new shares are P' ÷ I, scaled
+down together if one would pass 1. Fully covered pixels just inside the edge get it as far as
+the inner tail reaches. It still runs last, still not in the hair zone or under Refine Hair,
+still only with Decontamination on. Log: `light bound: N pixels moved towards the subject's
+colour, mean ΔE x`; JSON `light_bound_lowered` (the count) and `light_bound_mean_delta_e`.
+
+**The red share of 0** on the same sleeve came from 1.3 as built in alpha 17: when the colour
+fit put a channel below zero, all three were moved towards the single share only until that
+channel reached 0, leaving red at 0 beside green and blue. A negative channel now gives the
+single share to all three (the fit doesn't explain such a pixel). Every other path that
+writes shares was checked: the inner tail's "only take light away" step under 10% coverage
+took the smaller of each channel and now scales all three together; the colour-matting
+Tightness scaled and cut each channel at 255 and now never lets one pass; the guard's
+corrections, the fallback to plain coverage, `Refine.paste` and `restore` only blend whole
+vectors. A test runs eight scenes, hair tiers included, and finds no share vector with a
+channel at 0 beside one over 0.1.
+
+On synthetic discs: a teal ring inside a black (0.012) disc, the worst chroma of the subject's
+part 0.039 → 0.017; an olive ring inside a skin disc, every ring pixel's part within the
+allowed distance of the skin's (a, b); the green kept at a one-pixel fringe 0.0106 → 0.0038.
+
 **Known issues added by v6**
+- Within the inner tail's reach (a few pixels inside the edge), a subject whose colour
+  changes right at its edge (a patterned costume, a highlight) has its part held to the
+  colour read beside the edge: with the background darkened, that pattern or highlight
+  there can come out a little flatter or darker. Debug "Subject light bound" off to confirm;
+  then widen `portionHue` or raise `portionLightness`.
 - The light bound trusts the edge-local subject colour. Where that is wrong (a highlight on
   the subject brighter than its colour beside the edge, by more than the 15% tolerance), the
   bound darkens it once the background is darkened. Switch "Subject light bound" off to

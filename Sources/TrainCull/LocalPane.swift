@@ -100,7 +100,7 @@ struct LocalPane: View {
                         .help("The last check that no edge pixel comes out more colourful, or a different hue, than the photo has it")
                     Toggle("Subject light bound", isOn: $session.lightBound)
                         .controlSize(.small)
-                        .help("At an edge the subject keeps no light its own colour doesn't have: a green or teal fringe goes with the background. Needs Decontamination.")
+                        .help("At an edge the subject's part of each pixel keeps the subject's own colour and is no lighter than it: a green, teal or yellow fringe goes with the background. Needs Decontamination.")
                     Toggle("Automatic hands", isOn: $session.autoHands)
                         .controlSize(.small)
                         .help("Make Mask also refines each hand as a Refine Edges box would. Switching it remakes this photo's edge.")

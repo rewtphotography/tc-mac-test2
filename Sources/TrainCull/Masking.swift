@@ -994,7 +994,7 @@ enum Masking {
             fields["colour_guard_corrections"] = out.guardCorrections
             fields["lightness_corrections"] = out.lightnessCorrections
             fields["light_bound_lowered"] = out.lightBounded
-            fields["light_bound_mean_drop"] = Double(out.lightBoundDrop)
+            fields["light_bound_mean_delta_e"] = Double(out.lightBoundDeltaE)
             fields["hair_zone_from"] = out.hairZoneFrom
             fields["hand_passes"] = beforeHands.count
             Log.note("mask", "\(name): \(summary)", fields: fields)
