@@ -129,7 +129,16 @@ final class Session: ObservableObject {
     private var folderOpened = CFAbsoluteTimeGetCurrent()
     private var faces: [Int: DetectedFaces] = [:]
     private var chosenFace: [Int: Int] = [:]
-    private var rawCache: [(id: Int, values: [String: Float], image: CGImage)] = []
+    /// The render cache: at most this many bytes of finished pictures, least recently shown out
+    /// first. A 61-megapixel render is about 240 MB, so three of those fit, six of 33 megapixels.
+    static let renderCacheBytes = 900 << 20
+    private var rawCache = RenderCache<CGImage>(budget: Session.renderCacheBytes)
+    /// Frames whose camera settings have been written to the log this session.
+    private var introduced = Set<Int>()
+    /// What the user last did that calls for a new render, and how many draft requests arrived
+    /// while a draft was still being made.
+    private var renderTrigger = "selection"
+    private var draftsSkipped = 0
     private var fullSize: [Int: CGSize] = [:]
     private var editToken = 0
     private var valuesToken = 0
@@ -181,6 +190,12 @@ final class Session: ObservableObject {
         }
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             (self?.handleKey(event) ?? false) ? nil : event
+        }
+        MemoryMonitor.shared.cacheSummary = { [weak self] in
+            guard let self = self else { return nil }
+            defer { self.rawCache.evictions = 0 }
+            return "summary · render \(self.rawCache.count) / \(MemoryStats.plain(UInt64(self.rawCache.bytes))) of \(MemoryStats.plain(UInt64(Session.renderCacheBytes)))"
+                + " · evictions since the last summary \(self.rawCache.evictions)"
         }
         // For the automated build's launch check: open a folder straight away, and optionally
         // show its first two frames side by side.
@@ -272,7 +287,8 @@ final class Session: ObservableObject {
         frames = []
         faces = [:]
         chosenFace = [:]
-        rawCache = []
+        rawCache.removeAll()
+        introduced = []
         selected = 0
         clearSlots()
         pane = .thumbnails
@@ -319,9 +335,12 @@ final class Session: ObservableObject {
                     return
                 }
                 self.loadThumbnails(gen)
-                self.selectionChanged()
+                self.renderTrigger = "selection"
+                self.selectionChanged("programmatic (folder opened)")
                 self.show(0)
-                if UserDefaults.standard.bool(forKey: "TCCompare"), items.count > 1 { self.commandClick(1) }
+                if UserDefaults.standard.bool(forKey: "TCCompare"), items.count > 1 { self.commandClick(1, cause: "programmatic (launch check)") }
+                // For the automated build's launch check: Edit mode, to measure its memory.
+                if UserDefaults.standard.bool(forKey: "TCEdit") { self.setEditing(true, cause: "programmatic (launch check)") }
             }
         }
     }
@@ -388,7 +407,9 @@ final class Session: ObservableObject {
         }
         Log.note("filter", "\(new): \(visible.count) of \(frames.count) frames shown")
         // The side-by-side view keeps its two frames whatever the filter.
-        if compare == nil, !visible.contains(where: { $0.id == selected }), let first = visible.first { select(first.id) }
+        if compare == nil, !visible.contains(where: { $0.id == selected }), let first = visible.first {
+            select(first.id, cause: "programmatic (filter hid the selected frame)")
+        }
         reveal()
     }
 
@@ -467,11 +488,12 @@ final class Session: ObservableObject {
         }
     }
 
-    func select(_ index: Int) {
+    func select(_ index: Int, cause: String = "user.click") {
         guard compare == nil, frames.indices.contains(index), index != selected else { return }
         flushSave()
         selected = index
-        selectionChanged()
+        selectionChanged(cause)
+        renderTrigger = "selection"
         show(0)
     }
 
@@ -479,19 +501,21 @@ final class Session: ObservableObject {
     /// view only the active image moves, and it steps over the frame on the other side.
     func step(_ by: Int) {
         guard !visible.isEmpty else { return }
+        let cause = "user.key (\(by < 0 ? "←" : "→"))"
         if let pair = compare {
-            if let target = pair.stepTarget(by, in: visible.map { $0.id }) { setActiveFrame(target) }
+            if let target = pair.stepTarget(by, in: visible.map { $0.id }) { setActiveFrame(target, cause: cause) }
             return
         }
         guard let at = visible.firstIndex(where: { $0.id == selected }) else {
-            select(visible[0].id)
+            select(visible[0].id, cause: cause)
             return
         }
-        select(visible[min(max(at + by, 0), visible.count - 1)].id)
+        select(visible[min(max(at + by, 0), visible.count - 1)].id, cause: cause)
     }
 
-    /// The selected frame changed: the editing controls follow it.
-    private func selectionChanged() {
+    /// The selected frame changed: the editing controls follow it. `cause` says who changed it,
+    /// for the log: a click, a key, or the app itself (and then which part of it).
+    private func selectionChanged(_ cause: String) {
         editToken += 1
         valuesToken += 1
         guard let item = current else {
@@ -499,7 +523,13 @@ final class Session: ObservableObject {
             defaults = [:]
             return
         }
-        Log.note("select", "\(item.name) (\(item.id + 1) of \(frames.count))")
+        Log.note("select", "\(item.name) (\(item.id + 1) of \(frames.count)) · cause: \(cause)",
+                 fields: ["frame": item.name, "index": item.id + 1, "count": frames.count, "cause": cause])
+        // The camera settings, the first time a frame is selected.
+        if !introduced.contains(item.id), let shot = item.info?.shot {
+            introduced.insert(item.id)
+            Log.note("image", "\(item.name): \(shot.label())\(shot.lens.map { " · \($0)" } ?? "")")
+        }
         values = item.adjust
         defaults = [:]
         let token = valuesToken
@@ -526,11 +556,14 @@ final class Session: ObservableObject {
         let adjust = item.adjust
         let started = CFAbsoluteTimeGetCurrent()
 
-        if let cached = rawCache.first(where: { $0.id == id && $0.values == adjust }) {
-            view.show(cached.image, space: CGSize(width: cached.image.width, height: cached.image.height), newFrame: true, keepZoom: keepZoom)
+        switch rawCache.lookup(id, adjust) {
+        case let .hit(cached):
+            view.show(cached, space: CGSize(width: cached.width, height: cached.height), newFrame: true, keepZoom: keepZoom)
             setState(index, "Raw")
-            Log.note("image", "\(name): raw render reused")
+            Log.note("cache", "render \(name) · hit", fields: ["frame": name, "result": "hit"])
             return
+        case let .miss(why):
+            Log.note("cache", "render \(name) · miss: \(why.rawValue)", fields: ["frame": name, "result": "miss", "reason": why.rawValue])
         }
         if let t = item.thumb {
             view.show(t, space: CGSize(width: t.width, height: t.height), newFrame: true, keepZoom: keepZoom)
@@ -567,10 +600,19 @@ final class Session: ObservableObject {
                 DispatchQueue.main.sync { stillWanted = token == slot.token }
                 guard stillWanted else { return }
                 let rendering = CFAbsoluteTimeGetCurrent()
+                let meter = JobMeter()
                 let raw = Imaging.renderRaw(url, adjust)
                 let image = raw ?? Imaging.fullJpeg(url, formats)
+                let measured = meter.finish()
                 if let image = image {
-                    Log.note("image", "\(name): \(raw != nil ? "raw render" : "embedded JPEG (no raw render)") \(image.width)×\(image.height) in \(Log.seconds(since: rendering)), \(Log.seconds(since: started)) after selecting")
+                    var fields = measured.fields
+                    fields["frame"] = name
+                    fields["trigger"] = "selection"
+                    fields["width"] = image.width
+                    fields["height"] = image.height
+                    Log.note("image", "\(name): \(raw != nil ? "raw render" : "embedded JPEG (no raw render)") \(image.width)×\(image.height) in \(Log.seconds(since: rendering)), \(Log.seconds(since: started)) after selecting · trigger: selection",
+                             fields: fields)
+                    Log.note("job", "render \(name) · \(measured.text)", fields: fields)
                 } else {
                     Log.note("image", "\(name): neither the raw nor its embedded JPEG could be shown")
                 }
@@ -637,10 +679,10 @@ final class Session: ObservableObject {
 
     /// Command-click on a thumbnail: show it beside the current image, or, when already
     /// comparing, put it in place of the active image.
-    func commandClick(_ id: Int) {
+    func commandClick(_ id: Int, cause: String = "user.click (⌘)") {
         guard frames.indices.contains(id) else { return }
         if let pair = compare {
-            if id != pair.left && id != pair.right { setActiveFrame(id) }
+            if id != pair.left && id != pair.right { setActiveFrame(id, cause: cause) }
             return
         }
         guard current != nil, id != selected else { return }
@@ -651,28 +693,28 @@ final class Session: ObservableObject {
         slots[0].view?.fit(animated: false)
         compare = ComparePair(left: selected, right: id, active: .right)
         selected = id
-        selectionChanged()
+        selectionChanged("\(cause), side by side")
         // The right-hand view shows its frame as soon as the window has made it (`attach`).
         if slots[1].view != nil { show(1) }
     }
 
     /// Puts another frame on the active side.
-    private func setActiveFrame(_ id: Int) {
+    private func setActiveFrame(_ id: Int, cause: String) {
         guard var pair = compare, frames.indices.contains(id) else { return }
         pair.activeFrame = id
         compare = pair
         selected = id
-        selectionChanged()
+        selectionChanged(cause)
         // A zoomed image stays zoomed on the same spot, to step through a burst at one zoom.
         show(pair.active.rawValue, keepZoom: true)
     }
 
-    func setActiveSide(_ side: ComparePair.Side) {
+    func setActiveSide(_ side: ComparePair.Side, cause: String = "user.click (other image)") {
         guard var pair = compare, pair.active != side else { return }
         pair.active = side
         compare = pair
         selected = pair.activeFrame
-        selectionChanged()
+        selectionChanged(cause)
     }
 
     /// Back to the single view, which then shows the active image.
@@ -691,7 +733,7 @@ final class Session: ObservableObject {
         } else {
             slots[0].view?.fit(animated: false)
         }
-        selectionChanged()
+        selectionChanged("programmatic (left side by side)")
         reveal()
     }
 
@@ -748,15 +790,27 @@ final class Session: ObservableObject {
 
     /// The Edit button. Editing happens in the single view, so it leaves the side-by-side view first.
     func toggleEditing() {
-        if compare != nil { endCompare() }
-        editing.toggle()
-        Log.note("edit", editing ? "edit mode on" : "edit mode off")
+        setEditing(!editing, cause: "user.click")
+    }
+
+    private func setEditing(_ on: Bool, cause: String) {
+        guard on != editing else { return }
+        if on, compare != nil { endCompare() }
+        editing = on
+        Log.note("edit", "edit mode \(on ? "on" : "off") · cause: \(cause)")
+        // Entering Edit mode only swaps the thumbnails for sliders; this reading shows it costs nothing.
+        if on { MemoryMonitor.mark("entering Edit mode") }
     }
 
     private func cache(_ id: Int, _ values: [String: Float], _ image: CGImage) {
-        rawCache.removeAll { $0.id == id }
-        rawCache.append((id, values, image))
-        if rawCache.count > 3 { rawCache.removeFirst() }
+        let bytes = image.bytesPerRow * image.height
+        let out = rawCache.insert(id, values, image, bytes: bytes)
+        for gone in out {
+            let name = frames.indices.contains(gone.id) ? frames[gone.id].name : "frame \(gone.id + 1)"
+            Log.note("cache", "render \(name) evicted (LRU), \(MemoryStats.plain(UInt64(gone.bytes))) · kept \(rawCache.count) / "
+                + "\(MemoryStats.plain(UInt64(rawCache.bytes))) of \(MemoryStats.plain(UInt64(Session.renderCacheBytes)))",
+                fields: ["frame": name, "bytes": gone.bytes, "kept": rawCache.count, "kept_bytes": rawCache.bytes])
+        }
         fullSize[id] = CGSize(width: image.width, height: image.height)
     }
 
@@ -767,6 +821,7 @@ final class Session: ObservableObject {
 
     func setValue(_ control: Control, _ new: Float) {
         guard let item = current else { return }
+        renderTrigger = "\(control.title) drag"
         let span = control.range.upperBound - control.range.lowerBound
         if let d = defaults[control.key], abs(d - new) <= span * 0.0005 {
             values[control.key] = nil
@@ -778,12 +833,14 @@ final class Session: ObservableObject {
 
     func reset(_ control: Control) {
         guard let item = current, values[control.key] != nil else { return }
+        renderTrigger = "\(control.title) reset"
         values[control.key] = nil
         edited(item)
     }
 
     func resetAll() {
         guard let item = current, !values.isEmpty else { return }
+        renderTrigger = "reset all"
         values = [:]
         edited(item)
     }
@@ -794,18 +851,36 @@ final class Session: ObservableObject {
         startDraft()
         let token = editToken
         let frame = heroToken
-        let url = item.url, id = item.id, adjust = item.adjust
+        let url = item.url, id = item.id, adjust = item.adjust, name = item.name
+        let trigger = renderTrigger
         // The full-size render waits until the sliders have been still for a moment.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
             guard token == self.editToken, frame == self.heroToken else { return }
             self.rawQueue.async {
                 var wanted = false
                 DispatchQueue.main.sync { wanted = token == self.editToken && frame == self.heroToken }
-                guard wanted, let image = Imaging.renderRaw(url, adjust) else { return }
+                guard wanted else { return }
+                let meter = JobMeter()
+                let rendered = Imaging.renderRaw(url, adjust)
+                let measured = meter.finish()
+                guard let image = rendered else {
+                    Log.warn("\(name): the full render after an edit failed · trigger: \(trigger)")
+                    return
+                }
+                var fields = measured.fields
+                fields["frame"] = name
+                fields["trigger"] = trigger
+                fields["width"] = image.width
+                fields["height"] = image.height
+                Log.note("image", "\(name): render \(image.width)×\(image.height) (full) · trigger: \(trigger)", fields: fields)
+                Log.note("job", "render \(name) · \(measured.text)", fields: fields)
+                MemoryMonitor.mark("a full render of \(name)")
                 DispatchQueue.main.async {
                     self.cache(id, adjust, image)
                     guard token == self.editToken, frame == self.heroToken else { return }
                     self.hero?.show(image, space: CGSize(width: image.width, height: image.height), newFrame: false)
+                    // The image is the raw itself again, even if the edit came before the first render.
+                    self.setState(0, "Raw")
                 }
             }
         }
@@ -818,8 +893,13 @@ final class Session: ObservableObject {
     /// A quick, smaller render for live feedback. One runs at a time; when it finishes and the
     /// sliders have moved on, the next one starts from the latest values.
     private func startDraft() {
+        if draftBusy { draftsSkipped += 1 }
         guard !draftBusy, let item = current, let hero = hero else { return }
         draftBusy = true
+        let coalesced = draftsSkipped
+        draftsSkipped = 0
+        let trigger = renderTrigger
+        let drafting = CFAbsoluteTimeGetCurrent()
         let token = editToken
         let frame = heroToken
         let url = item.url, adjust = item.adjust
@@ -831,6 +911,12 @@ final class Session: ObservableObject {
         }
         draftQueue.async {
             let image = Imaging.renderRaw(url, adjust, scale: scale)
+            if let image = image {
+                Log.debug("image", "\(item.name): draft \(image.width)×\(image.height) (view, scale \(String(format: "%.2f", scale)))"
+                    + " · trigger: \(trigger) · coalesced \(coalesced) · wall \(Log.seconds(since: drafting))",
+                    fields: ["frame": item.name, "trigger": trigger, "coalesced": coalesced, "scale": Double(scale),
+                             "seconds": CFAbsoluteTimeGetCurrent() - drafting])
+            }
             DispatchQueue.main.async {
                 self.draftBusy = false
                 guard frame == self.heroToken else { return }
@@ -922,6 +1008,7 @@ final class Session: ObservableObject {
                     break
                 }
                 let start = CFAbsoluteTimeGetCurrent()
+                let meter = JobMeter()
                 // Each export gives its memory back before the next one starts.
                 autoreleasepool {
                     do {
@@ -933,9 +1020,16 @@ final class Session: ObservableObject {
                         saved.append(out)
                         let size = (try? out.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
                         Log.note("export", "\(job.name) → \(out.lastPathComponent), \(MemoryStats.plain(UInt64(size))), \(Log.seconds(since: start))")
+                        let measured = meter.finish()
+                        var fields = measured.fields
+                        fields["frame"] = job.name
+                        fields["kind"] = kind.noun
+                        fields["file_bytes"] = size
+                        Log.note("job", "export \(job.name) (\(kind.noun)) · \(measured.text)", fields: fields)
                     } catch {
                         failures += 1
                         lastError = "\(error)"
+                        _ = meter.finish()
                         Log.note("export", "\(job.name) failed: \(error)")
                     }
                 }
@@ -1080,7 +1174,7 @@ final class Session: ObservableObject {
             }
             return false
         case 48: // tab: the other image when comparing, else the next face
-            if let pair = compare { setActiveSide(pair.active.other) } else { nextFace() }
+            if let pair = compare { setActiveSide(pair.active.other, cause: "user.key (tab)") } else { nextFace() }
             return true
         case 49: NSApp.keyWindow?.toggleFullScreen(nil); return true // space
         default: break

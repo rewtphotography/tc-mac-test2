@@ -46,7 +46,7 @@ final class HeroNSView: NSView {
     /// Called after a click or a pinch here changed the zoom, so the image beside this one can follow.
     var onUserZoom: ((UserZoom) -> Void)?
 
-    static let maxZoom: CGFloat = 2 // 200%
+    static let maxZoom: CGFloat = 4 // 400%
     static let deadZone = 0.05
 
     override var acceptsFirstResponder: Bool { true }
@@ -298,7 +298,7 @@ final class HeroNSView: NSView {
         needsDisplay = true
     }
 
-    /// Pinch zooms about the pointer, between fit and 200%.
+    /// Pinch zooms about the pointer, between fit and 400%.
     override func magnify(with event: NSEvent) {
         guard image != nil, space.width > 0 else { return }
         stopGlide()

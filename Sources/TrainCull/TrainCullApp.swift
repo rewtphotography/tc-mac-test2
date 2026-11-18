@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 @main
@@ -9,6 +10,15 @@ struct TrainCullApp: App {
             ContentView(session: session)
         }
         .commands {
+            // The About panel gives the alpha as well as the version.
+            CommandGroup(replacing: .appInfo) {
+                Button("About TrainCull") {
+                    NSApplication.shared.orderFrontStandardAboutPanel(options: [
+                        .applicationVersion: releaseName,
+                        .version: "build \(buildNumber)",
+                    ])
+                }
+            }
             CommandGroup(replacing: .newItem) {
                 Button("Open Folder…") { session.pickFolder() }
                     .keyboardShortcut("o", modifiers: .command)

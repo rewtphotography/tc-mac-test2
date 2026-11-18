@@ -516,12 +516,17 @@ struct CompareControls: View {
     }
 }
 
-var appVersion: String {
+/// "0.2.0 alpha 1": the version and the alpha it is.
+var releaseName: String {
     let info = Bundle.main.infoDictionary
-    let version = info?["CFBundleShortVersionString"] as? String ?? "0.1.0"
-    let build = info?["CFBundleVersion"] as? String ?? "dev"
-    return "TrainCull \(version) alpha \(build)"
+    if let name = info?["TCReleaseName"] as? String { return name }
+    return "\(info?["CFBundleShortVersionString"] as? String ?? "0.2.0") (not a release build)"
 }
+
+/// The build number, which goes up with every automated build.
+var buildNumber: String { Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "dev" }
+
+var appVersion: String { "TrainCull \(releaseName) (build \(buildNumber))" }
 
 struct Welcome: View {
     @ObservedObject var session: Session
