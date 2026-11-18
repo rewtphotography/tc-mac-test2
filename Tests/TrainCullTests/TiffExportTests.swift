@@ -99,7 +99,8 @@ final class TiffExportTests: XCTestCase {
             let out = Matte(photo: photo, coarse: rough, faces: [PixelRect(x: 2, y: 2, w: 8, h: 8)], settings: settings).run(tier: .off)
             let alpha = try XCTUnwrap(Masking.picture(gray: out.alpha, w: w, h: h))
             let made = MaskResult(width: w, height: h, alpha: alpha, shares: try XCTUnwrap(Masking.picture(rgbx: out.shares, w: w, h: h)), skin: nil,
-                                  trimap: alpha, coarse: alpha, tier: .off, summary: "")
+                                  trimap: alpha, coarse: alpha, tier: .off, summary: "",
+                                  repaint: try out.repaint.map { try XCTUnwrap(Masking.picture(rgbx: $0, w: w, h: h)) })
             return (made, Data(out.shares))
         }
         var on = MatteSettings()

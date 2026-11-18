@@ -65,6 +65,8 @@ struct RefineUndo {
     let rect: PixelRect
     let alpha: [UInt8]
     let shares: [UInt8]
+    /// The edge repaint there (spec v7.1), when the mask had one.
+    var repaint: [UInt8]? = nil
 }
 
 /// The settings the tools run with.
@@ -130,12 +132,28 @@ extension Masking {
     }
 
     /// A mask with new alpha and shares, everything else as it was.
-    private static func rebuilt(_ mask: MaskResult, alpha: [UInt8], shares: [UInt8], summary: String) throws -> MaskResult {
+    private static func rebuilt(_ mask: MaskResult, alpha: [UInt8], shares: [UInt8], repaint: [UInt8]?, summary: String) throws -> MaskResult {
         guard let a = picture(gray: alpha, w: mask.width, h: mask.height), let s = picture(rgbx: shares, w: mask.width, h: mask.height) else {
             throw Failure("the mask couldn't be stored")
         }
+        var r: CGImage?
+        if let repaint = repaint {
+            guard let made = picture(rgbx: repaint, w: mask.width, h: mask.height) else { throw Failure("the edge repaint couldn't be stored") }
+            r = made
+        }
         return MaskResult(width: mask.width, height: mask.height, alpha: a, shares: s, skin: mask.skin, trimap: mask.trimap, coarse: mask.coarse,
-                          debug: mask.debug, tier: mask.tier, edge: mask.edge, summary: summary)
+                          debug: mask.debug, tier: mask.tier, edge: mask.edge, summary: summary, repaint: r)
+    }
+
+    /// Copies a mask's repaint map from `source` into `map` wherever `weight` > 0 (blank where
+    /// `source` has none).
+    private static func copyRepaint(from source: [UInt8]?, weight: Gray, at patch: PixelRect, map: inout [UInt8], width W: Int) {
+        for y in 0 ..< patch.h {
+            for x in 0 ..< patch.w where weight.v[y * patch.w + x] > 0 {
+                let o = ((patch.y + y) * W + patch.x + x) * 4
+                for ch in 0 ..< 4 { map[o + ch] = source?[o + ch] ?? (ch == 2 ? 0 : ch == 3 ? 255 : 128) }
+            }
+        }
     }
 
     /// Applies one tool operation to a frame's mask. `automatic` is the mask as Make Mask left
@@ -162,6 +180,10 @@ extension Masking {
                                     skin: options.settings.insideColour ? skinModel(found, photo: photo) : nil)
 
         var alpha = alpha0, shares = shares0
+        // The edge repaint (spec v7.1): worked out again wherever a box acted, cleared under strokes.
+        let map0: [UInt8]? = mask.repaint.flatMap { bytes(of: $0, count: W * H * 4) }
+        if mask.repaint != nil && map0 == nil { Log.warn("\(name): the mask's edge repaint couldn't be read; it is dropped") }
+        var map = map0
         var touched: PixelRect?
         var notes: [String] = []
         var changed = 0, corrections = 0
@@ -171,12 +193,22 @@ extension Masking {
             alpha = alpha0
             shares = shares0
             changed = Refine.paste(result.output, at: result.patch, weight: result.weight, alpha: &alpha, shares: &shares, width: W)
+            map = map0
+            if let patchMap = result.output.repaint {
+                var full = map ?? Repaint.blank(count: W * H)
+                let laid = Refine.pasteRepaint(patchMap, at: result.patch, weight: result.weight, map: &full, width: W)
+                map = full
+                if let stats = result.output.repaintStats { Log.note("tool", "\(name): edge repaint laid in over \(laid) px · \(stats.summary)") }
+            } else if var full = map {
+                Refine.clearRepaint(weight: result.weight, at: result.patch, map: &full, width: W)
+                map = full
+            }
             corrections = result.output.guardCorrections
             touched = union(touched, result.patch)
             notes = result.log
         }
         func show(_ what: String) {
-            guard let partial = partial, let quick = try? rebuilt(mask, alpha: alpha, shares: shares, summary: "\(op.tool.name): \(what)…") else { return }
+            guard let partial = partial, let quick = try? rebuilt(mask, alpha: alpha, shares: shares, repaint: map, summary: "\(op.tool.name): \(what)…") else { return }
             partial(quick)
         }
 
@@ -196,6 +228,12 @@ extension Masking {
                 throw Failure("nothing was drawn")
             }
             changed = Refine.restore(weight: weight, at: area, baseAlpha: baseAlpha, baseShares: baseShares, alpha: &alpha, shares: &shares, width: W)
+            let baseMap = automatic.repaint.flatMap { bytes(of: $0, count: W * H * 4) }
+            if map != nil || baseMap != nil {
+                var full = map ?? Repaint.blank(count: W * H)
+                copyRepaint(from: baseMap, weight: weight, at: area, map: &full, width: W)
+                map = full
+            }
             touched = area
             method = "\(op.tool.name), restore"
             notes = ["the automatic mask put back"]
@@ -290,20 +328,22 @@ extension Masking {
                 guard let box = op.box else { throw Failure("no box was drawn") }
                 guard !op.samples.isEmpty else { throw Failure("no colour was picked: click the colour to remove first") }
                 progress("Removing the colour")
-                lay(Refine.removeColour(box: box, samples: op.samples, tolerance: op.tolerance, alpha: alpha0, shares: shares0, context: context))
+                lay(Refine.removeColour(box: box, samples: op.samples, tolerance: op.tolerance, alpha: alpha0, shares: shares0, repaint: map0,
+                                        context: context))
             case .none:
                 throw Failure("no tool is chosen")
             }
         }
         guard let rect = touched else { throw Failure("nothing was changed") }
-        let undo = RefineUndo(rect: rect, alpha: region(alpha0, width: W, rect, channels: 1), shares: region(shares0, width: W, rect, channels: 4))
+        let undo = RefineUndo(rect: rect, alpha: region(alpha0, width: W, rect, channels: 1), shares: region(shares0, width: W, rect, channels: 4),
+                              repaint: map0.map { region($0, width: W, rect, channels: 4) })
         let seconds = CFAbsoluteTimeGetCurrent() - started
         let summary = "\(method): \(changed) px changed in \(String(format: "%.2f", locale: Locale(identifier: "en_US_POSIX"), seconds)) s"
             + (corrections > 0 ? " · colour guard put \(corrections) px back" : "")
         Log.note("tool", "\(name): \(summary) · \(notes.joined(separator: " · "))",
                  fields: ["image": name, "tool": op.tool.rawValue, "method": method, "restore": op.restore, "pixels_changed": changed,
                           "colour_guard_corrections": corrections, "seconds": seconds])
-        return (try rebuilt(mask, alpha: alpha, shares: shares, summary: summary), undo)
+        return (try rebuilt(mask, alpha: alpha, shares: shares, repaint: map, summary: summary), undo)
     }
 
     /// A mask with one operation taken back.
@@ -312,12 +352,23 @@ extension Masking {
         guard var alpha = bytes(of: mask.alpha, count: W * H), var shares = bytes(of: mask.shares, count: W * H * 4) else {
             throw Failure("the mask couldn't be read")
         }
+        var map: [UInt8]? = mask.repaint.flatMap { bytes(of: $0, count: W * H * 4) }
+        if map == nil, undo.repaint != nil { map = Repaint.blank(count: W * H) }
+        let blankRow = Repaint.blank(count: undo.rect.w)
         let r = undo.rect
         for y in 0 ..< r.h {
             let to = (r.y + y) * W + r.x
             alpha.replaceSubrange(to ..< to + r.w, with: undo.alpha[y * r.w ..< (y + 1) * r.w])
             shares.replaceSubrange(to * 4 ..< (to + r.w) * 4, with: undo.shares[y * r.w * 4 ..< (y + 1) * r.w * 4])
+            if map != nil {
+                // Put back the repaint as it was, or none where the mask had none.
+                if let before = undo.repaint {
+                    map!.replaceSubrange(to * 4 ..< (to + r.w) * 4, with: before[y * r.w * 4 ..< (y + 1) * r.w * 4])
+                } else {
+                    map!.replaceSubrange(to * 4 ..< (to + r.w) * 4, with: blankRow)
+                }
+            }
         }
-        return try rebuilt(mask, alpha: alpha, shares: shares, summary: "Undone")
+        return try rebuilt(mask, alpha: alpha, shares: shares, repaint: map, summary: "Undone")
     }
 }

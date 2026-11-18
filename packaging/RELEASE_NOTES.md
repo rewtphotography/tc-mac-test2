@@ -8,24 +8,24 @@ An alpha build of TrainCull for Mac (Apple silicon, macOS 15 or later).
    **Done**, then open **System Settings → Privacy & Security**, scroll down to the message
    about TrainCull and click **Open Anyway**. This is needed once for each new build.
 
-**New in this build: back to alpha 16, plus two colour tools (masking spec v7)**
+**New in this build: the edge repainted from inside (masking spec v7.1)**
 
-- **Everything from alphas 17 and 18 is gone.** Masks, Refine Edges and the tool menu are
-  alpha 16's again. That includes the fix for lost masks: once more, only the last two
-  photos keep their masks, tool edits and Subject / Background / Skin adjustments.
-- **Edge colour from inside** (automatic): each edge pixel's colour is taken from the solid
-  subject just inside it, as Photoshop's Decontaminate Colors does. Aimed at the teal on
-  7451's sleeve, the olive on its skin in the arm–waist gap, and the green on 6303's peace
-  sign. Rim light (an edge brighter than the inside) is left alone. Debug: **Edge colour from
-  inside** (on).
-- **Remove Colour** (tool menu): click the background colour the mask took in (Shift-click
-  to add more), then drag a box over the place. Only the edge, up to 40 px in, is touched.
-  **Tolerance** sets how close a colour must be; moving it redoes the last box.
+- **No dark line at recoloured edges.** Where Edge colour from inside acts, the subject's
+  adjustments now start from the subject's own colour taken from just inside (feathered over
+  about 2 px, so no seam) instead of the fringe's. The background's adjustments still use the
+  photo. Everywhere else, hair and soft edges included, edits look exactly as in alpha 16.
+  With no adjustments the photo is shown untouched. TIFF export uses the same picture.
+- **Specks:** a bright group smaller than 40 px is no longer kept as rim light; only real rims
+  along the outline are. The inside colour is now looked for up to 60 px away (was 30).
+- **Remove Colour** now takes out a picked colour anywhere in the box (enclosed patches
+  included), never refills a removed spot, and fades out over twice the tolerance instead of
+  stopping sharply, so no stair-steps.
 
-Please check, at 300% in On Black and Background −3 EV: 7451's sleeve and the skin in the
-gap; 6303's fingers, cuff and sleeve (no green, no small squares); 6957 with a box over the
-fingers and the gap, as in alpha 16; 6372 with the orange wall picked and a box round the
-rose; and that hair on 7006 and 7473 looks as in alpha 16. Then send the log.
+Please check, at 300%: 7451 with Subject +3 and Background −3 (sleeve edge: no dark line,
+teal, seam, specks or bright notch); 6303 with Subject +1.5 (no dark hairline round the
+fingers) and a Remove Colour box in the thumb corner; 6372 with the orange picked and your
+earlier box round the rose (the enclosed patch and the specks should go; the slider controls
+petal loss); 6957's box, and hair on 7006 and 7473, as before. Then send the log.
 
 **The masking test:** open **Edit** and scroll to **Mask (Test)**. Click **Make Mask**.
 **Show** switches between the photo, a red overlay, the mask, On Black, On White,

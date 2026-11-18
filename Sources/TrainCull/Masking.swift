@@ -105,13 +105,17 @@ final class MaskResult {
     let tier: MatteTier
     let edge: EdgeQuality
     let summary: String
+    /// The edge repaint (spec v7.1): per pixel, the offset to the solid subject pixel whose
+    /// colour the subject side takes (red, green: offset + 128, photo px, y down) and how much
+    /// (blue: w × 255). Nil when "Edge colour from inside" is off; then nothing is repainted.
+    let repaint: CGImage?
 
     init(width: Int, height: Int, alpha: CGImage, shares: CGImage, skin: CGImage?, trimap: CGImage, coarse: CGImage, debug: CGImage? = nil,
-         tier: MatteTier, edge: EdgeQuality = EdgeQuality(), summary: String) {
+         tier: MatteTier, edge: EdgeQuality = EdgeQuality(), summary: String, repaint: CGImage? = nil) {
         self.width = width; self.height = height
         self.alpha = alpha; self.shares = shares; self.skin = skin
         self.trimap = trimap; self.coarse = coarse; self.debug = debug
-        self.tier = tier; self.edge = edge; self.summary = summary
+        self.tier = tier; self.edge = edge; self.summary = summary; self.repaint = repaint
     }
 
     func picture(for area: LocalArea) -> CGImage? { area == .skin ? skin : shares }
@@ -893,18 +897,26 @@ enum Masking {
                                               ("first_pass_edge_width", out.edgeOffsetBefore.maskWidth), ("first_pass_pixel", base.firstPassPixel)]
             for (key, value) in placed { if let value = value { fields[key] = Double(value) } }
             fields["edge_points_measured"] = out.edgeOffset.measured
-            if let inside = out.insideColourStats {
-                fields["inside_colour_recoloured"] = inside.recoloured
-                fields["inside_colour_rim"] = inside.rim
+            if let inside = out.repaintStats {
+                fields["inside_colour_core"] = inside.core
+                fields["inside_colour_feathered"] = inside.feathered
+                fields["inside_colour_rim_kept"] = inside.rimKept
+                fields["inside_colour_rim_runs"] = inside.rimRuns
+                fields["inside_colour_specks"] = inside.specks
+                fields["inside_colour_speck_pixels"] = inside.speckPixels
                 fields["inside_colour_unknown"] = inside.unknown
-                fields["inside_colour_delta_e"] = Double(inside.meanDeltaE)
             }
             fields["colour_guard_corrections"] = out.guardCorrections
             fields["lightness_corrections"] = out.lightnessCorrections
             Log.note("mask", "\(name): \(summary)", fields: fields)
         }
+        var repaint: CGImage?
+        if let map = out.repaint {
+            guard let made = picture(rgbx: map, w: W, h: H) else { throw Failure("the edge repaint couldn't be stored") }
+            repaint = made
+        }
         return MaskResult(width: W, height: H, alpha: alpha, shares: shares, skin: skin, trimap: trimap, coarse: rough,
-                          debug: overlay(out, base: base), tier: tier, edge: out.edgeQuality, summary: summary)
+                          debug: overlay(out, base: base), tier: tier, edge: out.edgeQuality, summary: summary, repaint: repaint)
     }
 
     /// A see-through picture of what was done where, a quarter of the photo's size: the hair
@@ -1043,6 +1055,10 @@ enum Masking {
         try write(found.selected.flatMap { png($0) }, "m0_birefnet.png")
         try write(png(found.coarse), "m0_final.png")
         try write(mask.flatMap { png($0.alpha) }, "final_alpha.png")
+        // The edge repaint's weight w (spec v7.1), when the mask has one.
+        if let r = mask?.repaint, let map = bytes(of: r, count: r.width * r.height * 4) {
+            try write(picture(gray: stride(from: 2, to: map.count, by: 4).map { map[$0] }, w: r.width, h: r.height).flatMap { png($0) }, "repaint_weight.png")
+        }
         if let dense = found.ranking.sharpness?.dense {
             try write(png(Gray(w: dense.w, h: dense.h, v: dense.v.map { $0 / SharpnessMap.most })), "sharpness.png")
         }
@@ -1211,6 +1227,45 @@ enum Masking {
         return out
     }
 
+    /// The edge repaint (spec v7.1): `here` with each repainted pixel's colour moved towards
+    /// that of the solid subject pixel its map points to (3×3 median of `there`), by w.
+    private static let repaintKernel = CIKernel(source: """
+    kernel vec4 repaintEdge(sampler here, sampler there, sampler map, float k) {
+        vec4 m = sample(map, samplerCoord(map));
+        vec4 h = sample(here, samplerCoord(here));
+        vec2 off = (m.rg * 255.0 - 128.0) * k;
+        vec4 t = sample(there, samplerTransform(there, destCoord() + vec2(off.x, -off.y)));
+        return vec4(mix(h.rgb, t.rgb, m.b), h.a);
+    }
+    """)
+
+    /// The repaint's w, as a grey mask in all three channels.
+    private static func repaintWeight(_ map: CGImage, over extent: CGRect) -> CIImage {
+        data(map, over: extent).applyingFilter("CIColorMatrix", parameters: [
+            "inputRVector": CIVector(x: 0, y: 0, z: 1, w: 0), "inputGVector": CIVector(x: 0, y: 0, z: 1, w: 0),
+            "inputBVector": CIVector(x: 0, y: 0, z: 1, w: 0), "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 1),
+        ])
+    }
+
+    /// `image` with the edge repainted from inside: C = mix(image, inside colour, w). Nil when
+    /// the mask carries no repaint or the kernel can't be made.
+    static func repainted(_ image: CIImage, map: CGImage?, extent: CGRect) -> CIImage? {
+        guard let map = map, let kernel = repaintKernel else { return nil }
+        // The offsets are read exactly, never blended between neighbours.
+        let sx = extent.width / CGFloat(map.width), sy = extent.height / CGFloat(map.height)
+        let offsets = CIImage(cgImage: map, options: [.colorSpace: NSNull()]).samplingNearest()
+            .transformed(by: CGAffineTransform(scaleX: sx, y: sy))
+            .transformed(by: CGAffineTransform(translationX: extent.minX, y: extent.minY))
+            .cropped(to: extent)
+        let there = image.clampedToExtent().applyingFilter("CIMedianFilter").cropped(to: extent)
+        // The farthest a map can point: 127 photo px, at this image's scale.
+        let reach = 128 * max(sx, sy) + 2
+        let out = kernel.apply(extent: extent, roiCallback: { index, rect in
+            index == 1 ? rect.insetBy(dx: -reach, dy: -reach) : rect
+        }, arguments: [image, there, offsets, Float(sx)])
+        return out?.cropped(to: extent)
+    }
+
     /// Applies a frame's local adjustments, and the chosen way of looking at the mask, to a
     /// developed image.
     static func apply(_ local: LocalRender, to image: CIImage, extent: CGRect) -> CIImage {
@@ -1228,6 +1283,24 @@ enum Masking {
             out = mix(adjust(out, local.edits.layers[area.rawValue]), out, mask: mask, extent: extent)
         }
 
+        // Spec v7.1, 1.4 and the owner's change: where the edge is repainted, the subject side
+        // takes its edit from the clean colour C and the background side from the photo, in one
+        // blend; that blend is weighted in by w, so wherever w = 0 the result above stands exactly.
+        let clean = repainted(image, map: local.mask.repaint, extent: extent)
+        let subjectEdit = local.edits.layers[LocalArea.subject.rawValue], backgroundEdit = local.edits.layers[LocalArea.background.rawValue]
+        if let clean = clean, let map = local.mask.repaint, !(subjectEdit.isNeutral && backgroundEdit.isNeutral) {
+            let subjectSide = subjectEdit.isNeutral ? clean : adjust(clean, subjectEdit)
+            let backgroundSide = backgroundEdit.isNeutral ? image : adjust(image, backgroundEdit)
+            var single = mix(subjectSide, backgroundSide, mask: shares, extent: extent)
+            let skinEdit = local.edits.layers[LocalArea.skin.rawValue]
+            if !skinEdit.isNeutral, let skin = local.mask.skin {
+                single = mix(adjust(single, skinEdit), single, mask: data(skin, over: extent), extent: extent)
+            }
+            out = mix(single, out, mask: repaintWeight(map, over: extent), extent: extent)
+        }
+        // The views show the subject side as an edit would: repainted.
+        let subjectOut = clean == nil ? out : (repainted(out, map: local.mask.repaint, extent: extent) ?? out)
+
         let alpha = data(local.mask.alpha, over: extent)
         // The mask being looked at: the chosen area's.
         var chosen = alpha, chosenShares = shares
@@ -1243,8 +1316,18 @@ enum Masking {
             return out
         case .dimmed:
             // Everything but the chosen area three stops darker: a halo shows as a bright rim.
-            let dark = out.applyingFilter("CIExposureAdjust", parameters: [kCIInputEVKey: -3])
-            return mix(out, dark, mask: chosenShares, extent: extent)
+            // The subject side is the repainted one, the background side the photo.
+            switch local.area {
+            case .subject:
+                let dark = out.applyingFilter("CIExposureAdjust", parameters: [kCIInputEVKey: -3])
+                return mix(subjectOut, dark, mask: chosenShares, extent: extent)
+            case .background:
+                let dark = subjectOut.applyingFilter("CIExposureAdjust", parameters: [kCIInputEVKey: -3])
+                return mix(out, dark, mask: chosenShares, extent: extent)
+            case .skin:
+                let dark = out.applyingFilter("CIExposureAdjust", parameters: [kCIInputEVKey: -3])
+                return mix(out, dark, mask: chosenShares, extent: extent)
+            }
         case .zones:
             guard let debug = local.mask.debug else { return out }
             return data(debug, over: extent).applyingFilter("CISourceOverCompositing", parameters: [kCIInputBackgroundImageKey: out]).cropped(to: extent)
@@ -1262,9 +1345,10 @@ enum Masking {
         case .onBlack, .onWhite:
             // The area cut out and laid on a plain colour, which shows any halo at once.
             let c: Float = local.view == .onWhite ? 1 : 0
-            if let kernel = cutoutKernel, let cut = kernel.apply(extent: extent, arguments: [out, chosenShares, chosen, c]) { return cut }
+            let cutFrom = local.area == .subject ? subjectOut : out
+            if let kernel = cutoutKernel, let cut = kernel.apply(extent: extent, arguments: [cutFrom, chosenShares, chosen, c]) { return cut }
             let plain = CIImage(color: CIColor(red: CGFloat(c), green: CGFloat(c), blue: CGFloat(c))).cropped(to: extent)
-            return out.applyingFilter("CIBlendWithMask", parameters: [kCIInputBackgroundImageKey: plain, kCIInputMaskImageKey: chosen])
+            return cutFrom.applyingFilter("CIBlendWithMask", parameters: [kCIInputBackgroundImageKey: plain, kCIInputMaskImageKey: chosen])
         }
     }
 }
