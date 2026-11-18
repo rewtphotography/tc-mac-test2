@@ -903,6 +903,17 @@ bytes each), while the two masks' shares differ in 5,304 bytes. The Mac's Refine
 check changed 8,472 px, the same as alpha 15 and 16. The launch pictures were again not kept
 (artifact storage still full); the releases went ahead.
 
+## Masking spec v7.1 (alpha 21): the edge repainted from inside
+
+`docs/specs/masking-spec-v7.1.md`. Adopted as written, with the owner's answers to four
+defaults raised before the build: protected rims get no feather (1); the subject side's chroma
+is checked before its exposure and reported with the brightened figures (2); Remove Colour's
+softened change never weaker than the raw one (3); and, **changed by the owner** (4), the
+single blend is weighted in by w over alpha 16's sequential render, so every pixel with w = 0
+renders as in alpha 16 even with the switch on. Nothing left out. One finding raised with the
+owner: the soft segment tolerance trims anti-aliased outline pixels of other colours by up to
+0.05 alpha. Details and every number: `MASKING.md`, section 19.
+
 ## Still to design
 
 The owner will share screenshots of how they use Bridge. Until then these are open: where

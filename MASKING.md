@@ -714,3 +714,88 @@ hand; 7006 and 7473 hair unchanged from alpha 16.
 - Remove Colour's segment test uses the inside colour of the mask before the box; where the
   mask takes in more than 6 px of the wall, the "inside" there is the wall and only the
   "within tolerance of B" rule acts, which is what removes such a piece.
+
+## 19. Spec v7.1 (alpha 21): the edge repainted from inside
+
+`docs/specs/masking-spec-v7.1.md`, with the owner's answers to the four build defaults at its
+end. Replaces section 18's share recolouring (the k factor is gone); the rest of section 18
+stands. Still **synthetic pictures only**.
+
+**The repaint** (`Repaint` in `InsideColour.swift`, called from `Matte.finish` where the
+recolouring was, so it also ends every Refine Edges box).
+- Band pixels are classed: **core** (would be recoloured in v7: not rim, inside colour known,
+  not in the hair zone unless F̂ is skin, not under a Refine Hair stroke), **rim**, **unknown**
+  (no solid subject within `reach`, now **60 px**), **excluded** (hair zone, strokes).
+- **Specks:** rim pixels are grouped 8-connected; a group under 40 px (`smallRim`) joins the
+  core; longer runs stay protected.
+- **w:** 1 − smoothstep(0, 2, distance to the core) on both sides, Gaussian-blurred (σ 1.5 px),
+  then max with the core, so the core is always 1. Protected rim runs get w = 0 with no
+  feather into them (owner, default 1). Excluded and unknown pixels get only a core's feather.
+- **Shares:** alpha in all three channels wherever w > 0; untouched where w = 0.
+- **Stored with the mask** as a 4-byte-per-pixel map (`MaskResult.repaint`, `MatteOutput.repaint`):
+  R, G = offset to the solid source pixel + 128 (photo px, y down), B = w × 255, A = 255;
+  blank is (128, 128, 0, 255). F̂ is not stored: it is the 3×3 median of the photo at the
+  source, read at render time. Debug bundle: `repaint_weight.png` (w).
+- **Tools:** a Refine Edges box and a Remove Colour box lay in the repaint worked out from the
+  new mask wherever they acted and 4 px round it (`Refine.pasteRepaint`); Refine Hair and Clean
+  Edge strokes clear it under the stroke (`Refine.clearRepaint`). Undo puts the map back with
+  alpha and shares; Option-restore takes it from the automatic mask; Remake replays it.
+
+**The render** (`Masking.apply`, Core Image kernel `repaintEdge`): C = mix(photo, median3(photo)
+at the source, w). **Owner's change (default 4):** the alpha 16 sequential render (subject
+edit, then background, then skin) is kept everywhere, and only where w > 0 is it mixed towards
+the single blend: out = mix(alpha16, single, w), single = mix(background-edited photo,
+subject-edited C, shares), then the skin edit on top. Where w = 0 the render is alpha 16's
+exactly. Only when Subject or Background has an edit; with none (or only Skin) the render is
+alpha 16's. Views: On Black, On White and Background −3 EV show the subject side repainted
+(the render with the repaint kernel applied again, whose source pixels are solid subject).
+Skin target, Mask, Overlay and Zones unchanged. TIFF export and Send to Photoshop go through
+the same `Masking.apply`.
+
+**Remove Colour (§3, §4).** w_s = 1 − smoothstep(tol, 2·tol, d) to the nearest sample, used
+anywhere in the box; partly matching pixels on the F̂–B segment (soft the same way) only within
+40 px of the outline. F̂ for the box comes only from solid subject not within 2·tol of a sample,
+pushed out over matched areas. The alpha change is softened (normalised over pixels in play)
+and never weaker than the raw change (owner, default 3). Loose pieces under 50 px go; holes
+under 50 px close, except pixels that matched. Matched pixels are never rim. Then the repaint
+is recomputed in box ± 4 px.
+
+**Test numbers** (`SpecV7Tests`, engine's 2.2 curve):
+- (a) sleeve: subject-side chroma per edge pixel 0.0099, 0.0246, 0.0356, 0.0420, 0.0389,
+  0.0183 → 0.0062 each (the sleeve's own 0.0062). (b) skin and (c) waist: (a, b) from the skin 0.0000.
+- (d) 3-px rim, 300 px long: 90 rim pixels in one run kept, w = 0, shares unchanged. 20-px rim:
+  outer pixels keep its colour.
+- (e) hair zone, not skin: 0 repainted; as skin: 5,084 core, 3,444 feathered.
+- (e2) skin in the hair zone, green (112, 124, 84) and (88, 118, 70): 372 of 372 fringe pixels
+  w = 1, worst (a, b) 0.0. Without a skin model: none has a core of its own; 28 are reached by
+  the feather of cores just outside the zone (allowed by §1.1).
+- (f) alpha identical with the switch on and off; 4,004 core, 3,408 feathered; shares = alpha
+  wherever w > 0.
+- (j) sleeve, Subject +3 / Background −3 (engine arithmetic): all six edge pixels w = 1; darkest
+  edge pixel at α ≥ 0.9 against the brightened sleeve 6 px in 0.0 L; subject-side chroma 0.0062
+  before the exposure; after +3 the edge 0.0124 and the brightened sleeve 0.0124 (owner,
+  default 2: brightening raises Oklab chroma, the edge matches the sleeve); band columns −3…8;
+  steps across its limits L 0.0, (a, b) 0.0; Subject 0 / Background −3: chroma 0.0062.
+- (k) strong green on skin, Subject +1.5: fringe against the brightened skin L 0.0, (a, b) 0.0.
+- (l) 3×3 green speck: 9 of 9 w = 1, (a, b) from the skin 0.0; 3-px rim 300 px long: 900 of 900
+  w = 0; log "1 small rim group of 12 px repainted as specks".
+- (m) enclosed 40×20 orange patch and 3×3 specks: 0 of 255 left; the pink body changes at most
+  3 of 255 more than 2 px away. **Finding:** the disc's anti-aliased outline (pink against the
+  green ground, within 2·tol of the pink–orange line) loses up to 13 of 255 through the soft
+  segment tolerance.
+- (n) soft tolerance: largest step between neighbours 28 of 255 (≤ 64).
+- (h) crescent: 0 of 255 left; disc edge at 70.0 px (radius 70).
+- (i) switch off: byte-identical to alpha 16 (hashes, as in section 18).
+- Mac, through `Masking.apply` (`RepaintRenderTests`, `TiffExportTests`): to follow from the Mac build.
+
+**Accepted trade-offs (owner).** On a patterned or stitched edge the outer few pixels take
+the colour from just inside, so they can look slightly smoothed when local edits are on.
+Where the subject changes colour right at its edge (sleeve meeting skin), a pixel or two can
+take the neighbouring colour.
+
+**Known issues added by v7.1**
+- Remove Colour's soft segment tolerance also trims anti-aliased outline pixels of another
+  colour that happen to lie near the F̂–B line, up to about 0.05 alpha (test (m)).
+- In the views and the render the repaint's source colour is a 3×3 median of the developed
+  image at display size; the engine's is of the neutral render at full size. At small zoom
+  the two differ slightly.
