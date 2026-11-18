@@ -812,3 +812,106 @@ take the neighbouring colour.
 - In the views and the render the repaint's source colour is a 3×3 median of the developed
   image at display size; the engine's is of the neutral render at full size. At small zoom
   the two differ slightly.
+
+## 20. Spec v7.2 (alpha 22): closing build for the masking chapter
+
+`docs/specs/masking-spec-v7.2.md`, with the owner's two answers at its end (cut by mix for
+Remove Colour's stair-steps; the 40 px speck rule kept beside §2's rim rule). Synthetic
+pictures only. Engine: `EdgeCut.swift` (B̂, the cut, the background repaint, `EdgeColour.run`
+which does all three in order), `RemoveColour.swift`, `Refine.limitHair`, `Refine.edgeColour`.
+
+**B̂ (§1).** `EdgeCut.backgroundField`: the subject field of section 18 run on the inverted
+mask, with solid = alpha ≤ 0.02 and ≥ 6 px outside the half-way line, reach 30 px; the colour
+is the 3×3 median (linear) at the nearest solid background pixel.
+
+**The cut (§2)** (`EdgeCut.apply`, `InsideColourSettings.cut`, Debug "Cut background-coloured
+edge pixels", on; it runs only while "Edge colour from inside" is on, so with that off the
+mask is alpha 16's). Band pixels with alpha > 0.02, up to 6 px inside the line or anywhere
+outside it, with F̂ and B̂ known, not in the hair zone (unless F̂ is skin) or under a hair
+stroke. In Oklab (a, b): dS to F̂, dB to B̂; background-like at dS ≥ 0.04 and dB ≤ 0.5·dS; the
+cut's weight k = 1 − smoothstep(0.25·dS, 0.5·dS, dB). **Default added:** the cut never takes a
+pixel below the coverage its own colour shows (its place on the B̂–F̂ line in (a, b)) where
+colour and coverage agree; where the colour says clearly less than the coverage (by 0.1–0.3,
+smoothly) it goes to 0 as specified. Without this the outer third of every soft edge whose
+colours fit its coverage was cut (a 6-px defocused ramp lost up to 10 of 255; with it, 0).
+Feathered σ 0.75 over pixels with coverage, max with the raw change; shares scaled with alpha.
+Background-like pixels and those within 0.03 of B̂ (full Oklab) are never rim light; where F̂
+and B̂ are under 0.04 apart in (a, b), a bright pixel within 0.03 of B̂ joins the repaint core
+(notch). Rim light needs all of: brighter by 0.05 L, not either of those, a group of 40 px or
+more (owner). Log: `background-coloured edge pixels: N cut, mean alpha removed x, R
+rim-protected, T bright pixels of background showing through repainted`; JSON
+`background_cut_pixels`, `_mean_alpha`, `background_showing_through`.
+
+**Background repaint (§3)** (`RepaintBack`). Core: alpha < 0.5, up to 3 px outside the line
+(depth −3 to 0), B̂ and F̂ known, not excluded as above; feathered like w (no protected pixels);
+each feathered pixel takes its nearest core pixel's background. Map as `repaint`, stored as
+`MatteOutput.repaintBack`, `MaskResult.repaintBack`; pasted, cleared, undone and restored with
+the subject's. Render: single = mix(background-edited Cb, subject-edited C, shares), weighted
+in over alpha 16's sequential render by max(w, wb) (`CIMaximumCompositing`). Views: On Black,
+On White and Background −3 EV take the background side from Cb too. Debug bundle:
+`repaint_back_weight.png`; JSON `background_repaint_core`, `_feathered`, `_unknown`.
+
+**Remove Colour (§4).** Drag a box at once. Automatic (no picks): `Refine.guess` clusters the
+box's outside (alpha ≤ 0.02) and inside (≥ 0.98) pixels, up to 4 each, k-means in Oklab from
+the mean and the farthest pixels, 10 rounds, on at most 40,000 pixels; **default:** clusters
+under 2% of their side are dropped as noise. An outside colour is removable at ≥ 2×tolerance
+from every inside colour, or when the inside pixels within tolerance of it are under 15%.
+None: nothing done, status "No clear background colour in the box — click one with the
+eyedropper." The guessed colours show as swatches marked "auto". A click with the tool picks
+a colour and does the last Remove Colour box again with it (Shift-click adds); Clear goes back
+to the guess and redoes the box; the tolerance redoes it too (one undo step each time). The
+operation stores the samples used and whether they were guessed, so Remake does the same.
+Removal: w_s from the nearest sample (soft, tol to 2·tol), **cut by mix** (owner): α′ = min(α,
+1 − w_s·t), t the pixel's place on the F̂–sample line in linear light (1 with no F̂, or where
+F̂ is within 2·tol of the sample). Partly matching pixels on that line: automatic, within 40 px
+of the outline or 3 px of a removed pixel; eyedropper, anywhere in the box. Feather as before.
+Loose pieces < 50 px go; automatic mode refills holes < 50 px except where pixels matched,
+eyedropper mode never. Then the edge colour step inside the box ± 4 px: the cut, then both
+repaints (eyedropper: no rim light at all in the box). Log: the guess (each outside colour,
+removable or kept and why; the inside colours with shares), the mode, pixels changed.
+
+**Edge Colour box (§5)** (`Refine.edgeColour`, tool "Edge Colour"): inside the box ± 4 px,
+the cut (always on), and both repaints with no rim light; **default:** the hair zone (unless
+skin) and hair strokes stay excluded. Option-drag restores; undone, stored and replayed as a
+box. Log: pixels repainted (core) and cut.
+
+**Refine Hair (§6).** Strength 0–1, default 0 (`Refine.limitHair`): decreases in full;
+increases in full inside the old mask or within 2 px outside its half-way line; beyond,
+strength × the increase (shares likewise). Moving the slider redoes the last stroke from its
+kept result, without running the model again. The matting model is loaded when Refine Hair
+is chosen and after a mask is made in Edit mode.
+
+**Clean Edge (§7)** is gone: tool, settings, `Refine.clean`, `Refine.cleanEdge`,
+`CleanSettings` and its test. Nothing else used them.
+
+**Test numbers** (`SpecV72Tests`, engine's 2.2 curve; scenes mixed in linear light):
+- (p) green streak: coverage left on it 0.008 (2 of 255); the skin edge 4 px away 0.0 change.
+- (q) black sleeve on dark grey and green on green foliage (wavy, textured): 0 px cut each
+  (the sleeve's 17 bright background pixels go to the repaint core as "showing through").
+- (r) 3-px warm rim, 300 px, on grey: 900 of 900 keep their colour (w = 0), 0 cut.
+- (s) engine arithmetic: background pixels within 3 px outside 0.0 L darker than the darkened
+  wall (without the background repaint 0.376); every pixel there 0.0 darker than its own
+  coverage's mix of brightened sleeve and darkened wall. **Reading of the spec:** the
+  half-covered edge pixel is half sleeve, darker than the wall by nature, so it is held to its
+  own mix; the wall pixels to the wall. Mac: see below.
+- (t) diagonal, eyedropper: largest step along the edge 0.146 (alpha 21's arithmetic 0.299);
+  between horizontal neighbours 0.365, across the edge, the same as the photo's own
+  anti-aliased edge before the box (0.376).
+- (u) strength 0: 0 px gain coverage more than 2 px outside the edge (240 px still tidied);
+  strength 1: the stroke's own result, byte for byte.
+- (w) automatic, enclosed patch: patch and specks 0 of 255 left; the pink at most 1 of 255
+  more than 2 px away; guessed green (96% outside, 0.297 from the pink) and orange (4%, 0.144).
+- (x) automatic, green fringe on skin: fringe 0 of 255 left; the skin's edge 0.15 px from where
+  it is; green removable by share (3% of the inside).
+- (y) nothing clear: 0 px changed, the status message given.
+- (z) eyedropper, orange 37–40% of the inside: 0 of 255 left anywhere in the box.
+- Soft edge (6-px ramp, colours fitting coverage): 0 change. (v) switch off: the hashes of
+  section 18. Every earlier test passes (133 in all).
+- Mac (`RepaintRenderTests`): to follow from the build.
+
+**Known issues added by v7.2**
+- The automatic guess counts every outside colour in the box: a box that takes in more of
+  the background than the edge (a patterned wall) can find several removable colours; the
+  eyedropper then decides.
+- The cut's (a, b) test sets lightness aside, as specified: a background of the subject's hue
+  but far lighter or darker is not cut (only the notch case handles light pixels).

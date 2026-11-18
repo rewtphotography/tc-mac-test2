@@ -127,50 +127,6 @@ final class RefineTests: XCTestCase {
     /// A mask three pixels too wide round a dark disc on a light ground: one stroke round
     /// the edge puts it on the disc, and the result goes back through the engine and into
     /// the photo's mask only under the stroke.
-    func testCleanEdgePutsAHardEdgeWhereTheColoursChange() {
-        let scene = disc(light: SIMD3(0.55, 0.72, 0.5))
-        let w = 200
-        var wide = Gray(w: w, h: w)
-        for y in 0 ..< w {
-            for x in 0 ..< w {
-                let dx = Float(x) + 0.5 - 100, dy = Float(y) + 0.5 - 100
-                wide.v[y * w + x] = min(max(63 - (dx * dx + dy * dy).squareRoot() + 0.5, 0), 1)
-            }
-        }
-        // Round the right-hand half of the disc.
-        var points: [SIMD2<Float>] = []
-        for k in 0 ... 20 { let t = -Float.pi / 2 + Float(k) / 20 * Float.pi; points.append(SIMD2(100 + 61 * cos(t), 100 + 61 * sin(t))) }
-        let stroke = RefineStroke(points: points, radius: 9)
-        let patch = PixelRect(x: 0, y: 0, w: w, h: w)
-        let weight = Refine.weight(stroke: stroke, in: patch)
-        let (cleaned, log) = Refine.cleanEdge(photo: scene.photo, alpha: wide, weight: weight, defocus: nil, subjectSharpness: nil)
-        print("REFINE clean edge: \(log)")
-        XCTAssertGreaterThan(cleaned.at(100 + 58, 100), 0.9, "inside the disc")
-        XCTAssertLessThan(cleaned.at(100 + 62, 100), 0.1, "the three pixels of ground the mask had taken")
-        XCTAssertEqual(cleaned.at(100 - 62, 100), wide.at(100 - 62, 100), "the other side was not painted")
-
-        // Tighter pulls the edge in; half strength moves it half as far.
-        var tight = CleanSettings()
-        tight.tightness = 1
-        let tighter = Refine.cleanEdge(photo: scene.photo, alpha: wide, weight: weight, defocus: nil, subjectSharpness: nil, settings: tight).alpha
-        XCTAssertLessThanOrEqual(tighter.v.reduce(0, +), cleaned.v.reduce(0, +))
-        var half = CleanSettings()
-        half.strength = 0.5
-        let halfway = Refine.cleanEdge(photo: scene.photo, alpha: wide, weight: weight, defocus: nil, subjectSharpness: nil, settings: half).alpha
-        XCTAssertEqual(halfway.at(100 + 62, 100), 0.5 * (wide.at(100 + 62, 100) + cleaned.at(100 + 62, 100)), accuracy: 0.05)
-
-        // Through the engine and back into the mask.
-        let out = Matte(photo: scene.photo, coarse: cleaned, faces: [farFace], settings: Refine.patchSettings()).run(tier: .off)
-        var alpha = wide.v.map { UInt8($0 * 255) }, shares = [UInt8](repeating: 255, count: w * w * 4)
-        for i in 0 ..< w * w { shares[i * 4] = alpha[i]; shares[i * 4 + 1] = alpha[i]; shares[i * 4 + 2] = alpha[i] }
-        let before = alpha
-        let changed = Refine.paste(out, at: patch, weight: weight, alpha: &alpha, shares: &shares, width: w)
-        XCTAssertGreaterThan(changed, 100)
-        XCTAssertLessThan(alpha[100 * w + 162], 30)
-        XCTAssertEqual(alpha[100 * w + 38], before[100 * w + 38], "untouched where the brush didn't go")
-        XCTAssertEqual(out.guardCorrections, 0, "\(out.log)")
-    }
-
     // MARK: Gaps
 
     func testABoxOpensAnEnclosedPocketOfBackground() {

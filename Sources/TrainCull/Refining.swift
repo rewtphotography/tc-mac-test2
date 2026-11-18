@@ -5,15 +5,15 @@ import TraincullCore
 
 /// The mask tools (masking spec v5, section 2).
 enum MaskTool: String, CaseIterable {
-    case none, edges, hair, clean, removeColour
+    case none, edges, hair, removeColour, edgeColour
 
     var name: String {
         switch self {
         case .none: return "Off"
         case .edges: return "Refine Edges"
         case .hair: return "Refine Hair"
-        case .clean: return "Clean Edge"
         case .removeColour: return "Remove Colour"
+        case .edgeColour: return "Edge Colour"
         }
     }
 
@@ -21,9 +21,9 @@ enum MaskTool: String, CaseIterable {
         switch self {
         case .none: return ""
         case .edges: return "Drag a box round fingers, footwear, a gap or a prop's edge. Hold Option while dragging to put the automatic mask back inside the box."
-        case .hair: return "Paint over curls or flowing hair. Hold Option while painting to put the automatic mask back."
-        case .clean: return "Paint along a hard edge that still has a rim. Hold Option while painting to put the automatic mask back."
-        case .removeColour: return "Click the background colour that the mask has taken in (Shift-click to add more), then drag a box over the place. Only the edge, up to 40 px in, is touched. Hold Option while dragging to put the automatic mask back."
+        case .hair: return "Paint over curls or flowing hair. Strength 0 only tidies the edge; higher lets the stroke add strands. Hold Option while painting to put the automatic mask back."
+        case .removeColour: return "Drag a box over the place: the background colour is guessed from the box. If it guesses wrong, click the colour to remove (Shift-click to add one) and the box is done again with it. Hold Option while dragging to put the automatic mask back."
+        case .edgeColour: return "Drag a box where an edge keeps a bright or coloured rim it shouldn't: inside it every edge pixel takes the colour from just inside. Hold Option while dragging to put the automatic mask back."
         }
     }
 }
@@ -48,10 +48,14 @@ struct RefineOp {
     var stroke: RefineStroke?
     /// Option was held: put the automatic mask back here.
     var restore: Bool
-    var clean = CleanSettings()
-    /// Remove Colour (spec v7, 3): the colours sampled (display values) and the tolerance.
+    /// Remove Colour (spec v7.2, 4): the colours (display values), whether they are the
+    /// automatic guess (none yet: guess them) or the eyedropper's, and the tolerance. Once
+    /// done, `samples` holds the colours actually used, so Remake does the same again.
     var samples: [SIMD3<Float>] = []
+    var automatic = true
     var tolerance: Float = 0.05
+    /// Refine Hair (spec v7.2, 6): how much of what the stroke adds beyond the edge is kept.
+    var hairStrength: Float = 0
 
     var mark: HeroNSView.Mark {
         if let box = box { return .box(CGRect(x: box.x, y: box.y, width: box.w, height: box.h), restore: restore) }
@@ -65,8 +69,9 @@ struct RefineUndo {
     let rect: PixelRect
     let alpha: [UInt8]
     let shares: [UInt8]
-    /// The edge repaint there (spec v7.1), when the mask had one.
+    /// The edge repaints there (spec v7.1 and v7.2, 3), when the mask had them.
     var repaint: [UInt8]? = nil
+    var repaintBack: [UInt8]? = nil
 }
 
 /// The settings the tools run with.
@@ -132,17 +137,30 @@ extension Masking {
     }
 
     /// A mask with new alpha and shares, everything else as it was.
-    private static func rebuilt(_ mask: MaskResult, alpha: [UInt8], shares: [UInt8], repaint: [UInt8]?, summary: String) throws -> MaskResult {
+    private static func rebuilt(_ mask: MaskResult, alpha: [UInt8], shares: [UInt8], repaint: [UInt8]?, repaintBack: [UInt8]?, summary: String) throws -> MaskResult {
         guard let a = picture(gray: alpha, w: mask.width, h: mask.height), let s = picture(rgbx: shares, w: mask.width, h: mask.height) else {
             throw Failure("the mask couldn't be stored")
         }
-        var r: CGImage?
-        if let repaint = repaint {
-            guard let made = picture(rgbx: repaint, w: mask.width, h: mask.height) else { throw Failure("the edge repaint couldn't be stored") }
-            r = made
+        func stored(_ bytes: [UInt8]?) throws -> CGImage? {
+            guard let bytes = bytes else { return nil }
+            guard let made = picture(rgbx: bytes, w: mask.width, h: mask.height) else { throw Failure("the edge repaint couldn't be stored") }
+            return made
         }
         return MaskResult(width: mask.width, height: mask.height, alpha: a, shares: s, skin: mask.skin, trimap: mask.trimap, coarse: mask.coarse,
-                          debug: mask.debug, tier: mask.tier, edge: mask.edge, summary: summary, repaint: r)
+                          debug: mask.debug, tier: mask.tier, edge: mask.edge, summary: summary, repaint: try stored(repaint), repaintBack: try stored(repaintBack))
+    }
+
+    /// Refine Hair's last stroke before its Strength was applied, so moving the slider redoes
+    /// it at once (spec v7.2, 6).
+    private static let hairLock = NSLock()
+    private static var hairKept: (key: String, result: RefineResult, method: String, why: String)?
+
+    private static func hairKey(_ url: URL, _ stroke: RefineStroke, alpha: [UInt8], W: Int, H: Int, method: HairMethod) -> String {
+        let r = Refine.bounds(of: stroke, w: W, h: H)
+        var h: UInt64 = 0xcbf29ce484222325
+        for y in r.y ..< r.maxY { for x in r.x ..< r.maxX { h = (h ^ UInt64(alpha[y * W + x])) &* 0x100000001b3 } }
+        for p in stroke.points { h = (h ^ UInt64(p.x.bitPattern)) &* 0x100000001b3; h = (h ^ UInt64(p.y.bitPattern)) &* 0x100000001b3 }
+        return "\(url.path)|\(stroke.radius)|\(method.rawValue)|\(h)"
     }
 
     /// Copies a mask's repaint map from `source` into `map` wherever `weight` > 0 (blank where
@@ -161,7 +179,7 @@ extension Masking {
     /// follows. Returns the new mask and what to put back on Undo.
     static func refine(url: URL, mask: MaskResult, automatic: MaskResult, op: RefineOp, options: RefineOptions, faces known: DetectedFaces?,
                        rules: SubjectRules, subject: SubjectSource, progress: (String) -> Void,
-                       partial: ((MaskResult) -> Void)?) throws -> (mask: MaskResult, undo: RefineUndo) {
+                       partial: ((MaskResult) -> Void)?) throws -> (mask: MaskResult, undo: RefineUndo, op: RefineOp, message: String?) {
         let started = CFAbsoluteTimeGetCurrent()
         let name = url.lastPathComponent
         let reference = try neutral(url)
@@ -184,6 +202,12 @@ extension Masking {
         let map0: [UInt8]? = mask.repaint.flatMap { bytes(of: $0, count: W * H * 4) }
         if mask.repaint != nil && map0 == nil { Log.warn("\(name): the mask's edge repaint couldn't be read; it is dropped") }
         var map = map0
+        // The background side's repaint (spec v7.2, 3), handled the same way.
+        let back0: [UInt8]? = mask.repaintBack.flatMap { bytes(of: $0, count: W * H * 4) }
+        if mask.repaintBack != nil && back0 == nil { Log.warn("\(name): the mask's background repaint couldn't be read; it is dropped") }
+        var back = back0
+        var done = op
+        var message: String?
         var touched: PixelRect?
         var notes: [String] = []
         var changed = 0, corrections = 0
@@ -193,22 +217,27 @@ extension Masking {
             alpha = alpha0
             shares = shares0
             changed = Refine.paste(result.output, at: result.patch, weight: result.weight, alpha: &alpha, shares: &shares, width: W)
-            map = map0
-            if let patchMap = result.output.repaint {
-                var full = map ?? Repaint.blank(count: W * H)
-                let laid = Refine.pasteRepaint(patchMap, at: result.patch, weight: result.weight, map: &full, width: W)
-                map = full
-                if let stats = result.output.repaintStats { Log.note("tool", "\(name): edge repaint laid in over \(laid) px · \(stats.summary)") }
-            } else if var full = map {
-                Refine.clearRepaint(weight: result.weight, at: result.patch, map: &full, width: W)
-                map = full
+            func layMap(_ start: [UInt8]?, _ patchMap: [UInt8]?, what: String) -> [UInt8]? {
+                if let patchMap = patchMap {
+                    var full = start ?? Repaint.blank(count: W * H)
+                    let laid = Refine.pasteRepaint(patchMap, at: result.patch, weight: result.weight, map: &full, width: W)
+                    Log.debug("tool", "\(name): \(what) laid in over \(laid) px")
+                    return full
+                } else if var full = start {
+                    Refine.clearRepaint(weight: result.weight, at: result.patch, map: &full, width: W)
+                    return full
+                }
+                return nil
             }
+            map = layMap(map0, result.output.repaint, what: "edge repaint")
+            back = layMap(back0, result.output.repaintBack, what: "background repaint")
             corrections = result.output.guardCorrections
             touched = union(touched, result.patch)
             notes = result.log
         }
         func show(_ what: String) {
-            guard let partial = partial, let quick = try? rebuilt(mask, alpha: alpha, shares: shares, repaint: map, summary: "\(op.tool.name): \(what)…") else { return }
+            guard let partial = partial, let quick = try? rebuilt(mask, alpha: alpha, shares: shares, repaint: map, repaintBack: back,
+                                                                  summary: "\(op.tool.name): \(what)…") else { return }
             partial(quick)
         }
 
@@ -233,6 +262,12 @@ extension Masking {
                 var full = map ?? Repaint.blank(count: W * H)
                 copyRepaint(from: baseMap, weight: weight, at: area, map: &full, width: W)
                 map = full
+            }
+            let baseBack = automatic.repaintBack.flatMap { bytes(of: $0, count: W * H * 4) }
+            if back != nil || baseBack != nil {
+                var full = back ?? Repaint.blank(count: W * H)
+                copyRepaint(from: baseBack, weight: weight, at: area, map: &full, width: W)
+                back = full
             }
             touched = area
             method = "\(op.tool.name), restore"
@@ -291,11 +326,22 @@ extension Masking {
                     }
                 }
                 notes.insert("\(passes) · growth: \(grown) extension(s), \(stopped)", at: 0)
-            case .clean:
-                guard let stroke = op.stroke else { throw Failure("no stroke was painted") }
-                lay(Refine.clean(stroke: stroke, alpha: alpha0, context: context, clean: op.clean))
             case .hair:
                 guard let stroke = op.stroke else { throw Failure("no stroke was painted") }
+                let key = hairKey(url, stroke, alpha: alpha0, W: W, H: H, method: options.hairMethod)
+                hairLock.lock()
+                let cached = hairKept?.key == key ? hairKept : nil
+                hairLock.unlock()
+                /// The stroke's own result held to the Strength set (spec v7.2, 6).
+                func layHair(_ raw: RefineResult) {
+                    lay(Refine.limitHair(raw, alpha: alpha0, shares: shares0, width: W, strength: op.hairStrength))
+                }
+                if let cached = cached {
+                    method = cached.method
+                    layHair(cached.result)
+                    notes.insert("the stroke's result kept from before, strength changed · " + cached.why, at: 0)
+                    break
+                }
                 let choice = Refine.hairChoice(stroke: stroke, alpha: alpha0, context: context,
                                                contrastNeeded: options.contrastNeeded, textureAllowed: options.textureAllowed)
                 var colour = choice.colour
@@ -306,44 +352,59 @@ extension Masking {
                     colour = true
                     why = "colour matting: the matting model isn't in this build · " + choice.why
                 }
+                var raw: RefineResult
                 if colour {
                     method = "Refine Hair, colour matting"
                     progress("Colour matting")
-                    lay(Refine.hair(stroke: stroke, look: nil, answer: nil, alpha: alpha0, context: context, progress: progress))
+                    raw = Refine.hair(stroke: stroke, look: nil, answer: nil, alpha: alpha0, context: context, progress: progress)
+                    layHair(raw)
                 } else {
                     method = "Refine Hair, matting model"
                     let area = Refine.lookArea(stroke: stroke, w: W, h: H)
                     progress("Matting model")
                     let answer = try look(.matting, reference: reference, area: area, tiled: false, what: "\(name) hair")
-                    lay(Refine.hair(stroke: stroke, look: area, answer: answer, alpha: alpha0, context: context))
+                    raw = Refine.hair(stroke: stroke, look: area, answer: answer, alpha: alpha0, context: context)
+                    layHair(raw)
                     if wantsTiles(area) {
                         show("first look")
                         progress("Matting model, in tiles")
                         let fine = try look(.matting, reference: reference, area: area, tiled: true, what: "\(name) hair")
-                        lay(Refine.hair(stroke: stroke, look: area, answer: fine, alpha: alpha0, context: context))
+                        raw = Refine.hair(stroke: stroke, look: area, answer: fine, alpha: alpha0, context: context)
+                        layHair(raw)
                     }
                 }
+                hairLock.lock()
+                hairKept = (key, raw, method, why)
+                hairLock.unlock()
                 notes.insert(why, at: 0)
             case .removeColour:
                 guard let box = op.box else { throw Failure("no box was drawn") }
-                guard !op.samples.isEmpty else { throw Failure("no colour was picked: click the colour to remove first") }
                 progress("Removing the colour")
-                lay(Refine.removeColour(box: box, samples: op.samples, tolerance: op.tolerance, alpha: alpha0, shares: shares0, repaint: map0,
-                                        context: context))
+                let made = Refine.removeColour(box: box, samples: op.samples, automatic: op.automatic, tolerance: op.tolerance, alpha: alpha0, shares: shares0,
+                                               repaint: map0, repaintBack: back0, context: context)
+                lay(made)
+                done.samples = made.samples
+                message = made.message
+                method = op.automatic ? "Remove Colour, automatic" : "Remove Colour, eyedropper"
+            case .edgeColour:
+                guard let box = op.box else { throw Failure("no box was drawn") }
+                progress("Edge colour")
+                lay(Refine.edgeColour(box: box, alpha: alpha0, shares: shares0, repaint: map0, repaintBack: back0, context: context))
             case .none:
                 throw Failure("no tool is chosen")
             }
         }
         guard let rect = touched else { throw Failure("nothing was changed") }
         let undo = RefineUndo(rect: rect, alpha: region(alpha0, width: W, rect, channels: 1), shares: region(shares0, width: W, rect, channels: 4),
-                              repaint: map0.map { region($0, width: W, rect, channels: 4) })
+                              repaint: map0.map { region($0, width: W, rect, channels: 4) },
+                              repaintBack: back0.map { region($0, width: W, rect, channels: 4) })
         let seconds = CFAbsoluteTimeGetCurrent() - started
         let summary = "\(method): \(changed) px changed in \(String(format: "%.2f", locale: Locale(identifier: "en_US_POSIX"), seconds)) s"
             + (corrections > 0 ? " · colour guard put \(corrections) px back" : "")
         Log.note("tool", "\(name): \(summary) · \(notes.joined(separator: " · "))",
                  fields: ["image": name, "tool": op.tool.rawValue, "method": method, "restore": op.restore, "pixels_changed": changed,
                           "colour_guard_corrections": corrections, "seconds": seconds])
-        return (try rebuilt(mask, alpha: alpha, shares: shares, repaint: map, summary: summary), undo)
+        return (try rebuilt(mask, alpha: alpha, shares: shares, repaint: map, repaintBack: back, summary: message ?? summary), undo, done, message)
     }
 
     /// A mask with one operation taken back.
@@ -354,21 +415,26 @@ extension Masking {
         }
         var map: [UInt8]? = mask.repaint.flatMap { bytes(of: $0, count: W * H * 4) }
         if map == nil, undo.repaint != nil { map = Repaint.blank(count: W * H) }
+        var back: [UInt8]? = mask.repaintBack.flatMap { bytes(of: $0, count: W * H * 4) }
+        if back == nil, undo.repaintBack != nil { back = Repaint.blank(count: W * H) }
         let blankRow = Repaint.blank(count: undo.rect.w)
         let r = undo.rect
+        /// Puts back a repaint as it was, or none where the mask had none.
+        func putBack(_ full: inout [UInt8]?, _ before: [UInt8]?, row y: Int, at to: Int) {
+            guard full != nil else { return }
+            if let before = before {
+                full!.replaceSubrange(to * 4 ..< (to + r.w) * 4, with: before[y * r.w * 4 ..< (y + 1) * r.w * 4])
+            } else {
+                full!.replaceSubrange(to * 4 ..< (to + r.w) * 4, with: blankRow)
+            }
+        }
         for y in 0 ..< r.h {
             let to = (r.y + y) * W + r.x
             alpha.replaceSubrange(to ..< to + r.w, with: undo.alpha[y * r.w ..< (y + 1) * r.w])
             shares.replaceSubrange(to * 4 ..< (to + r.w) * 4, with: undo.shares[y * r.w * 4 ..< (y + 1) * r.w * 4])
-            if map != nil {
-                // Put back the repaint as it was, or none where the mask had none.
-                if let before = undo.repaint {
-                    map!.replaceSubrange(to * 4 ..< (to + r.w) * 4, with: before[y * r.w * 4 ..< (y + 1) * r.w * 4])
-                } else {
-                    map!.replaceSubrange(to * 4 ..< (to + r.w) * 4, with: blankRow)
-                }
-            }
+            putBack(&map, undo.repaint, row: y, at: to)
+            putBack(&back, undo.repaintBack, row: y, at: to)
         }
-        return try rebuilt(mask, alpha: alpha, shares: shares, repaint: map, summary: "Undone")
+        return try rebuilt(mask, alpha: alpha, shares: shares, repaint: map, repaintBack: back, summary: "Undone")
     }
 }

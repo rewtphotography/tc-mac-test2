@@ -12,27 +12,6 @@ public struct RefineStroke: Equatable {
     }
 }
 
-/// How the Clean Edge brush decides (masking spec v5, 2.4).
-public struct CleanSettings: Equatable {
-    /// How far the brush may move the mask from where it was, 0 to 1.
-    public var strength: Float = 1
-    /// Tighter (above 0) pulls the edge in towards the subject; looser (below 0) lets it out. −1 to 1.
-    public var tightness: Float = 0
-    /// What sharpness and colour each count for in the decision.
-    public var sharpnessWeight: Float = 0.25
-    public var colourWeight: Float = 0.75
-    /// Half the width of the step from background to subject on the score, 0 to 1.
-    public var step: Float = 0.15
-    /// How far from the edge that is there the brush may decide anything, in pixels at 33
-    /// megapixels (it scales with the photo; never under 3). Beyond that the mask stands:
-    /// a bokeh highlight the colour of skin, a finger's width from a finger, is not the finger.
-    public var reach: Float = 5
-    /// How much surer the brush must be to add a pixel to the mask than to take one off, on the score.
-    public var growBar: Float = 0.25
-
-    public init() {}
-}
-
 /// The three refine tools' arithmetic (masking spec v5, section 2). Every tool works on a
 /// patch of the photo: it decides a new mask inside its box or stroke, hands that to the same
 /// edge engine the automatic mask uses (so the colour shares and the colour guard apply), and
@@ -236,125 +215,6 @@ public enum Refine {
             return stride(from: 0, to: s.count, by: step).map { s[$0] }
         }
         return (clusters(thinned(subject)), clusters(thinned(background)))
-    }
-
-    // MARK: Clean Edge (the brush for hard edges)
-
-    /// Decides, pixel by pixel under a stroke, subject or background: by colour (is the pixel
-    /// nearer the subject's colours beside the edge or the background's, as the eye judges)
-    /// and by focus (a clearly defocused pixel leans background, one as sharp as the subject
-    /// leans subject). The answer is nearly a yes or no, with a pixel or two of transition.
-    /// Returns the new mask for the patch: `alpha` outside the stroke, the decision inside,
-    /// as far as `strength` allows.
-    ///
-    /// - Parameters:
-    ///   - defocus: how blurred each part of the patch is (any size), and `subjectSharpness`
-    ///     the blur of the subject itself; without them only colour is used.
-    ///   - reachPixels: how far from the present edge the brush may decide, in pixels of this patch.
-    public static func cleanEdge(photo: Photo, alpha: Gray, weight: Gray, defocus: Gray?, subjectSharpness: Float?,
-                                 settings: CleanSettings = CleanSettings(), reachPixels: Float = 4) -> (alpha: Gray, log: String) {
-        let w = photo.w, h = photo.h
-        precondition(alpha.w == w && alpha.h == h && weight.w == w && weight.h == h)
-        // Colours are taken from around the stroke, not just under it.
-        let near = PlaneMath.extremum(weight, radius: 20, smallest: false)
-        let sides = sideColours(photo: photo, alpha: alpha, near: near)
-        if sides.subject.isEmpty || sides.background.isEmpty {
-            return (alpha, "nothing done: no \(sides.subject.isEmpty ? "subject" : "background") the mask is sure of beside the stroke")
-        }
-        // How far each pixel is from the edge as it stands.
-        let inside = alpha.v.map { $0 >= 0.5 }
-        let toOutside = PlaneMath.distance(to: inside.map { !$0 }, w: w, h: h), toInside = PlaneMath.distance(to: inside, w: w, h: h)
-        let reach = max(reachPixels, 2)
-        let blur = defocus.map { $0.w == w && $0.h == h ? $0 : $0.resized(w: w, h: h) }
-        let sharp = subjectSharpness ?? 1
-        let ws = blur == nil ? 0 : settings.sharpnessWeight, wc = settings.colourWeight
-        let total = max(ws + wc, 1e-3)
-        let centre = 0.5 + 0.15 * min(max(settings.tightness, -1), 1)
-        let lo = centre - settings.step, hi = centre + settings.step
-        let growBar = settings.growBar
-        var decided = Gray(w: w, h: h)
-        var toSubject = 0, toBackground = 0
-        for y in 0 ..< h {
-            for x in 0 ..< w where weight.v[y * w + x] > 0 {
-                let i = y * w + x
-                let c = lab(photo, x, y)
-                var dS = Float.infinity, dB = Float.infinity
-                for s in sides.subject { dS = min(dS, Oklab.distance(c, s)) }
-                for b in sides.background { dB = min(dB, Oklab.distance(c, b)) }
-                // −1 is the background's colour, +1 the subject's.
-                let colour = (dB - dS) / (dB + dS + 1e-4)
-                var focus: Float = 0
-                if let blur = blur {
-                    let d = blur.v[i]
-                    // As sharp as the subject leans subject; clearly defocused leans background.
-                    focus = 1 - 2 * min(max((d - (sharp + 0.7)) / 1.3, 0), 1)
-                }
-                let score = 0.5 + 0.5 * (ws * focus + wc * colour) / total
-                // Taking a pixel into the mask needs more evidence than trimming one off it: the
-                // brush is for a rim that shouldn't be there, and a background can hold the
-                // subject's colours (skin-toned bokeh behind a fingertip).
-                let bar: Float = alpha.v[i] >= 0.5 ? 0 : growBar
-                // Beyond the reach the mask stands, as a yes or a no, so that the two meet
-                // in one edge and not in a ghost of the old one beside the new.
-                let fromEdge = max(toOutside[i], toInside[i])
-                if fromEdge > reach {
-                    decided.v[i] = alpha.v[i] >= 0.5 ? 1 : 0
-                } else if abs(score - (centre + bar)) < 0.06 {
-                    // Too close to call: as it was.
-                    decided.v[i] = alpha.v[i]
-                } else {
-                    decided.v[i] = smoothstep(lo + bar, hi + bar, score)
-                }
-                if decided.v[i] >= 0.5 { toSubject += 1 } else { toBackground += 1 }
-            }
-        }
-        // A pixel of softening, so the yes-or-no decision has an anti-aliased edge and no
-        // ragged single pixels. (A guided filter here, as the spec has it, copied the
-        // photo's own texture into the mask as faint lines inside a dark top.)
-        for i in 0 ..< w * h where weight.v[i] <= 0 { decided.v[i] = alpha.v[i] >= 0.5 ? 1 : 0 }
-        let tidy = decided.blurred(radius: 1)
-        var out = alpha
-        var changed = 0
-        let strength = min(max(settings.strength, 0), 1)
-        for i in 0 ..< w * h where weight.v[i] > 0 {
-            // Only near the edge that is there.
-            if max(toOutside[i], toInside[i]) > reach + 2 { continue }
-            let v = alpha.v[i] + (tidy.v[i] - alpha.v[i]) * weight.v[i] * strength
-            if abs(v - alpha.v[i]) > 0.02 { changed += 1 }
-            out.v[i] = v
-        }
-        return (out, "colours: subject \(sides.subject.count), background \(sides.background.count) · under the stroke \(toSubject) px judged subject, "
-            + "\(toBackground) px background · \(changed) px changed")
-    }
-
-    /// A small guided filter over the pixels `only` marks: the mask refitted to the photo's
-    /// brightness in windows of `radius`.
-    static func guided(_ p: Gray, photo: Photo, radius r: Int, only: Gray) -> Gray {
-        let w = p.w, h = p.h, n = w * h
-        var g = [Float](repeating: 0, count: n), gg = [Float](repeating: 0, count: n), gp = [Float](repeating: 0, count: n)
-        var mean = p.v
-        for y in 0 ..< h {
-            for x in 0 ..< w {
-                let l = luma(photo.rgb(x, y)), i = y * w + x
-                g[i] = l; gg[i] = l * l; gp[i] = l * p.v[i]
-            }
-        }
-        let brightness = g
-        PlaneMath.boxBlur(&g, w: w, h: h, radius: r)
-        PlaneMath.boxBlur(&mean, w: w, h: h, radius: r)
-        PlaneMath.boxBlur(&gg, w: w, h: h, radius: r)
-        PlaneMath.boxBlur(&gp, w: w, h: h, radius: r)
-        var slope = [Float](repeating: 0, count: n), offset = [Float](repeating: 0, count: n)
-        for i in 0 ..< n {
-            let k = (gp[i] - g[i] * mean[i]) / (gg[i] - g[i] * g[i] + 1e-4)
-            slope[i] = k
-            offset[i] = mean[i] - k * g[i]
-        }
-        PlaneMath.boxBlur(&slope, w: w, h: h, radius: r)
-        PlaneMath.boxBlur(&offset, w: w, h: h, radius: r)
-        var out = p
-        for i in 0 ..< n where only.v[i] > 0 { out.v[i] = min(max(slope[i] * brightness[i] + offset[i], 0), 1) }
-        return out
     }
 
     // MARK: Gaps inside a box
@@ -588,6 +448,10 @@ public struct RefineResult {
     /// Refine Edges: the sides of the looked-at area the subject runs off, where the area
     /// could be grown to follow it (a staff, a sword). Left, top, right, bottom.
     public var runsOff: (left: Bool, top: Bool, right: Bool, bottom: Bool) = (false, false, false, false)
+    /// Remove Colour (spec v7.2, 4.4): the colours it used (display values), and a message for
+    /// the status line when it did nothing.
+    public var samples: [SIMD3<Float>] = []
+    public var message: String?
 }
 
 extension Refine {
@@ -685,28 +549,6 @@ extension Refine {
         return result
     }
 
-    /// Clean Edge: the near yes-or-no decision under the stroke, then colour shares and the guard.
-    public static func clean(stroke: RefineStroke, alpha: [UInt8], context c: RefineContext, clean: CleanSettings = CleanSettings()) -> RefineResult {
-        let W = c.photo.w, H = c.photo.h
-        let patch = Refine.patch(around: bounds(of: stroke, w: W, h: H), margin: margin(W, H), w: W, h: H)
-        let current = plane(alpha, width: W, patch)
-        let under = weight(stroke: stroke, in: patch)
-        let photo = c.photo.cropped(patch)
-        let blur = region(c.defocus, photoW: W, photoH: H, patch)
-        let megapixels = Float(W) * Float(H) / 1_000_000
-        let reach = max(clean.reach * (megapixels / 33).squareRoot(), 3)
-        let (decided, note) = cleanEdge(photo: photo, alpha: current, weight: under, defocus: blur, subjectSharpness: c.subjectSharpness,
-                                        settings: clean, reachPixels: reach)
-        var settings = patchSettings(from: c.settings)
-        settings.colourSnap = false // the brush has already said where the edge is
-        settings.insideColour = false // (spec v7, 2: the base mask, boxes and Remove Colour only)
-        let out = Matte(photo: photo, coarse: decided, faces: moved(c.faces, by: patch), settings: settings,
-                        defocus: blur, subjectSharpness: c.subjectSharpness).run(tier: .off)
-        var log = ["stroke of \(stroke.points.count) points, brush \(Int(stroke.radius)) px · \(note)"]
-        log += out.log.filter { $0.hasPrefix("colour guard") || $0.hasPrefix("decontaminated") }
-        return RefineResult(patch: patch, weight: under, output: out, log: log)
-    }
-
     /// Which way a hair stroke should be worked, from the photo and mask under it.
     public static func hairChoice(stroke: RefineStroke, alpha: [UInt8], context c: RefineContext,
                                   contrastNeeded: Float = 0.5, textureAllowed: Float = 0.03) -> HairChoice {
@@ -775,6 +617,35 @@ extension Refine {
         }
         log += out.log.filter { $0.hasPrefix("colour guard") || $0.hasPrefix("decontaminated") }
         return RefineResult(patch: patch, weight: under, output: out, log: log)
+    }
+
+    /// Refine Hair's Strength (spec v7.2, 6): of what a stroke would add, only `strength` is
+    /// kept more than `near` pixels outside the mask's half-way line as it was; decreases, and
+    /// increases inside or within `near` of that line, stand in full. At 1 the result is the
+    /// stroke's own. `alpha` and `shares` are the photo's mask before the stroke.
+    public static func limitHair(_ result: RefineResult, alpha: [UInt8], shares: [UInt8], width W: Int, strength: Float, near: Float = 2) -> RefineResult {
+        if strength >= 1 { return result }
+        var r = result
+        let p = r.patch, n = p.w * p.h
+        var old = [UInt8](repeating: 0, count: n)
+        for y in 0 ..< p.h { for x in 0 ..< p.w { old[y * p.w + x] = alpha[(p.y + y) * W + p.x + x] } }
+        let toInside = PlaneMath.distance(to: old.map { $0 >= 128 }, w: p.w, h: p.h)
+        let k = min(max(strength, 0), 1)
+        var held = 0
+        for i in 0 ..< n {
+            let a0 = old[i], a1 = r.output.alpha[i]
+            if a1 <= a0 || a0 >= 128 || toInside[i] <= near { continue }
+            let x = i % p.w, y = i / p.w, o = (p.y + y) * W + p.x + x
+            r.output.alpha[i] = UInt8((Float(a0) + Float(Int(a1) - Int(a0)) * k).rounded())
+            for ch in 0 ..< 3 {
+                let s0 = Float(shares[o * 4 + ch]), s1 = Float(r.output.shares[i * 4 + ch])
+                r.output.shares[i * 4 + ch] = UInt8((s0 + (s1 - s0) * k).rounded())
+            }
+            held += 1
+        }
+        r.log.append("strength " + String(format: "%.2f", locale: Locale(identifier: "en_US_POSIX"), k)
+            + ": \(held) px of new coverage beyond \(Int(near)) px of the edge held to that share")
+        return r
     }
 
     /// ⌥ with any tool: the automatic mask put back inside a box or under a stroke.

@@ -8,24 +8,29 @@ An alpha build of TrainCull for Mac (Apple silicon, macOS 15 or later).
    **Done**, then open **System Settings → Privacy & Security**, scroll down to the message
    about TrainCull and click **Open Anyway**. This is needed once for each new build.
 
-**New in this build: the edge repainted from inside (masking spec v7.1)**
+**New in this build: the masking chapter closed (masking spec v7.2)**
 
-- **No dark line at recoloured edges.** Where Edge colour from inside acts, the subject's
-  adjustments now start from the subject's own colour taken from just inside (feathered over
-  about 2 px, so no seam) instead of the fringe's. The background's adjustments still use the
-  photo. Everywhere else, hair and soft edges included, edits look exactly as in alpha 16.
-  With no adjustments the photo is shown untouched. TIFF export uses the same picture.
-- **Specks:** a bright group smaller than 40 px is no longer kept as rim light; only real rims
-  along the outline are. The inside colour is now looked for up to 60 px away (was 30).
-- **Remove Colour** now takes out a picked colour anywhere in the box (enclosed patches
-  included), never refills a removed spot, and fades out over twice the tolerance instead of
-  stopping sharply, so no stair-steps.
+- **Background-coloured edge pixels are cut** automatically: green streaks on fingers,
+  orange specks by the rose, the bright notch cluster. Real rim light is kept. Debug: **Cut
+  background-coloured edge pixels** (on).
+- **The background side is repainted too:** with Background darkened, the fringe just
+  outside an edge (7451's dark green line) takes the wall's own colour.
+- **Remove Colour: drag the box straight away.** The colour to remove is guessed from the
+  box (swatches marked "auto"). If it guesses wrong, click the colour with the tool: the box
+  is done again with it (Shift-click adds one; Clear goes back to the guess). Edges stay
+  smooth, without stair-steps.
+- **Edge Colour** (tool menu): drag a box where an edge keeps a bright or coloured rim it
+  shouldn't; inside it every edge pixel takes the colour from just inside.
+- **Refine Hair: Strength**, 0 by default, only tidies the edge; raise it to let a stroke
+  add strands. Moving it redoes the last stroke. The hair model is loaded ahead, so the
+  first stroke doesn't wait.
+- **Clean Edge is gone.**
 
-Please check, at 300%: 7451 with Subject +3 and Background −3 (sleeve edge: no dark line,
-teal, seam, specks or bright notch); 6303 with Subject +1.5 (no dark hairline round the
-fingers) and a Remove Colour box in the thumb corner; 6372 with the orange picked and your
-earlier box round the rose (the enclosed patch and the specks should go; the slider controls
-petal loss); 6957's box, and hair on 7006 and 7473, as before. Then send the log.
+Please check: 7451 with Subject +3 / Background −3 at 300% (no dark green line outside the
+gap, no notch cluster, no yellow outline); 6303 default at 300% (no green streaks), then one
+Remove Colour box over the fingers without picking a colour; 6372 default (fewer orange
+specks), then one Remove Colour box over the rose without picking; 7006 with Refine Hair at
+Strength 0; 6957's Refine Edges box and the hair on 7006 and 7473 as before. Then send the log.
 
 **The masking test:** open **Edit** and scroll to **Mask (Test)**. Click **Make Mask**.
 **Show** switches between the photo, a red overlay, the mask, On Black, On White,

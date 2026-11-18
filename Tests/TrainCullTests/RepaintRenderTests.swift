@@ -19,18 +19,23 @@ final class RepaintRenderTests: XCTestCase {
         var alpha: [UInt8]
         var shares: [UInt8]
         var map: [UInt8]
+        var back: [UInt8]
         var stats = RepaintStats()
         var mask: MaskResult
         var extent: CGRect { CGRect(x: 0, y: 0, width: w, height: h) }
 
-        init(subject: SIMD3<UInt8>, edge: [(SIMD3<UInt8>, Float)], ground: SIMD3<UInt8>) throws {
+        /// `outside`: colours of the pixels just past the edge columns, at alpha 0 (a fringe on
+        /// the background side, spec v7.2, 3).
+        init(subject: SIMD3<UInt8>, edge: [(SIMD3<UInt8>, Float)], ground: SIMD3<UInt8>, outside: [SIMD3<UInt8>] = []) throws {
             let w = 80, h = 30, x0 = 40
             var px = [UInt8](repeating: 255, count: w * h * 4)
             alpha = [UInt8](repeating: 0, count: w * h)
             for y in 0 ..< h {
                 for x in 0 ..< w {
                     var c = ground, a: Float = 0
-                    if x < x0 { c = subject; a = 1 } else if x - x0 < edge.count { c = edge[x - x0].0; a = edge[x - x0].1 }
+                    if x < x0 { c = subject; a = 1 } else if x - x0 < edge.count { c = edge[x - x0].0; a = edge[x - x0].1 } else if x - x0 - edge.count < outside.count {
+                        c = outside[x - x0 - edge.count]
+                    }
                     for ch in 0 ..< 3 { px[(y * w + x) * 4 + ch] = c[ch] }
                     alpha[y * w + x] = UInt8((a * 255).rounded())
                 }
@@ -40,23 +45,28 @@ final class RepaintRenderTests: XCTestCase {
             shares = [UInt8](repeating: 255, count: w * h * 4)
             for i in 0 ..< w * h { for ch in 0 ..< 3 { shares[i * 4 + ch] = alpha[i] } }
             map = Repaint.blank(count: w * h)
-            let a = alpha
-            var s = shares, m = map
-            stats = a.withUnsafeBufferPointer { ap in
+            back = Repaint.blank(count: w * h)
+            var a = alpha, s = shares, m = map, b = back
+            let made = a.withUnsafeMutableBufferPointer { ap in
                 s.withUnsafeMutableBufferPointer { sp in
                     m.withUnsafeMutableBufferPointer { mp in
-                        Repaint.apply(photo: photo, alpha: ap.baseAddress!, shares: sp.baseAddress!, map: mp.baseAddress!, rect: PixelRect(x: 0, y: 0, w: w, h: h))
+                        b.withUnsafeMutableBufferPointer { bp in
+                            EdgeColour.run(photo: photo, alpha: ap.baseAddress!, shares: sp.baseAddress!, map: mp.baseAddress!, back: bp.baseAddress!,
+                                           rect: PixelRect(x: 0, y: 0, w: w, h: h), settings: InsideColourSettings(), skip: { _, _, _ in false })
+                        }
                     }
                 }
             }
-            shares = s; map = m
+            stats = made.repaint
+            alpha = a; shares = s; map = m; back = b
             let alphaPicture = try XCTUnwrap(Masking.picture(gray: alpha, w: w, h: h))
             mask = MaskResult(width: w, height: h, alpha: alphaPicture, shares: try XCTUnwrap(Masking.picture(rgbx: shares, w: w, h: h)), skin: nil,
                               trimap: alphaPicture, coarse: alphaPicture, tier: .off, summary: "",
-                              repaint: try XCTUnwrap(Masking.picture(rgbx: map, w: w, h: h)))
+                              repaint: try XCTUnwrap(Masking.picture(rgbx: map, w: w, h: h)), repaintBack: try XCTUnwrap(Masking.picture(rgbx: back, w: w, h: h)))
         }
 
         func w(_ x: Int, _ y: Int) -> UInt8 { map[(y * w + x) * 4 + 2] }
+        func wb(_ x: Int, _ y: Int) -> UInt8 { back[(y * w + x) * 4 + 2] }
         func a(_ x: Int, _ y: Int) -> Float { Float(alpha[y * w + x]) / 255 }
     }
 
@@ -142,13 +152,44 @@ final class RepaintRenderTests: XCTestCase {
         XCTAssertLessThanOrEqual(dAB, 0.015)
     }
 
+    /// (s) Spec v7.2: the black sleeve against white with a 2-px teal fringe on the background
+    /// side, Subject +3 EV and Background −3 EV, through `Masking.apply`: no background pixel
+    /// within 3 px outside the edge is darker than the darkened wall 6 px out by more than
+    /// 0.03 L, and none of those pixels is darker than its own coverage's mix of brightened
+    /// sleeve and darkened wall by more than that.
+    func testBackgroundSideRendered() throws {
+        let e = try Edge(subject: SIMD3(29, 26, 25), edge: Self.sleeveEdge, ground: SIMD3(247, 247, 247), outside: [SIMD3(0, 39, 33), SIMD3(0, 39, 33)])
+        let source = CIImage(cgImage: e.picture), y = e.h / 2
+        let out = try linear(render(e.mask, source, edits(subject: 3, background: -3)), e.extent)
+        var edgeX = e.x0
+        for x in 0 ..< e.w where e.alpha[y * e.w + x] < 128 { edgeX = x; break }
+        let wallLin = out(edgeX + 5 + 6, y), sleeveLin = out(e.x0 - 6, y)
+        let wall = Oklab.from(linear: wallLin)
+        var darkWall: Float = -1, darkMix: Float = -1
+        for x in edgeX ..< edgeX + 3 {
+            let a = e.a(x, y), here = Oklab.from(linear: out(x, y))
+            darkMix = max(darkMix, Oklab.from(linear: sleeveLin * a + wallLin * (1 - a)).x - here.x)
+            if a <= 0.02 { darkWall = max(darkWall, wall.x - here.x) }
+        }
+        let noBack = MaskResult(width: e.w, height: e.h, alpha: e.mask.alpha, shares: e.mask.shares, skin: nil, trimap: e.mask.alpha, coarse: e.mask.alpha,
+                                tier: .off, summary: "", repaint: e.mask.repaint)
+        let before = try linear(render(noBack, source, edits(subject: 3, background: -3)), e.extent)
+        var darkBefore: Float = -1
+        for x in edgeX ..< edgeX + 3 where e.a(x, y) <= 0.02 { darkBefore = max(darkBefore, wall.x - Oklab.from(linear: before(x, y)).x) }
+        print("V7.2-S rendered: background pixels within 3 px outside the edge at most \(darkWall) L darker than the darkened wall 6 px out "
+            + "(without the background repaint \(darkBefore)) · every pixel there at most \(darkMix) L darker than its coverage's mix · "
+            + "wb on the fringe \((edgeX ..< edgeX + 3).map { e.wb($0, y) })")
+        XCTAssertLessThanOrEqual(darkWall, 0.03)
+        XCTAssertLessThanOrEqual(darkMix, 0.03)
+    }
+
     /// (o) Every pixel with w = 0 renders exactly as alpha 16's path does, under Subject +3 and
     /// Background −3, on a soft hair-like edge whose shares differ by channel; the background
     /// side never reads C; and the views render with a repaint.
     func testRepaintLeavesEverythingElseAsAlpha16() throws {
         let w = 120, h = 60
         var px = [UInt8](repeating: 0, count: w * h * 4), alpha = [UInt8](repeating: 0, count: w * h)
-        var shares = [UInt8](repeating: 0, count: w * h * 4), map = Repaint.blank(count: w * h)
+        var shares = [UInt8](repeating: 0, count: w * h * 4), map = Repaint.blank(count: w * h), back = Repaint.blank(count: w * h)
         for y in 0 ..< h {
             for x in 0 ..< w {
                 let i = y * w + x
@@ -169,13 +210,18 @@ final class RepaintRenderTests: XCTestCase {
                     map[i * 4] = 128 - 8
                     map[i * 4 + 2] = x < 20 ? 255 : UInt8(255 * (25 - x) / 6)
                 }
+                // And a background-side strip (columns 60–69, feathered out by 74), pointing 30 px right.
+                if x >= 60 && x < 75 {
+                    back[i * 4] = 128 + 30
+                    back[i * 4 + 2] = x < 70 ? 255 : UInt8(255 * (75 - x) / 6)
+                }
             }
         }
         let picture = try XCTUnwrap(Masking.picture(rgbx: px, w: w, h: h))
         let a = try XCTUnwrap(Masking.picture(gray: alpha, w: w, h: h)), s = try XCTUnwrap(Masking.picture(rgbx: shares, w: w, h: h))
         let plainMask = MaskResult(width: w, height: h, alpha: a, shares: s, skin: nil, trimap: a, coarse: a, tier: .off, summary: "")
         let repaintMask = MaskResult(width: w, height: h, alpha: a, shares: s, skin: nil, trimap: a, coarse: a, tier: .off, summary: "",
-                                     repaint: try XCTUnwrap(Masking.picture(rgbx: map, w: w, h: h)))
+                                     repaint: try XCTUnwrap(Masking.picture(rgbx: map, w: w, h: h)), repaintBack: try XCTUnwrap(Masking.picture(rgbx: back, w: w, h: h)))
         let source = CIImage(cgImage: picture), extent = CGRect(x: 0, y: 0, width: w, height: h)
         func bytes(_ image: CIImage) throws -> [UInt8] {
             let p = try XCTUnwrap(Imaging.pixels(image, from: extent))
@@ -190,7 +236,7 @@ final class RepaintRenderTests: XCTestCase {
             for x in 0 ..< w {
                 let i = (y * w + x) * 4
                 let equal = alpha16[i ..< i + 3] == now[i ..< i + 3]
-                if map[i + 2] == 0 {
+                if map[i + 2] == 0 && back[i + 2] == 0 {
                     if equal { same += 1 } else {
                         differ += 1
                         columns[x, default: 0] += 1
@@ -199,7 +245,7 @@ final class RepaintRenderTests: XCTestCase {
                 } else if !equal { repaintedDiffer += 1 }
             }
         }
-        print("V7.1-O w = 0 under Subject +3 / Background −3 on a soft hair edge: \(same) px identical to alpha 16, \(differ) different "
+        print("V7.2-V w = wb = 0 under Subject +3 / Background −3 on a soft hair edge: \(same) px identical to alpha 16, \(differ) different "
             + "(largest \(largest)/255; by column \(columns.sorted { $0.key < $1.key }.map { "\($0.key):\($0.value)" }.joined(separator: " "))) · "
             + "\(repaintedDiffer) repainted px changed")
         // Diagnosis: the same two renders with float intermediates.
@@ -212,8 +258,8 @@ final class RepaintRenderTests: XCTestCase {
         }
         let f16 = try floatBytes(render(plainMask, source, edited)), fNow = try floatBytes(render(repaintMask, source, edited))
         var floatDiffer = 0
-        for i in stride(from: 0, to: w * h * 4, by: 4) where map[i + 2] == 0 && f16[i ..< i + 3] != fNow[i ..< i + 3] { floatDiffer += 1 }
-        print("V7.1-O with float intermediates: \(floatDiffer) px with w = 0 differ")
+        for i in stride(from: 0, to: w * h * 4, by: 4) where map[i + 2] == 0 && back[i + 2] == 0 && f16[i ..< i + 3] != fNow[i ..< i + 3] { floatDiffer += 1 }
+        print("V7.2-V with float intermediates: \(floatDiffer) px with w = wb = 0 differ")
         // Owner (spec v7.1, answer to default 4, then the rounding question): w = 0 renders as
         // alpha 16 does, to Core Image's rounding of its in-between pictures, at most 1/255.
         XCTAssertLessThanOrEqual(largest, 1, "pixels with w = 0 render as alpha 16 does, to 1/255")

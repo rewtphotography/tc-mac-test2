@@ -921,6 +921,19 @@ $0 with its free minutes used, so the owner made the repository public (free bui
 download link now works without signing in). macOS jobs on it have twice waited 15 minutes for
 a runner and been cancelled; a re-run got one at once.
 
+## Masking spec v7.2 (alpha 22): closing build for the masking chapter
+
+`docs/specs/masking-spec-v7.2.md`. Adopted, with the owner's two answers given before the build
+(at the spec's end): Remove Colour's stair-steps were 1 photo px, not 2 (there is no half-size
+mask), so the fix is "cut by mix", not area-averaging; v7.1's 40 px speck rule is kept beside
+§2's rim rule (test (l)). Defaults taken: the cut runs only with "Edge colour from inside" on;
+the cut never takes a pixel below the coverage its colour shows where the two agree (else
+every soft edge lost its outer third); the views use Cb on the background side; the guess
+drops clusters under 2%; Edge Colour keeps the hair zone and hair strokes out; the Strength
+slider redoes the last stroke from its kept result. Clean Edge and its test are gone. Details
+and every number: `MASKING.md`, section 20. After this build masking is closed; next is saving
+tool work and local edits (and the two-photo mask limit).
+
 ## Still to design
 
 The owner will share screenshots of how they use Bridge. Until then these are open: where

@@ -33,6 +33,27 @@ public struct InsideColourSettings: Equatable {
     /// fade is softened with this radius (Gaussian σ = half of it) (spec v7.1, 1.1).
     public var feather: Float = 2
     public var featherBlur: Float = 1.5
+
+    // Spec v7.2.
+    /// §2: cut edge pixels that clearly match the background (Debug "Cut background-coloured
+    /// edge pixels"). With it off, rim light is judged as in v7.1.
+    public var cut = true
+    /// §1: solid background is alpha at most `backgroundAlpha` and at least `backgroundDepth`
+    /// pixels outside the half-way line; beyond `backgroundReach` of it B̂ is unknown.
+    public var backgroundAlpha: Float = 0.02
+    public var backgroundDepth: Float = 6
+    public var backgroundReach: Float = 30
+    /// §2: pixels up to this far inside the half-way line (and all of the soft edge outside it)
+    /// are judged; a pixel is background-like when it is at least `cutApart` from F̂ in (a, b)
+    /// and at most `cutNone` × that from B̂; it is cut in full at `cutFull` × that or nearer.
+    public var cutInside: Float = 6
+    public var cutApart: Float = 0.04
+    public var cutFull: Float = 0.25
+    public var cutNone: Float = 0.5
+    /// §2: within this of B̂ in full Oklab a pixel is background showing through: never rim light.
+    public var nearBackground: Float = 0.03
+    /// §3: the background side's repaint core reaches this many pixels outside the half-way line.
+    public var backCore: Float = 3
     public init() {}
 }
 
@@ -212,11 +233,13 @@ public enum Repaint {
     /// w > 0. `skip` says, for a pixel and its inside colour (linear), that it is excluded
     /// (the hair zone unless the inside is skin; a hair stroke): no core of its own.
     /// `matched` (Remove Colour) marks pixels that match a sampled colour: never rim light,
-    /// and never a source of the inside colour.
+    /// and never a source of the inside colour. `flags` (spec v7.2, 2: `EdgeCut`), over `rect`:
+    /// `EdgeCut.neverRim` pixels are never rim light, `EdgeCut.forceCore` ones join the core.
+    /// `rimOff` (the Edge Colour box, an eyedropper Remove Colour box): nothing is rim light.
     public static func apply(photo: Photo, alpha: UnsafePointer<UInt8>, shares: UnsafeMutablePointer<UInt8>, map: UnsafeMutablePointer<UInt8>,
                              rect: PixelRect, settings s: InsideColourSettings = InsideColourSettings(),
                              skip: (Int, Int, SIMD3<Float>) -> Bool = { _, _, _ in false },
-                             matched: ((Int, Int) -> Bool)? = nil) -> RepaintStats {
+                             matched: ((Int, Int) -> Bool)? = nil, flags: [UInt8]? = nil, rimOff: Bool = false) -> RepaintStats {
         let W = photo.w, H = photo.h
         let r = rect.clamped(w: W, h: H)
         var stats = RepaintStats()
@@ -272,7 +295,9 @@ public enum Repaint {
                                 xs[ri] = Int8(min(max(sx - x, -127), 127)); ys[ri] = Int8(min(max(sy - y, -127), 127))
                                 let F = InsideColour.median3(photo, sx, sy)
                                 if skip(x, y, F) { kinds[ri] = 4; continue }
-                                if matched?(x, y) != true {
+                                let flag = flags?[ri] ?? 0
+                                if flag & EdgeCut.forceCore != 0 { kinds[ri] = 1; continue }
+                                if !rimOff && flag & EdgeCut.neverRim == 0 && matched?(x, y) != true {
                                     let o = (y * W + x) * 4
                                     let now = SIMD3<Float>(Float(shares[o]), Float(shares[o + 1]), Float(shares[o + 2])) / 255
                                     let C = InsideColour.rimColour(x: x, y: y, alpha: a8, part: InsideColour.linear(photo, x, y) * now, look: s.rimLook,
@@ -305,8 +330,47 @@ public enum Repaint {
             }
         }
         for k in kind where k == 3 { stats.unknown += 1 }
-        // The weight: 1 on the core, fading over `feather` pixels round it, softened, never
-        // under 1 on the core. Not into a protected rim (its colour is the point).
+        let made = feather(rect: r, tiles: tiles, core: kind.map { $0 == 1 }, protected: protected, offX: offX, offY: offY,
+                           alpha: alpha, shares: shares, map: map, W: W, settings: s)
+        let coreCount = made.core, feathered = made.feathered
+        stats.core = coreCount
+        stats.feathered = feathered
+        return stats
+    }
+
+    /// Tiles of 256 pixels covering `r`.
+    static func tiles(_ r: PixelRect, size tile: Int = 256) -> [PixelRect] {
+        var tiles: [PixelRect] = []
+        for ty in stride(from: r.y, to: r.maxY, by: tile) {
+            for tx in stride(from: r.x, to: r.maxX, by: tile) {
+                tiles.append(PixelRect(x: tx, y: ty, w: min(tile, r.maxX - tx), h: min(tile, r.maxY - ty)))
+            }
+        }
+        return tiles
+    }
+
+    /// Whether a tile of the mask holds any edge (a part-covered pixel, or both sides).
+    static func holdsEdge(_ t: PixelRect, alpha: UnsafePointer<UInt8>, W: Int) -> Bool {
+        var low = false, high = false
+        for y in t.y ..< t.maxY {
+            for x in t.x ..< t.maxX {
+                let a = alpha[y * W + x]
+                if a > 1 && a < 255 { return true }
+                if a < 128 { low = true } else { high = true }
+                if low && high { return true }
+            }
+        }
+        return false
+    }
+
+    /// The weight round a core (spec v7.1, 1.1): 1 on the core, fading over `feather` pixels
+    /// round it, softened, never under 1 on the core; 0 on `protected` pixels. Written into
+    /// `map` (with each pixel's offset) wherever it is over 0, and, with `shares`, shares set
+    /// to alpha there. `core`, `protected` and the offsets are over `rect`.
+    static func feather(rect r: PixelRect, tiles: [PixelRect], core: [Bool], protected: [Bool]?, offX: [Int8], offY: [Int8],
+                        alpha: UnsafePointer<UInt8>, shares: UnsafeMutablePointer<UInt8>?, map: UnsafeMutablePointer<UInt8>,
+                        W: Int, settings s: InsideColourSettings) -> (core: Int, feathered: Int) {
+        let rw = r.w
         let sigma = max(s.featherBlur / 2, 0.3), radius = Int((2 * sigma).rounded(.up))
         let kernel = (-radius ... radius).map { exp(-Float($0 * $0) / (2 * sigma * sigma)) }
         let ksum = kernel.reduce(0, +)
@@ -314,15 +378,15 @@ public enum Repaint {
         let lock = NSLock()
         var feathered = 0, coreCount = 0
         parallel(tiles.count) { t in
-            let core = tiles[t]
-            let crop = PixelRect(x: core.x - apronB, y: core.y - apronB, w: core.w + 2 * apronB, h: core.h + 2 * apronB).clamped(w: r.maxX, h: r.maxY)
+            let tile = tiles[t]
+            let crop = PixelRect(x: tile.x - apronB, y: tile.y - apronB, w: tile.w + 2 * apronB, h: tile.h + 2 * apronB).clamped(w: r.maxX, h: r.maxY)
             let cx0 = max(crop.x, r.x), cy0 = max(crop.y, r.y)
             let cw = crop.maxX - cx0, ch = crop.maxY - cy0
             if cw <= 0 || ch <= 0 { return }
             var isCore = [Bool](repeating: false, count: cw * ch)
             var any = false
             for y in 0 ..< ch {
-                for x in 0 ..< cw where kind[(cy0 + y - r.y) * rw + (cx0 + x - r.x)] == 1 { isCore[y * cw + x] = true; any = true }
+                for x in 0 ..< cw where core[(cy0 + y - r.y) * rw + (cx0 + x - r.x)] { isCore[y * cw + x] = true; any = true }
             }
             if !any { return }
             let d = PlaneMath.distance(to: isCore, w: cw, h: ch)
@@ -343,17 +407,19 @@ public enum Repaint {
                 }
             }
             var nF = 0, nC = 0
-            for y in core.y ..< core.maxY {
-                for x in core.x ..< core.maxX {
+            for y in tile.y ..< tile.maxY {
+                for x in tile.x ..< tile.maxX {
                     let li = (y - cy0) * cw + (x - cx0), ri = (y - r.y) * rw + (x - r.x)
                     var w = max(wf[li], isCore[li] ? 1 : 0)
-                    if protected[ri] { w = 0 }
+                    if protected?[ri] == true { w = 0 }
                     let w8 = UInt8((min(max(w, 0), 1) * 255).rounded())
                     if w8 == 0 { continue }
                     let o = (y * W + x) * 4
                     map[o] = UInt8(Int(offX[ri]) + 128); map[o + 1] = UInt8(Int(offY[ri]) + 128); map[o + 2] = w8; map[o + 3] = 255
-                    let a = alpha[y * W + x]
-                    shares[o] = a; shares[o + 1] = a; shares[o + 2] = a
+                    if let shares = shares {
+                        let a = alpha[y * W + x]
+                        shares[o] = a; shares[o + 1] = a; shares[o + 2] = a
+                    }
                     if w8 == 255 { nC += 1 } else { nF += 1 }
                 }
             }
@@ -361,8 +427,6 @@ public enum Repaint {
             feathered += nF; coreCount += nC
             lock.unlock()
         }
-        stats.core = coreCount
-        stats.feathered = feathered
-        return stats
+        return (coreCount, feathered)
     }
 }

@@ -216,6 +216,10 @@ public struct MatteOutput {
     /// pixel, `Repaint`), nil when it didn't run.
     public var repaintStats: RepaintStats?
     public var repaint: [UInt8]?
+    /// Spec v7.2: the background side's repaint map (as `repaint`, pointing at B̂), and what
+    /// the cut and both repaints did.
+    public var repaintBack: [UInt8]?
+    public var edgeColourStats: EdgeColour.Stats?
 }
 
 /// How clean a finished edge is, measured in a ring 3 to 10 pixels either side of the
@@ -1482,13 +1486,14 @@ public final class Matte {
             guardCorrections = corrected.fixed
             log.append("colour guard: \(corrected.fixed) of \(corrected.checked) edge pixels had gained colour and were put back\(corrected.fixed > 0 ? guardNote : "")\(lightnessNote)")
         }
-        var insideStats: RepaintStats?
-        var repaintMap: [UInt8]?
+        var insideStats: EdgeColour.Stats?
+        var repaintMap: [UInt8]?, backMap: [UInt8]?
         if settings.insideColour && haveOff {
             let made = colourFromInside(alpha8, shares)
             insideStats = made.stats
             repaintMap = made.map
-            log.append(made.stats.summary)
+            backMap = made.back
+            log += made.stats.lines
         }
         let n = qw * qh
         var tri8 = [UInt8](repeating: 0, count: n), hair8 = [UInt8](repeating: 0, count: n), zones = [UInt8](repeating: 0, count: n)
@@ -1506,8 +1511,10 @@ public final class Matte {
         out.lightnessCorrections = lightnessCorrections
         out.edgeOffset = edgeOffset(of: alpha8)
         out.edgeOffsetBefore = offsetBefore
-        out.repaintStats = insideStats
+        out.repaintStats = insideStats?.repaint
+        out.edgeColourStats = insideStats
         out.repaint = repaintMap
+        out.repaintBack = backMap
         log.append("edge placement: " + out.edgeOffset.summary)
         return out
     }
@@ -1587,14 +1594,14 @@ public final class Matte {
 
     /// Edge colour from inside (spec v7, section 2) over the band, as the last step. Not
     /// under the hair brush; in the hair zone only where the inside colour is skin.
-    private func colourFromInside(_ alpha8: Buf<UInt8>, _ shares: Buf<UInt8>) -> (stats: RepaintStats, map: [UInt8]) {
+    private func colourFromInside(_ alpha8: Buf<UInt8>, _ shares: Buf<UInt8>) -> (stats: EdgeColour.Stats, map: [UInt8], back: [UInt8]) {
         let b = band0
         let rect = PixelRect(x: b.x - 8, y: b.y - 8, w: b.w + 16, h: b.h + 16).clamped(w: W, h: H)
         let stroke = forced.map { Buf($0.resized(w: qw, h: qh).v) }
         let hairZone = hairFaces.count == qw * qh ? hairFaces : nil
         let skin = self.skin
-        let map = Buf<UInt8>(Repaint.blank(count: W * H))
-        let stats = Repaint.apply(photo: photo, alpha: UnsafePointer(alpha8.p), shares: shares.p, map: map.p, rect: rect, settings: settings.inside, skip: { x, y, F in
+        let map = Buf<UInt8>(Repaint.blank(count: W * H)), back = Buf<UInt8>(Repaint.blank(count: W * H))
+        let stats = EdgeColour.run(photo: photo, alpha: alpha8.p, shares: shares.p, map: map.p, back: back.p, rect: rect, settings: settings.inside, skip: { x, y, F in
             if let stroke = stroke, self.sample1(stroke.p, x, y) > 0.02 { return true }
             if let zone = hairZone, self.sample1(zone.p, x, y) >= 0.5 {
                 guard let skin = skin else { return true }
@@ -1603,7 +1610,7 @@ public final class Matte {
             }
             return false
         })
-        return (stats, map.array)
+        return (stats, map.array, back.array)
     }
 
     /// The colour guard (masking spec v5, 1.1). Every edge pixel whose channels have

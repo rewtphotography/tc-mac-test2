@@ -46,45 +46,46 @@ struct LocalPane: View {
                             .foregroundStyle(Theme.muted)
                             .fixedSize(horizontal: false, vertical: true)
                     }
-                    if session.maskTool == .hair || session.maskTool == .clean {
+                    if session.maskTool == .hair {
                         LocalRow(title: "Brush size", text: "\(Int(session.brushSize)) px", changed: false, range: 4 ... 600,
                                  value: Binding(get: { Float(session.brushSize) }, set: { session.brushSize = Double($0) }),
                                  reset: { session.brushSize = 60 })
                             .help("The brush's radius in pixels of the photo. The [ and ] keys change it too.")
-                    }
-                    if session.maskTool == .clean {
-                        LocalRow(title: "Strength", text: String(format: "%.2f", session.cleanStrength), changed: session.cleanStrength != 1, range: 0 ... 1,
-                                 value: Binding(get: { Float(session.cleanStrength) }, set: { session.cleanStrength = Double($0) }),
-                                 reset: { session.cleanStrength = 1 })
-                            .help("How far the brush may move the mask from where it was")
-                        LocalRow(title: "Tightness", text: String(format: "%+.2f", session.cleanTightness), changed: session.cleanTightness != 0, range: -1 ... 1,
-                                 value: Binding(get: { Float(session.cleanTightness) }, set: { session.cleanTightness = abs(Double($0)) < 0.03 ? 0 : Double($0) }),
-                                 reset: { session.cleanTightness = 0 })
-                            .help("Above 0 pulls the edge in towards the subject; below 0 lets it out")
+                        LocalRow(title: "Strength", text: String(format: "%.2f", session.hairStrength), changed: session.hairStrength != 0, range: 0 ... 1,
+                                 value: Binding(get: { Float(session.hairStrength) }, set: { session.hairStrength = Double($0) }),
+                                 reset: { session.hairStrength = 0 })
+                            .help("0 only tidies and fills the edge that is there; 1 lets the stroke add strands beyond it. Moving it redoes the last stroke.")
                     }
                     if session.maskTool == .removeColour {
                         HStack(spacing: 4) {
-                            if session.removeSamples.isEmpty {
-                                Text("No colour picked yet")
+                            let picked = !session.removeSamples.isEmpty
+                            let shown = picked ? session.removeSamples : session.removeGuessed
+                            if shown.isEmpty {
+                                Text("Automatic: guessed from the box")
                                     .font(.system(size: 11))
                                     .foregroundStyle(Theme.muted)
                             }
-                            ForEach(Array(session.removeSamples.enumerated()), id: \.offset) { _, c in
+                            ForEach(Array(shown.enumerated()), id: \.offset) { _, c in
                                 RoundedRectangle(cornerRadius: 3)
                                     .fill(Color(.sRGB, red: Double(c.x), green: Double(c.y), blue: Double(c.z), opacity: 1))
                                     .frame(width: 18, height: 18)
                                     .overlay(RoundedRectangle(cornerRadius: 3).stroke(Color.white.opacity(0.5), lineWidth: 1))
                             }
+                            if !shown.isEmpty {
+                                Text(picked ? "picked" : "auto")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(Theme.muted)
+                            }
                             Spacer()
                             Button("Clear") { session.clearRemoveSamples() }
                                 .controlSize(.small)
-                                .disabled(session.removeSamples.isEmpty)
-                                .help("Forgets the colours picked")
+                                .disabled(!picked)
+                                .help("Forgets the colours picked: back to the automatic guess, and the last box done again")
                         }
                         LocalRow(title: "Tolerance", text: String(format: "%.3f", session.removeTolerance), changed: session.removeTolerance != 0.05, range: 0.01 ... 0.15,
                                  value: Binding(get: { Float(session.removeTolerance) }, set: { session.removeTolerance = Double($0) }),
                                  reset: { session.removeTolerance = 0.05 })
-                            .help("How close to a picked colour a pixel must be to go. Moving it does the last Remove Colour box again.")
+                            .help("How close to a colour to remove a pixel must be to go. Moving it does the last Remove Colour box again.")
                     }
                     Button(session.refineCount == 0 ? "Undo" : "Undo (\(session.refineCount))") { session.undoTool() }
                         .controlSize(.small)
@@ -114,7 +115,11 @@ struct LocalPane: View {
                         .help("The last check that no edge pixel comes out more colourful, or a different hue, than the photo has it")
                     Toggle("Edge colour from inside", isOn: $session.insideColour)
                         .controlSize(.small)
-                        .help("Each edge pixel's subject colour taken from the solid subject just inside it (like Photoshop's Decontaminate Colors). Off is alpha 16's edge colour.")
+                        .help("Each edge pixel's subject colour taken from the solid subject just inside it (like Photoshop's Decontaminate Colors), and the background side's from the background just outside. Off is alpha 16's edge colour.")
+                    Toggle("Cut background-coloured edge pixels", isOn: $session.cutBackground)
+                        .controlSize(.small)
+                        .disabled(!session.insideColour)
+                        .help("Edge pixels that are clearly the background's colour lose their coverage (green streaks on fingers, orange specks). Works with Edge colour from inside.")
                     Picker("Hair method", selection: $session.hairMethod) {
                         ForEach(HairMethod.allCases, id: \.rawValue) { Text($0.name).tag($0) }
                     }

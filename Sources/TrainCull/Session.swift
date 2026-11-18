@@ -139,21 +139,40 @@ final class Session: ObservableObject {
     @Published var colourGuard = true { didSet { if colourGuard != oldValue { edgeStepChanged("colour guard", colourGuard) } } }
     @Published var edgeRecentre = true { didSet { if edgeRecentre != oldValue { edgeStepChanged("edge re-centre", edgeRecentre) } } }
     /// The mask tools: which is chosen, the brush, and the Clean Edge and Refine Hair settings.
-    @Published var maskTool = MaskTool.none { didSet { if maskTool != oldValue { toolChanged() } } }
+    @Published var maskTool = MaskTool.none {
+        didSet {
+            guard maskTool != oldValue else { return }
+            toolChanged()
+            if maskTool == .hair { prewarmMatting("Refine Hair chosen") }
+        }
+    }
     /// Debug (spec v7, 2): edge colour from inside, the last step of every mask and box.
     @Published var insideColour = true { didSet { if insideColour != oldValue { edgeStepChanged("edge colour from inside", insideColour) } } }
-    /// Remove Colour (spec v7, 3): the colours picked with the eyedropper (display values),
-    /// and the tolerance. Moving the tolerance does the last Remove Colour box again in its place.
+    /// Debug (spec v7.2, 2): cut edge pixels that clearly match the background (part of edge colour from inside).
+    @Published var cutBackground = true { didSet { if cutBackground != oldValue { edgeStepChanged("cut background-coloured edge pixels", cutBackground) } } }
+    /// Remove Colour (spec v7.2, 4): the colours picked with the eyedropper (display values),
+    /// none for the automatic guess; the colours the last box guessed; and the tolerance.
+    /// Moving the tolerance, or picking a colour, does the last Remove Colour box again in its place.
     @Published var removeSamples: [SIMD3<Float>] = []
+    @Published var removeGuessed: [SIMD3<Float>] = []
     @Published var removeTolerance: Double = 0.05 {
         didSet {
             guard removeTolerance != oldValue else { return }
             retuneToken += 1
             let token = retuneToken
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { if token == self.retuneToken { self.retuneRemoveColour() } }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { if token == self.retuneToken { self.redoLast(.removeColour, why: "tolerance changed") } }
         }
     }
     private var retuneToken = 0
+    /// Refine Hair's Strength (spec v7.2, 6): 0 only tidies the edge. Moving it redoes the last stroke.
+    @Published var hairStrength: Double = 0 {
+        didSet {
+            guard hairStrength != oldValue else { return }
+            retuneToken += 1
+            let token = retuneToken
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { if token == self.retuneToken { self.redoLast(.hair, why: "strength changed") } }
+        }
+    }
     /// The brush's radius, in pixels of the photo.
     @Published var brushSize: Double = 60 { didSet { if brushSize != oldValue { toolChanged() } } }
     /// Show edits: every box and stroke on this photo stays drawn over it. Off, only the one being
@@ -168,8 +187,6 @@ final class Session: ObservableObject {
     }
     /// The tool job whose box or stroke is held on the large image until it is done, and its frame.
     private var pendingJob: (job: Int, frame: Int)?
-    @Published var cleanStrength: Double = 1
-    @Published var cleanTightness: Double = 0
     @Published var hairMethod = HairMethod.auto
     @Published var hairContrast: Double = 0.5
     /// Low on purpose: on the owner's convention photos the matting model beat colour matting even
@@ -586,6 +603,7 @@ final class Session: ObservableObject {
                 var op = RefineOp(tool: self.maskTool, box: box, stroke: nil, restore: restore)
                 if op.tool == .removeColour {
                     op.samples = self.removeSamples
+                    op.automatic = self.removeSamples.isEmpty
                     op.tolerance = Float(self.removeTolerance)
                 }
                 self.userTool(op)
@@ -594,8 +612,7 @@ final class Session: ObservableObject {
                 guard let self = self else { return }
                 let stroke = RefineStroke(points: points.map { SIMD2(Float($0.x), Float($0.y)) }, radius: Float(radius))
                 var op = RefineOp(tool: self.maskTool, box: nil, stroke: stroke, restore: restore)
-                op.clean.strength = Float(self.cleanStrength)
-                op.clean.tightness = Float(self.cleanTightness)
+                op.hairStrength = Float(self.hairStrength)
                 self.userTool(op)
             }
             toolChanged()
@@ -1135,6 +1152,14 @@ final class Session: ObservableObject {
         }
     }
 
+    /// Loads the hair-matting model ahead of the first Refine Hair stroke (spec v7.2, 6), so
+    /// that stroke doesn't wait for it. Nothing when it is loaded already.
+    private func prewarmMatting(_ why: String) {
+        guard BundledModels.hasBiRefNet, BiRefNetModel.matting.isAvailable, !BiRefNetModel.matting.isLoaded else { return }
+        Log.note("model", "\(BiRefNetModel.matting.label): made ready ahead (\(why))")
+        maskQueue.async { BiRefNetModel.matting.prewarm() }
+    }
+
     /// The selection rules as the panel has them set.
     private var subjectRules: SubjectRules {
         var rules = SubjectRules()
@@ -1223,6 +1248,7 @@ final class Session: ObservableObject {
                         for op in again { self.applyTool(op, to: item, trigger: "replay") }
                     }
                     if still { self.toolChanged() }
+                    if self.editing { self.prewarmMatting("mask made") }
                     if still {
                         self.maskStatus = mask.summary + (Masking.blendsByChannel ? "" : " (plain blending)")
                         if self.localArea == .skin && mask.skin == nil { self.localArea = .subject }
@@ -1247,6 +1273,7 @@ final class Session: ObservableObject {
         settings.colourGuard = colourGuard
         settings.recentre = edgeRecentre
         settings.insideColour = insideColour
+        settings.inside.cut = cutBackground
         return settings
     }
 
@@ -1271,24 +1298,31 @@ final class Session: ObservableObject {
                     self.maskStatus = "The colour couldn't be read there."
                     return
                 }
+                // An eyedropper pick never adds to the automatic guess: it replaces it.
                 self.removeSamples = add ? self.removeSamples + [colour] : [colour]
                 let text = String(format: "%.0f, %.0f, %.0f", locale: Locale(identifier: "en_US_POSIX"), colour.x * 255, colour.y * 255, colour.z * 255)
                 Log.note("tool", "\(name): remove colour: \(add ? "added" : "picked") \(text) at \(x),\(y) · \(self.removeSamples.count) sample(s)")
-                self.maskStatus = "\(self.removeSamples.count) colour\(self.removeSamples.count == 1 ? "" : "s") to remove. Drag a box over the place."
+                if !self.redoLast(.removeColour, why: "colour picked") {
+                    self.maskStatus = "\(self.removeSamples.count) colour\(self.removeSamples.count == 1 ? "" : "s") to remove. Drag a box over the place."
+                }
             }
         }
     }
 
+    /// Clear: back to the automatic guess, and the last box done again with it.
     func clearRemoveSamples() {
         removeSamples = []
-        Log.note("tool", "remove colour: samples cleared")
+        Log.note("tool", "remove colour: picked colours cleared, back to the automatic guess")
+        redoLast(.removeColour, why: "back to the automatic guess")
     }
 
-    /// The tolerance moved: the last operation, if it is a Remove Colour box, is done again in
-    /// its place with the new tolerance (one undo step still).
-    private func retuneRemoveColour() {
-        guard let item = current, !maskBusy, var state = refined[item.id], let last = state.ops.last, last.tool == .removeColour, !last.restore,
-              let undo = state.undos.last, let mask = currentMask else { return }
+    /// The last operation, if it is `tool`'s and not a restore, done again in its place with
+    /// the panel's settings now (one undo step still): the tolerance, the picked colours or
+    /// the automatic guess (Remove Colour), the strength (Refine Hair). False when there was none.
+    @discardableResult
+    private func redoLast(_ tool: MaskTool, why: String) -> Bool {
+        guard let item = current, !maskBusy, var state = refined[item.id], let last = state.ops.last, last.tool == tool, !last.restore,
+              let undo = state.undos.last, let mask = currentMask else { return false }
         do {
             let before = try Masking.undone(mask, undo)
             state.ops.removeLast()
@@ -1296,11 +1330,22 @@ final class Session: ObservableObject {
             refined[item.id] = state
             keep(before, for: item)
             var op = last
-            op.tolerance = Float(removeTolerance)
-            Log.note("tool", "\(item.name): remove colour: tolerance " + String(format: "%.3f", locale: Locale(identifier: "en_US_POSIX"), removeTolerance) + ", the last box done again")
-            applyTool(op, to: item, trigger: "tolerance changed")
+            switch tool {
+            case .removeColour:
+                op.tolerance = Float(removeTolerance)
+                op.samples = removeSamples
+                op.automatic = removeSamples.isEmpty
+            case .hair:
+                op.hairStrength = Float(hairStrength)
+            default:
+                break
+            }
+            Log.note("tool", "\(item.name): \(tool.name): \(why), the last one done again")
+            applyTool(op, to: item, trigger: why)
+            return true
         } catch {
-            Log.warn("\(item.name): remove colour couldn't be done again: \(error)")
+            Log.warn("\(item.name): \(tool.name) couldn't be done again: \(error)")
+            return false
         }
     }
 
@@ -1315,8 +1360,8 @@ final class Session: ObservableObject {
         switch maskTool {
         case .none: view.tool = .none
         case .edges: view.tool = .box
-        case .hair, .clean: view.tool = .brush(radius: CGFloat(brushSize))
-        case .removeColour: view.tool = .box
+        case .hair: view.tool = .brush(radius: CGFloat(brushSize))
+        case .removeColour, .edgeColour: view.tool = .box
         }
         view.picksColour = maskTool == .removeColour
         let ops = refined[selected]?.ops ?? []
@@ -1377,7 +1422,7 @@ final class Session: ObservableObject {
                 return
             }
             let meter = JobMeter()
-            let result = Result { () -> (mask: MaskResult, undo: RefineUndo) in
+            let result = Result { () -> (mask: MaskResult, undo: RefineUndo, op: RefineOp, message: String?) in
                 try Masking.refine(url: url, mask: now, automatic: base, op: op, options: options, faces: known, rules: rules, subject: source,
                                    progress: { text in DispatchQueue.main.async { self.maskStatus = "\(text)…" } },
                                    partial: { quick in
@@ -1405,12 +1450,14 @@ final class Session: ObservableObject {
                     Log.note("job", "#\(job) completed in \(Log.seconds(since: requested))")
                     self.keep(done.mask, for: item)
                     if var state = self.refined[id] {
-                        state.ops.append(op)
+                        // As done: Remove Colour's guessed colours are kept, so Remake does the same again.
+                        state.ops.append(done.op)
                         state.undos.append(done.undo)
                         self.refined[id] = state
                     }
+                    if done.op.tool == .removeColour && still { self.removeGuessed = done.op.automatic ? done.op.samples : [] }
                     if still {
-                        self.maskStatus = done.mask.summary
+                        self.maskStatus = done.message ?? done.mask.summary
                         self.renderTrigger = "tool"
                         self.refreshLocal(item)
                         self.toolChanged()
@@ -1468,7 +1515,7 @@ final class Session: ObservableObject {
         var switches = ["edge_snap": edgeSnap, "decontamination": decontamination, "colour_guard": colourGuard, "edge_recentre": edgeRecentre,
                         "legacy_vision": legacyVision]
         // (Named only when on: with it off the bundle is alpha 16's, byte for byte.)
-        if insideColour { switches["edge_colour_from_inside"] = true }
+        if insideColour { switches["edge_colour_from_inside"] = true; switches["cut_background_coloured_edge_pixels"] = cutBackground }
         say("Writing the debug bundle for \(item.name)…")
         exportQueue.async {
             do {
@@ -1718,7 +1765,7 @@ final class Session: ObservableObject {
         if let window = window, NSApp.keyWindow !== window { return false }
         guard folder != nil, !frames.isEmpty else { return false }
         // With a brush chosen, [ and ] make it smaller and larger.
-        if maskTool == .hair || maskTool == .clean, let key = event.charactersIgnoringModifiers, key == "[" || key == "]" {
+        if maskTool == .hair, let key = event.charactersIgnoringModifiers, key == "[" || key == "]" {
             brushSize = min(max(brushSize * (key == "]" ? 1.2 : 1 / 1.2), 4), 600)
             return true
         }
