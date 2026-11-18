@@ -868,6 +868,12 @@ owner's photos, which this session doesn't have. Acceptance (owner's correction)
 and sleeve. The yellow on 7451's right waist is real light from an orange-clad person behind
 her and is accepted as it is: not a pass condition, not to be tuned for.
 
+**The automated build (alpha 18):** the first run compiled, passed every test and started, and
+then failed uploading the app as an artifact: the repository's artifact storage was full.
+With the build no longer keeping the app or the models as artifacts, the second run published
+alpha 18; the app loads BiRefNet on entering Edit. The launch pictures could not be kept
+(storage still full) and the release went ahead without them, as now set up.
+
 ## Still to design
 
 The owner will share screenshots of how they use Bridge. Until then these are open: where
