@@ -184,16 +184,36 @@ final class RepaintRenderTests: XCTestCase {
         }
         let edited = edits(subject: 3, background: -3)
         let alpha16 = try bytes(render(plainMask, source, edited)), now = try bytes(render(repaintMask, source, edited))
-        var same = 0, differ = 0, repaintedDiffer = 0
+        var same = 0, differ = 0, repaintedDiffer = 0, largest = 0
+        var columns: [Int: Int] = [:]
         for y in 0 ..< h {
             for x in 0 ..< w {
                 let i = (y * w + x) * 4
                 let equal = alpha16[i ..< i + 3] == now[i ..< i + 3]
-                if map[i + 2] == 0 { if equal { same += 1 } else { differ += 1 } } else if !equal { repaintedDiffer += 1 }
+                if map[i + 2] == 0 {
+                    if equal { same += 1 } else {
+                        differ += 1
+                        columns[x, default: 0] += 1
+                        for ch in 0 ..< 3 { largest = max(largest, abs(Int(alpha16[i + ch]) - Int(now[i + ch]))) }
+                    }
+                } else if !equal { repaintedDiffer += 1 }
             }
         }
-        print("V7.1-O w = 0 under Subject +3 / Background −3 on a soft hair edge: \(same) px identical to alpha 16, \(differ) different · "
+        print("V7.1-O w = 0 under Subject +3 / Background −3 on a soft hair edge: \(same) px identical to alpha 16, \(differ) different "
+            + "(largest \(largest)/255; by column \(columns.sorted { $0.key < $1.key }.map { "\($0.key):\($0.value)" }.joined(separator: " "))) · "
             + "\(repaintedDiffer) repainted px changed")
+        // Diagnosis: the same two renders with float intermediates.
+        let floats = CIContext(options: [.cacheIntermediates: false, .workingFormat: CIFormat.RGBAf])
+        func floatBytes(_ image: CIImage) throws -> [UInt8] {
+            let space = CGColorSpace(name: CGColorSpace.displayP3) ?? CGColorSpaceCreateDeviceRGB()
+            let p = try XCTUnwrap(floats.createCGImage(image, from: extent, format: .RGBA8, colorSpace: space))
+            let data = try XCTUnwrap(p.dataProvider?.data) as Data
+            return [UInt8](data).enumerated().filter { $0.offset % p.bytesPerRow < w * 4 }.map { $0.element }
+        }
+        let f16 = try floatBytes(render(plainMask, source, edited)), fNow = try floatBytes(render(repaintMask, source, edited))
+        var floatDiffer = 0
+        for i in stride(from: 0, to: w * h * 4, by: 4) where map[i + 2] == 0 && f16[i ..< i + 3] != fNow[i ..< i + 3] { floatDiffer += 1 }
+        print("V7.1-O with float intermediates: \(floatDiffer) px with w = 0 differ")
         XCTAssertEqual(differ, 0, "pixels with w = 0 render as alpha 16 does")
         XCTAssertGreaterThan(repaintedDiffer, 0, "the repaint did something where w > 0")
 
