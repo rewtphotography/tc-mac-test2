@@ -48,9 +48,17 @@ extension Refine {
     }
 
     /// Remove Colour. `samples` are the eyedropper's colours (display values, 0 to 1),
-    /// `tolerance` an Oklab distance. Returns the patch to lay in through the box's soft edge,
-    /// like Refine Edges.
-    public static func removeColour(box: PixelRect, samples: [SIMD3<Float>], tolerance: Float, alpha: [UInt8], shares: [UInt8],
+    /// `tolerance` an Oklab distance; `repaint` the mask's repaint map (`Repaint`), if it has
+    /// one. Returns the patch to lay in through the box's soft edge, like Refine Edges, with
+    /// the repaint worked out again inside the box (spec v7.1, 1.2).
+    ///
+    /// Spec v7.1, 3 and 4: a pixel's match with a sample is soft (`weight` 1 within the
+    /// tolerance, falling to 0 at twice it); a pixel that matches is taken out anywhere in the
+    /// box, and partly matching pixels on the line between the inside colour and the sample
+    /// only within `reach` of the outline. The inside colour is taken only from subject that
+    /// doesn't match. Holes the box opens are never refilled where a pixel matched, and
+    /// matching pixels get no rim-light protection.
+    public static func removeColour(box: PixelRect, samples: [SIMD3<Float>], tolerance: Float, alpha: [UInt8], shares: [UInt8], repaint: [UInt8]? = nil,
                                     context c: RefineContext, settings rs: RemoveColourSettings = RemoveColourSettings()) -> RefineResult {
         let W = c.photo.w, H = c.photo.h
         let s = c.settings.inside
@@ -58,11 +66,15 @@ extension Refine {
         let pw = patch.w, ph = patch.h, n = pw * ph
         let photo = c.photo.cropped(patch)
         var before = [UInt8](repeating: 0, count: n), share = [UInt8](repeating: 0, count: n * 4)
+        var map = Repaint.blank(count: n)
         for y in 0 ..< ph {
             for x in 0 ..< pw {
-                let o = (patch.y + y) * W + patch.x + x
-                before[y * pw + x] = alpha[o]
-                for ch in 0 ..< 4 { share[(y * pw + x) * 4 + ch] = shares[o * 4 + ch] }
+                let o = (patch.y + y) * W + patch.x + x, i = y * pw + x
+                before[i] = alpha[o]
+                for ch in 0 ..< 4 {
+                    share[i * 4 + ch] = shares[o * 4 + ch]
+                    if let r = repaint { map[i * 4 + ch] = r[o * 4 + ch] }
+                }
             }
         }
         let inBox = weight(box: box, in: patch, feather: 6)
@@ -71,45 +83,53 @@ extension Refine {
             let l = SIMD3<Float>(lin[Int(min(max(c3.x, 0), 1) * 255)], lin[Int(min(max(c3.y, 0), 1) * 255)], lin[Int(min(max(c3.z, 0), 1) * 255)])
             return (l, Oklab.from(linear: l))
         }
-        var log: [String] = []
         if removed.isEmpty {
-            let out = MatteOutput(w: pw, h: ph, alpha: before, shares: share, trimap: [], trimapW: 0, trimapH: 0,
+            var out = MatteOutput(w: pw, h: ph, alpha: before, shares: share, trimap: [], trimapW: 0, trimapH: 0,
                                   band: PixelRect(x: 0, y: 0, w: 0, h: 0), unknownPixels: 0, log: [])
+            out.repaint = repaint == nil ? nil : map
             return RefineResult(patch: patch, weight: inBox, output: out, log: ["remove colour: nothing sampled, nothing done"])
         }
-        let field0 = InsideColour.field(alpha: before, w: pw, h: ph, settings: s)
-        // 1. How much of each pixel is the sampled colour.
-        var change = [Float](repeating: 0, count: n)
+        let tol = max(tolerance, 1e-4)
+        // How near each pixel is to a sample, and which sample.
+        var nearest = [Float](repeating: .infinity, count: n), which = [Int](repeating: 0, count: n)
         for y in 0 ..< ph {
             for x in 0 ..< pw {
                 let i = y * pw + x
-                if inBox.v[i] <= 0 || before[i] == 0 || abs(field0.depth[i]) > rs.reach { continue }
-                let I = InsideColour.linear(photo, x, y), Ilab = Oklab.from(linear: I)
-                var B = removed[0], dB = Float.infinity
-                for r in removed {
+                let Ilab = Oklab.from(linear: InsideColour.linear(photo, x, y))
+                for (k, r) in removed.enumerated() {
                     let d = Oklab.distance(Ilab, r.lab)
-                    if d < dB { dB = d; B = r }
+                    if d < nearest[i] { nearest[i] = d; which[i] = k }
                 }
-                var t: Float = -1
-                if dB <= tolerance {
-                    t = 1
-                } else if field0.source[i] >= 0 {
+            }
+        }
+        let matchesAny = nearest.map { $0 < 2 * tol }
+        let field0 = InsideColour.field(alpha: before, w: pw, h: ph, settings: s, solidOK: matchesAny.map { !$0 })
+        // 1. How much of each pixel goes.
+        var change = [Float](repeating: 0, count: n)
+        var matched = [Bool](repeating: false, count: n)
+        for y in 0 ..< ph {
+            for x in 0 ..< pw {
+                let i = y * pw + x
+                if inBox.v[i] <= 0 || before[i] == 0 { continue }
+                var remove = 1 - smoothstep(tol, 2 * tol, nearest[i])
+                if remove > 0 { matched[i] = true }
+                if abs(field0.depth[i]) <= rs.reach && field0.source[i] >= 0 {
                     let src = Int(field0.source[i])
                     let F = InsideColour.median3(photo, src % pw, src / pw)
-                    if toSegment(Ilab, Oklab.from(linear: F), B.lab) <= tolerance {
+                    let I = InsideColour.linear(photo, x, y), B = removed[which[i]]
+                    let along = 1 - smoothstep(tol, 2 * tol, toSegment(Oklab.from(linear: I), Oklab.from(linear: F), B.lab))
+                    if along > 0 {
                         let d = B.lin - F
-                        t = min(max(((I - F) * d).sum() / max((d * d).sum(), 1e-12), 0), 1)
+                        let t = min(max(((I - F) * d).sum() / max((d * d).sum(), 1e-12), 0), 1)
+                        remove = max(remove, along * t)
                     }
                 }
-                if t < 0 { continue }
                 let a = Float(before[i]) / 255
-                change[i] = a - min(a, 1 - t)
+                change[i] = a - min(a, 1 - remove)
             }
         }
         // 2. The change softened (not the alpha), inside the box only, averaged over the pixels
-        // that have coverage to lose: next to bare background (nothing to take) it isn't diluted.
-        var inPlay = [Float](repeating: 0, count: n)
-        for i in 0 ..< n where before[i] > 0 { inPlay[i] = 1 }
+        // that have coverage to lose, and never weaker than it was: a 3×3 speck still goes.
         let sigma = max(rs.smooth / 2, 0.3), radius = Int((2 * sigma).rounded(.up))
         let kernel = (-radius ... radius).map { exp(-Float($0 * $0) / (2 * sigma * sigma)) }
         let ksum = kernel.reduce(0, +)
@@ -131,17 +151,20 @@ extension Refine {
             }
             return out
         }
+        var inPlay = [Float](repeating: 0, count: n)
+        for i in 0 ..< n where before[i] > 0 { inPlay[i] = 1 }
         var weighted = change
         for i in 0 ..< n { weighted[i] *= inPlay[i] }
         let num = blur(weighted), den = blur(inPlay)
-        var soft = [Float](repeating: 0, count: n)
-        for i in 0 ..< n where inBox.v[i] > 0 && inPlay[i] > 0 && den[i] > 1e-6 { soft[i] = num[i] / den[i] }
         var after = before
-        for i in 0 ..< n where soft[i] > 0 {
+        for i in 0 ..< n where inBox.v[i] > 0 && inPlay[i] > 0 {
+            let soft = den[i] > 1e-6 ? max(num[i] / den[i], change[i]) : change[i]
+            if soft <= 0 { continue }
             let a = Float(before[i]) / 255
-            after[i] = UInt8((min(max(a - soft[i], 0), a) * 255).rounded())
+            after[i] = UInt8((min(max(a - soft, 0), a) * 255).rounded())
         }
-        // 3. Tidy: pieces the box cut loose from the subject go; holes it opened inside it close.
+        // 3. Tidy: pieces the box cut loose go; holes it opened close, but never over a pixel
+        // that matched a sample (an enclosed patch of wall stays open).
         let hardBefore = before.map { $0 >= 128 }, hardAfter = after.map { $0 >= 128 }
         let (labB, countB) = SubjectSelect.label(hardBefore, w: pw, h: ph)
         var areaB = [Int](repeating: 0, count: countB + 1)
@@ -156,7 +179,7 @@ extension Refine {
             }
             for i in 0 ..< n where labA[i] > 0 {
                 let l = Int(labA[i])
-                if areaA[l] < rs.tidy && wasBigger[l] && labB[i] > 0 && areaB[Int(labB[i])] > areaA[l] {
+                if areaA[l] < rs.tidy && wasBigger[l] && labB[i] > 0 && areaB[Int(labB[i])] > areaA[l] && inBox.v[i] > 0 {
                     after[i] = 0
                     loose += 1
                 }
@@ -175,76 +198,55 @@ extension Refine {
             }
             for i in 0 ..< n where holes[i] > 0 {
                 let l = Int(holes[i])
-                if area[l] < rs.tidy && !open[l] && opened[l] && after[i] != before[i] {
+                if area[l] < rs.tidy && !open[l] && opened[l] && after[i] != before[i] && !matched[i] {
                     after[i] = before[i]
                     closed += 1
                 }
             }
         }
-        // 4. Colour: where coverage was taken, the subject's part is the inside colour at the
-        // new coverage; elsewhere in the box the edge gets its colour from inside as usual.
-        let field1 = InsideColour.field(alpha: after, w: pw, h: ph, settings: s)
-        let share0 = share
+        // 4. Shares: where coverage was taken, scaled down with it, all three together; then
+        // the repaint is worked out again inside the box (and 4 px round it) from the new mask.
         var changed = 0
         var removedSum = 0.0
-        var inside = InsideColourStats()
-        for y in 0 ..< ph {
-            for x in 0 ..< pw {
-                let i = y * pw + x
-                if inBox.v[i] <= 0 { continue }
-                let o = i * 4
-                let I = InsideColour.linear(photo, x, y)
-                let src = Int(field1.source[i])
-                if after[i] != before[i] {
-                    changed += 1
-                    removedSum += Double(Int(before[i]) - Int(after[i])) / 255
-                    let a = Float(after[i]) / 255
-                    var next = SIMD3<Float>(repeating: 0)
-                    if a > 0 {
-                        if src >= 0 {
-                            next = InsideColour.shares(pixel: I, alpha: a, inside: InsideColour.median3(photo, src % pw, src / pw))
-                        } else {
-                            // No inside colour to go by: the shares scaled down with the coverage, all three together.
-                            let k = a / max(Float(before[i]) / 255, 1e-6)
-                            next = SIMD3(Float(share[o]), Float(share[o + 1]), Float(share[o + 2])) / 255 * k
-                        }
+        for i in 0 ..< n where after[i] != before[i] {
+            changed += 1
+            removedSum += Double(Int(before[i]) - Int(after[i])) / 255
+            let k = Float(after[i]) / max(Float(before[i]), 1)
+            for ch in 0 ..< 3 { share[i * 4 + ch] = UInt8((Float(share[i * 4 + ch]) * k).rounded()) }
+        }
+        var stats: RepaintStats?
+        if c.settings.insideColour {
+            let region = PixelRect(x: box.x - patch.x - 4, y: box.y - patch.y - 4, w: box.w + 8, h: box.h + 8).clamped(w: pw, h: ph)
+            for y in region.y ..< region.maxY {
+                for x in region.x ..< region.maxX {
+                    let o = (y * pw + x) * 4
+                    map[o] = 128; map[o + 1] = 128; map[o + 2] = 0; map[o + 3] = 255
+                }
+            }
+            let faces = c.faces, skin = c.skin
+            stats = after.withUnsafeBufferPointer { ap in
+                share.withUnsafeMutableBufferPointer { sp in
+                    map.withUnsafeMutableBufferPointer { mp in
+                        Repaint.apply(photo: photo, alpha: ap.baseAddress!, shares: sp.baseAddress!, map: mp.baseAddress!, rect: region, settings: s,
+                                      skip: { x, y, F in
+                                          guard hairZone(patch.x + x, patch.y + y, faces: faces) >= 0.5 else { return false }
+                                          guard let skin = skin else { return true }
+                                          return skin.value(SIMD3(pow(F.x, 1 / 2.2), pow(F.y, 1 / 2.2), pow(F.z, 1 / 2.2))) < 0.5
+                                      },
+                                      matched: { x, y in matchesAny[y * pw + x] })
                     }
-                    let bytes = (next * 255).rounded(.toNearestOrAwayFromZero)
-                    share[o] = UInt8(bytes.x); share[o + 1] = UInt8(bytes.y); share[o + 2] = UInt8(bytes.z)
-                    continue
                 }
-                // Unchanged: edge colour from inside, with its usual limits.
-                guard c.settings.insideColour, after[i] > 1, field1.depth[i] <= s.bandInside else { continue }
-                if src < 0 { inside.unknown += 1; continue }
-                let F = InsideColour.median3(photo, src % pw, src / pw)
-                if hairZone(patch.x + x, patch.y + y, faces: c.faces) >= 0.5 {
-                    guard let skin = c.skin, skin.value(SIMD3(pow(F.x, 1 / 2.2), pow(F.y, 1 / 2.2), pow(F.z, 1 / 2.2))) >= 0.5 else { continue }
-                }
-                let a = Float(after[i]) / 255
-                let now = SIMD3<Float>(Float(share[o]), Float(share[o + 1]), Float(share[o + 2])) / 255
-                let C = InsideColour.rimColour(x: x, y: y, alpha: after[i], part: I * now, look: s.rimLook,
-                                               alphaAt: { xx, yy in xx >= 0 && yy >= 0 && xx < pw && yy < ph ? after[yy * pw + xx] : nil },
-                                               colourAt: { xx, yy in
-                                                   let q = (yy * pw + xx) * 4
-                                                   let sh = SIMD3<Float>(Float(share0[q]), Float(share0[q + 1]), Float(share0[q + 2])) / 255
-                                                   return InsideColour.linear(photo, xx, yy) * sh / max(Float(after[yy * pw + xx]) / 255, 1e-6)
-                                               })
-                if InsideColour.isRim(colour: C, alpha: a, inside: F, lift: s.rimLift) { inside.rim += 1; continue }
-                let next = InsideColour.shares(pixel: I, alpha: a, inside: F)
-                let bytes = (next * 255).rounded(.toNearestOrAwayFromZero)
-                share[o] = UInt8(bytes.x); share[o + 1] = UInt8(bytes.y); share[o + 2] = UInt8(bytes.z)
-                inside.recoloured += 1
-                inside.deltaE += Double(Oklab.distance(Oklab.from(linear: I * now), Oklab.from(linear: I * next)))
             }
         }
         let posix = Locale(identifier: "en_US_POSIX")
-        log.append("remove colour: \(changed) px changed, mean alpha removed " + String(format: "%.3f", locale: posix, changed > 0 ? removedSum / Double(changed) : 0)
+        var log = ["remove colour: \(changed) px changed, mean alpha removed " + String(format: "%.3f", locale: posix, changed > 0 ? removedSum / Double(changed) : 0)
             + ", samples \(samples.count), tolerance " + String(format: "%.3f", locale: posix, tolerance)
-            + " · box \(box.w)×\(box.h) px at \(box.x),\(box.y) · \(loose) px cut loose and taken out, \(closed) px of small holes closed")
-        if c.settings.insideColour { log.append(inside.summary) }
+            + " · box \(box.w)×\(box.h) px at \(box.x),\(box.y) · \(loose) px cut loose and taken out, \(closed) px of small holes closed"]
+        if let stats = stats { log.append(stats.summary) }
         var out = MatteOutput(w: pw, h: ph, alpha: after, shares: share, trimap: [], trimapW: 0, trimapH: 0,
                               band: PixelRect(x: 0, y: 0, w: pw, h: ph), unknownPixels: 0, log: log)
-        out.insideColourStats = c.settings.insideColour ? inside : nil
+        out.repaintStats = stats
+        out.repaint = c.settings.insideColour || repaint != nil ? map : nil
         return RefineResult(patch: patch, weight: inBox, output: out, log: log)
     }
 }

@@ -519,6 +519,33 @@ public enum Refine {
         return changed
     }
 
+    /// Lays a patch's repaint map (`Repaint`) into the photo's: wherever the tool acted
+    /// (`weight` > 0) and 4 px round it, the repaint is the one worked out from the new mask
+    /// (spec v7.1, 1.2). Returns how many pixels it covered.
+    @discardableResult
+    public static func pasteRepaint(_ patchMap: [UInt8], at patch: PixelRect, weight: Gray, map: inout [UInt8], width W: Int) -> Int {
+        precondition(patchMap.count == patch.w * patch.h * 4 && weight.w == patch.w && weight.h == patch.h)
+        let region = PlaneMath.extremum(Gray(w: patch.w, h: patch.h, v: weight.v.map { $0 > 0 ? 1 : 0 }), radius: 4, smallest: false)
+        var n = 0
+        for y in 0 ..< patch.h {
+            for x in 0 ..< patch.w where region.v[y * patch.w + x] > 0.5 {
+                let i = (y * patch.w + x) * 4, o = ((patch.y + y) * W + patch.x + x) * 4
+                for ch in 0 ..< 4 { map[o + ch] = patchMap[i + ch] }
+                n += 1
+            }
+        }
+        return n
+    }
+
+    /// No repaint where a tool that doesn't work it out (Refine Hair, Clean Edge) acted.
+    public static func clearRepaint(weight: Gray, at patch: PixelRect, map: inout [UInt8], width W: Int) {
+        for y in 0 ..< patch.h {
+            for x in 0 ..< patch.w where weight.v[y * patch.w + x] > 0 {
+                map[((patch.y + y) * W + patch.x + x) * 4 + 2] = 0
+            }
+        }
+    }
+
     /// The engine's settings for a patch whose first-pass mask is a mask that is already
     /// finished (or already made firm): nothing is stretched or steepened a second time.
     public static func patchSettings(from base: MatteSettings = MatteSettings()) -> MatteSettings {
