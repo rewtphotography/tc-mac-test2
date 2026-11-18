@@ -541,9 +541,13 @@ public struct RefineContext {
     public var defocus: Gray?
     public var subjectSharpness: Float?
     public var settings: MatteSettings
+    /// The photo's skin, for edge colour from inside in the hair zone (spec v7, 2).
+    public var skin: SkinModel?
 
-    public init(photo: Photo, faces: [PixelRect], defocus: Gray? = nil, subjectSharpness: Float? = nil, settings: MatteSettings = MatteSettings()) {
+    public init(photo: Photo, faces: [PixelRect], defocus: Gray? = nil, subjectSharpness: Float? = nil, settings: MatteSettings = MatteSettings(),
+                skin: SkinModel? = nil) {
         self.photo = photo; self.faces = faces; self.defocus = defocus; self.subjectSharpness = subjectSharpness; self.settings = settings
+        self.skin = skin
     }
 }
 
@@ -640,10 +644,11 @@ extension Refine {
         if c.settings.recentre && modelPixel > 1.5 { settings.steepen = c.settings.steepen }
         let out = Matte(photo: photo, coarse: gaps.alpha, faces: moved(c.faces, by: patch), settings: settings,
                         defocus: region(c.defocus, photoW: W, photoH: H, patch), subjectSharpness: c.subjectSharpness,
-                        firstPassPixel: modelPixel).run(tier: .off)
+                        firstPassPixel: modelPixel, skin: c.skin).run(tier: .off)
         var log = ["box \(box.w)×\(box.h) px at \(box.x),\(box.y) · the model's pieces: \(pieces) kept, \(dropped) dropped (not part of the subject) · gaps opened \(gaps.opened)"]
         log += gaps.log
-        log += out.log.filter { $0.hasPrefix("snap") || $0.hasPrefix("colour guard") || $0.hasPrefix("decontaminated") || $0.hasPrefix("edge placement") }
+        log += out.log.filter { $0.hasPrefix("snap") || $0.hasPrefix("colour guard") || $0.hasPrefix("decontaminated") || $0.hasPrefix("edge placement")
+            || $0.hasPrefix("edge colour from inside") }
         var result = RefineResult(patch: patch, weight: inBox, output: out, log: log)
         // Only what is new counts as running off: the subject that was already there always does.
         var added = kept
@@ -667,6 +672,7 @@ extension Refine {
                                         settings: clean, reachPixels: reach)
         var settings = patchSettings(from: c.settings)
         settings.colourSnap = false // the brush has already said where the edge is
+        settings.insideColour = false // (spec v7, 2: the base mask, boxes and Remove Colour only)
         let out = Matte(photo: photo, coarse: decided, faces: moved(c.faces, by: patch), settings: settings,
                         defocus: blur, subjectSharpness: c.subjectSharpness).run(tier: .off)
         var log = ["stroke of \(stroke.points.count) points, brush \(Int(stroke.radius)) px · \(note)"]
@@ -697,6 +703,7 @@ extension Refine {
         let photo = c.photo.cropped(patch)
         var settings = patchSettings(from: c.settings)
         settings.relaxGuards = true
+        settings.insideColour = false // never under Refine Hair (spec v7, 2)
         let blur = region(c.defocus, photoW: W, photoH: H, patch)
         var log: [String] = []
         let out: MatteOutput

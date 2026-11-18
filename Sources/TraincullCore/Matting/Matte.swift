@@ -166,6 +166,11 @@ public struct MatteSettings {
     /// A colour change counts as an edge from this much per pixel (all three channels
     /// together, in linear light, each from 0 to 1), and fully at three times it.
     public var edgeStrength: Float = 0.012
+    /// Edge colour from inside (masking spec v7, section 2): the last step, after the colour
+    /// guard. Off here; the app turns it on (Debug: Edge colour from inside). Off, the output
+    /// is alpha 16's, byte for byte.
+    public var insideColour = false
+    public var inside = InsideColourSettings()
 
     public init() {}
 }
@@ -207,6 +212,8 @@ public struct MatteOutput {
     /// Where the finished edge sits against the photo's own, and where the first pass's did.
     public var edgeOffset = EdgeOffset()
     public var edgeOffsetBefore = EdgeOffset()
+    /// What edge colour from inside did, when it ran.
+    public var insideColourStats: InsideColourStats?
 }
 
 /// How clean a finished edge is, measured in a ring 3 to 10 pixels either side of the
@@ -253,6 +260,9 @@ public final class Matte {
     /// The rough mask at the size it was given, for the edge that is scaled up and snapped.
     let m0Fine: Gray
     let forced: Gray?
+    /// The photo's skin, for edge colour from inside: in the hair zone it acts only where the
+    /// inside colour is skin (hands, fingers, neck and shoulders near the face).
+    let skin: SkinModel?
     /// How far each quarter-size pixel is in the hair zone, 0 to 1.
     var hairQ = Buf<Float>(0, 0)
     /// The same from the faces alone, without what the hair brush painted. Under the brush
@@ -329,8 +339,10 @@ public final class Matte {
     ///   - firstPassPixel: photo pixels for each pixel of the model answer the rough mask
     ///     came from. Without it, the rough mask's own pixel size is used.
     public init(photo: Photo, coarse: Gray, faces: [PixelRect], patches: [HeadPatch] = [], settings: MatteSettings = MatteSettings(),
-                defocus: Gray? = nil, subjectSharpness: Float? = nil, forced: Gray? = nil, firstPassPixel: Float? = nil) {
+                defocus: Gray? = nil, subjectSharpness: Float? = nil, forced: Gray? = nil, firstPassPixel: Float? = nil,
+                skin: SkinModel? = nil) {
         self.forced = forced
+        self.skin = skin
         self.firstPassPixel = max(firstPassPixel ?? Float(photo.w) / Float(max(coarse.w, 1)), 1)
         self.photo = photo
         self.settings = settings
@@ -1468,6 +1480,11 @@ public final class Matte {
             guardCorrections = corrected.fixed
             log.append("colour guard: \(corrected.fixed) of \(corrected.checked) edge pixels had gained colour and were put back\(corrected.fixed > 0 ? guardNote : "")\(lightnessNote)")
         }
+        var insideStats: InsideColourStats?
+        if settings.insideColour && haveOff {
+            insideStats = colourFromInside(alpha8, shares)
+            log.append(insideStats!.summary)
+        }
         let n = qw * qh
         var tri8 = [UInt8](repeating: 0, count: n), hair8 = [UInt8](repeating: 0, count: n), zones = [UInt8](repeating: 0, count: n)
         for i in 0 ..< n {
@@ -1484,6 +1501,7 @@ public final class Matte {
         out.lightnessCorrections = lightnessCorrections
         out.edgeOffset = edgeOffset(of: alpha8)
         out.edgeOffsetBefore = offsetBefore
+        out.insideColourStats = insideStats
         log.append("edge placement: " + out.edgeOffset.summary)
         return out
     }
@@ -1559,6 +1577,25 @@ public final class Matte {
         let single = SIMD3<Float>(repeating: together)
         let model: SIMD3<Float> = each + (single - each) * bright
         return (plain + (model - plain) * trust, byColour)
+    }
+
+    /// Edge colour from inside (spec v7, section 2) over the band, as the last step. Not
+    /// under the hair brush; in the hair zone only where the inside colour is skin.
+    private func colourFromInside(_ alpha8: Buf<UInt8>, _ shares: Buf<UInt8>) -> InsideColourStats {
+        let b = band0
+        let rect = PixelRect(x: b.x - 8, y: b.y - 8, w: b.w + 16, h: b.h + 16).clamped(w: W, h: H)
+        let stroke = forced.map { Buf($0.resized(w: qw, h: qh).v) }
+        let hairZone = hairFaces.count == qw * qh ? hairFaces : nil
+        let skin = self.skin
+        return InsideColour.apply(photo: photo, alpha: UnsafePointer(alpha8.p), shares: shares.p, rect: rect, settings: settings.inside) { x, y, F in
+            if let stroke = stroke, self.sample1(stroke.p, x, y) > 0.02 { return true }
+            if let zone = hairZone, self.sample1(zone.p, x, y) >= 0.5 {
+                guard let skin = skin else { return true }
+                let shown = SIMD3<Float>(pow(F.x, 1 / 2.2), pow(F.y, 1 / 2.2), pow(F.z, 1 / 2.2))
+                return skin.value(shown) < 0.5
+            }
+            return false
+        }
     }
 
     /// The colour guard (masking spec v5, 1.1). Every edge pixel whose channels have
