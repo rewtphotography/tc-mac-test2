@@ -894,6 +894,15 @@ marked reverted.
 - With the switch off the engine's output is alpha 16's byte for byte (a test holds hashes
   taken from the alpha 16 code), and the debug bundle names the switch only when it is on.
 
+**The automated builds (alphas 19 and 20):** alpha 19 (the app as specified) published
+seconds before a later push cancelled its run; alpha 20 is the same app with the two added
+tests. Both compiled first time; all Linux tests (118) and Mac tests (11) pass. On the Mac,
+`testPhotoViewIsTheSameWhateverTheShares`: Photo view with no adjustments rendered
+byte-identical to the photo drawn alone, with edge colour from inside off and on (180,224
+bytes each), while the two masks' shares differ in 5,304 bytes. The Mac's Refine Edges box
+check changed 8,472 px, the same as alpha 15 and 16. The launch pictures were again not kept
+(artifact storage still full); the releases went ahead.
+
 ## Still to design
 
 The owner will share screenshots of how they use Bridge. Until then these are open: where
