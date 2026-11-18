@@ -1,11 +1,13 @@
 #!/bin/bash
 # Builds TrainCull.app from the Swift package and puts it in a disk image, build/TrainCull.dmg.
-# Run on a Mac (the automated build does this); the build number is the first argument.
+# Run on a Mac (the automated build does this). The arguments are the alpha number and the
+# build number; the version itself is in packaging/VERSION.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-VERSION="0.1.0"
-BUILD="${1:-0}"
+VERSION="$(tr -d '[:space:]' < packaging/VERSION)"
+ALPHA="${1:-0}"
+BUILD="${2:-0}"
 
 swift build -c release --arch arm64 --product TrainCull
 BIN="$(swift build -c release --arch arm64 --show-bin-path)/TrainCull"
@@ -14,7 +16,7 @@ APP="build/TrainCull.app"
 rm -rf build
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/TrainCull"
-sed -e "s/@VERSION@/$VERSION/" -e "s/@BUILD@/$BUILD/" packaging/Info.plist > "$APP/Contents/Info.plist"
+sed -e "s/@VERSION@/$VERSION/" -e "s/@BUILD@/$BUILD/" -e "s/@RELEASE@/$VERSION alpha $ALPHA/" packaging/Info.plist > "$APP/Contents/Info.plist"
 
 # The app icon, drawn in code so no image files live in the repository.
 swift scripts/make-icon.swift build/AppIcon.iconset

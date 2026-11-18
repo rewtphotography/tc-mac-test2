@@ -18,6 +18,10 @@ what is built, and what is next.
   error to the diagnostics log (`Log.note`). Memory use is reported in plain language.
 - The owner does not use the terminal or Xcode and has no Apple Developer account. Explain
   anything they must do as plain steps in an app's own interface.
+- Before building from any spec in `docs/specs/` (or one the owner pastes in), audit it against
+  the code, `docs/NOTES.md` and the rules here, and tell the owner about any conflict first.
+  Specs are written by other sessions that have not seen this code. Record in the notes what
+  was adopted, changed or left out.
 - Never commit photos, raw files, sidecars, logs or signing material. Tests build their files
   from synthetic bytes in code.
 - Verify your own work: check the automated build and read its logs before reporting.
@@ -27,13 +31,19 @@ what is built, and what is next.
 - A Swift package. `Sources/TraincullCore` has no UI and is tested on Linux and Mac
   (`swift test`). `Sources/TrainCull` is the Mac app (SwiftUI and AppKit) and builds only on
   a Mac.
-- Every push builds the app on GitHub (`.github/workflows/build.yml`), runs the tests, starts
-  the app on made-up frames, and publishes `TrainCull.dmg` under Releases as the latest
-  release. Alpha numbers follow on from the last published release (the first here is 5).
+- Every push builds the app on GitHub (`.github/workflows/build.yml`), runs the tests and
+  starts the app on made-up frames. Only pushes to `main` and version tags publish
+  `TrainCull.dmg` under Releases as the latest release; other branches never do. The version
+  is in `packaging/VERSION` (0.2.0); a release is tagged `v0.2.0-alpha.N` and titled
+  "TrainCull 0.2.0 alpha N", N following on from the last release of that version. The old
+  `alpha-N` tags (alphas 4 to 23) belong to 0.1.0; never reuse that form.
+- Masking (alphas 7–23) is archived on branch `archive/masking`, tag `masking-final`. It is
+  not on `main`.
 - The newest build is always at
   `https://github.com/<owner>/<repository>/releases/latest/download/TrainCull.dmg`.
-- Pictures of the app starting, in the single and side-by-side views, are kept with each
-  build as the `launch-screenshot` artifact, with the app's own log; look at them.
+- Pictures of the app starting, in the single and side-by-side views and in Edit mode, are kept
+  with each build as the `launch-screenshot` artifact, with the app's own log (`.log` and
+  `.jsonl`); look at them. The built app is kept as the `TrainCull` artifact for 14 days.
 - `swift test` needs no Mac for `TraincullCore`. `Tests/TrainCullTests` runs on the Mac build only.
 - Bundle ID `com.traincull`. No sandbox. The app never uses the network; the build fails if
   networking code is linked in.

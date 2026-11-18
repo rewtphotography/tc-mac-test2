@@ -8,14 +8,18 @@ An alpha build of TrainCull for Mac (Apple silicon, macOS 15 or later).
    **Done**, then open **System Settings → Privacy & Security**, scroll down to the message
    about TrainCull and click **Open Anyway**. This is needed once for each new build.
 
-**New in this build**
+**New in this build (0.2.0 alpha 1)**
 
-- The first zoom after a new image is now a glide like the rest. It used to jump, most of all
-  with two images side by side. Stepping through frames should also feel smoother.
-- Memory is handed back sooner after each raw render and each export.
-- The log now notes any slow redraw, to show where the app still hesitates.
+- A fresh start from alpha 6. The masking test (alphas 7–23) is gone from this build and the
+  download is back to about 1 MB. The masking work is kept, not deleted.
+- Zoom goes up to 400%.
+- After an edit, the line under the image says "Raw" again once the full image is back.
+- Going back to a recent frame shows it at once for more frames than before (up to 900 MB of
+  them, the least recently seen let go first).
+- The log is more detailed, and has a twin file (`.jsonl`) for scripts. The last 20
+  sessions are kept.
 
-**Since alpha 4**
+**Since 0.1.0 alpha 4**
 
 - **Side by side:** command-click a second thumbnail. The active image has a yellow border;
   stars, labels, reject and ← → act on it alone. Click the other image to make it active (or

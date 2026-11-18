@@ -1,12 +1,15 @@
 name: Build
 
+# Every branch builds and tests. Only `main` and version tags (v0.2.0-alpha.1 and so on)
+# publish a release; see the publish job at the end.
 on:
   push:
     branches: ["**"]
+    tags: ["v*"]
     paths-ignore: ["docs/**", "**.md"]
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: build-${{ github.ref }}
@@ -19,6 +22,8 @@ jobs:
     container: swift:6.0
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - run: swift test
 
   mac:
@@ -26,30 +31,57 @@ jobs:
     runs-on: macos-15
     env:
       GH_TOKEN: ${{ github.token }}
+    outputs:
+      tag: ${{ steps.number.outputs.tag }}
+      release: ${{ steps.number.outputs.release }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - run: swift --version
+      # The core library's own tests run in the Linux job. Here, only the ones that need a Mac.
       - name: Tests
-        run: swift test
-      # Alpha numbers follow on from the last published one (alpha 4 came from the earlier
-      # repository), so a failed build never uses a number up.
-      - name: Build number
+        timeout-minutes: 30
+        run: swift test --filter TrainCullTests
+      # The version is in packaging/VERSION. A version tag gives its own alpha number; anywhere
+      # else the number follows on from the last release of this version, so a failed build
+      # never uses a number up. (The alpha-N tags belong to 0.1.0 and are not counted.)
+      - name: Version
         id: number
         run: |
-          LAST=$(gh release list --limit 200 --json tagName \
-            --jq '[.[].tagName | select(startswith("alpha-")) | ltrimstr("alpha-") | tonumber] | max // 4')
-          echo "value=$((LAST + 1))" >> "$GITHUB_OUTPUT"
-          echo "Building alpha $((LAST + 1))"
+          VERSION="$(tr -d '[:space:]' < packaging/VERSION)"
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            TAG="$GITHUB_REF_NAME"
+            N="${TAG#v$VERSION-alpha.}"
+            if [ "$N" = "$TAG" ] || ! [[ "$N" =~ ^[0-9]+$ ]]; then
+              echo "error: tag $TAG does not match packaging/VERSION ($VERSION): expected v$VERSION-alpha.<number>" >&2
+              exit 1
+            fi
+          else
+            LAST=$(gh release list --limit 200 --json tagName \
+              --jq "[.[].tagName | select(startswith(\"v$VERSION-alpha.\")) | ltrimstr(\"v$VERSION-alpha.\") | tonumber] | max // 0")
+            N=$((LAST + 1))
+            TAG="v$VERSION-alpha.$N"
+          fi
+          echo "alpha=$N" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "release=$VERSION alpha $N" >> "$GITHUB_OUTPUT"
+          echo "Building TrainCull $VERSION alpha $N (build ${{ github.run_number }}), tag $TAG"
       - name: Build the app
-        run: scripts/make-app.sh "${{ steps.number.outputs.value }}"
+        run: scripts/make-app.sh "${{ steps.number.outputs.alpha }}" "${{ github.run_number }}"
+      - name: Size of the download
+        run: |
+          BYTES=$(stat -f%z build/TrainCull.dmg)
+          echo "TrainCull.dmg is $BYTES bytes ($(( BYTES / 1024 )) KB)"
+          echo "TrainCull.dmg: $BYTES bytes" >> "$GITHUB_STEP_SUMMARY"
       # Start the app on a folder of made-up frames (no photos are kept in the repository),
-      # once in the single view and once side by side, and keep a picture of each.
+      # in the single view, side by side and in Edit mode, and keep a picture of each.
       - name: Launch check
         run: |
           swift scripts/make-fixture.swift "$PWD/build/fixture"
-          shoot() {
+          shoot() { # <picture name> [arguments]
             open -n build/TrainCull.app --args -TCOpenFolder "$PWD/build/fixture" "${@:2}"
-            sleep 12
+            sleep 15
             pgrep -x TrainCull
             screencapture -x "build/$1.png" || true
             pkill -x TrainCull || true
@@ -57,29 +89,89 @@ jobs:
           }
           shoot launch
           shoot launch-compare -TCCompare YES
+          shoot launch-edit -TCEdit YES
+          LOGS="$HOME/Library/Logs/TrainCull"
           echo "---- the app's own log ----"
-          cat "$HOME/Library/Logs/TrainCull/"*.log || true
-          mkdir -p build/logs && cp "$HOME/Library/Logs/TrainCull/"*.log build/logs/ || true
+          cat "$LOGS/"*.log || true
+          echo "---- memory in Edit mode ----"
+          grep -h -E "edit mode|Edit mode" "$LOGS/"*.log || true
+          mkdir -p build/logs && cp "$LOGS/"*.log "$LOGS/"*.jsonl build/logs/ || true
+      # Each .jsonl must hold one valid JSON object per line, the same events as its .log.
+      - name: Check the JSON log
+        run: |
+          python3 - "$HOME/Library/Logs/TrainCull" <<'EOF'
+          import json, pathlib, sys
+          folder = pathlib.Path(sys.argv[1])
+          logs = sorted(folder.glob("*.log"))
+          assert logs, "no log was written"
+          for log in logs:
+              text = log.read_text().splitlines()
+              lines = log.with_suffix(".jsonl").read_text().splitlines()
+              assert len(text) == len(lines), f"{log.name}: {len(text)} lines but {len(lines)} JSON lines"
+              for i, (plain, line) in enumerate(zip(text, lines)):
+                  event = json.loads(line)
+                  message = " ".join(event["message"].splitlines())
+                  assert plain.endswith(message), f"{log.name} line {i + 1} differs"
+                  assert plain[14:].startswith(event["category"]), f"{log.name} line {i + 1}: area differs"
+              print(f"{log.name}: {len(lines)} events, every JSON line valid and matching")
+          EOF
+      # The app, kept with the build for two weeks; the publish job takes it from here.
       - uses: actions/upload-artifact@v4
         with:
           name: TrainCull
+          retention-days: 14
           path: build/TrainCull.dmg
+      # The pictures and logs are small, and never stop a build if storage is short.
       - uses: actions/upload-artifact@v4
+        continue-on-error: true
         with:
           name: launch-screenshot
+          retention-days: 14
           path: |
             build/launch.png
             build/launch-compare.png
+            build/launch-edit.png
             build/logs
           if-no-files-found: ignore
-      # A full release, not a pre-release, so that
-      # https://github.com/<owner>/<repo>/releases/latest/download/TrainCull.dmg
-      # always downloads the newest build.
+
+  # A full release, not a pre-release, so that
+  # https://github.com/<owner>/<repo>/releases/latest/download/TrainCull.dmg
+  # always downloads the newest build. Only from main and from version tags.
+  publish:
+    name: Publish
+    needs: [core-tests, mac]
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: TrainCull
+          path: build
       - name: Publish
         run: |
-          N="${{ steps.number.outputs.value }}"
-          gh release create "alpha-$N" build/TrainCull.dmg \
+          TAG="${{ needs.mac.outputs.tag }}"
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            echo "$TAG is already published"
+            exit 0
+          fi
+          # A push to main of a commit that already has a version tag: the tag's own build publishes it.
+          if [ "$GITHUB_REF_TYPE" = branch ]; then
+            TAGGED=$(gh api "repos/$GH_REPO/tags" --paginate --jq ".[] | select(.commit.sha == \"$GITHUB_SHA\") | .name" | grep '^v' || true)
+            if [ -n "$TAGGED" ]; then
+              echo "This commit is tagged $TAGGED; that tag's build publishes it."
+              exit 0
+            fi
+          fi
+          gh release create "$TAG" build/TrainCull.dmg \
             --latest \
             --target "$GITHUB_SHA" \
-            --title "TrainCull 0.1.0 alpha $N" \
+            --title "TrainCull ${{ needs.mac.outputs.release }}" \
             --notes-file packaging/RELEASE_NOTES.md

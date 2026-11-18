@@ -20,6 +20,8 @@
 	<string>@VERSION@</string>
 	<key>CFBundleVersion</key>
 	<string>@BUILD@</string>
+	<key>TCReleaseName</key>
+	<string>@RELEASE@</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>15.0</string>
 	<key>LSApplicationCategoryType</key>

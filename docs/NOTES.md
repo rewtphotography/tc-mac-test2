@@ -126,7 +126,34 @@ Bridge, Photoshop or Lightroom has it)
   integrations, transfer and drive tools, controller support, batch rename, keywords, a
   folder tree, a calibration table mapping Apple's values to Camera Raw's.
 
-## What is built (alpha 6)
+## Version 0.2.0: a restart from alpha 6
+
+Masking (alphas 7–23) is archived on branch `archive/masking`, tag `masking-final`.
+
+0.2.0 alpha 1 is alpha 6's tree (restored as a new commit on top of alpha 23's history, so
+every old tag still works) plus the few non-masking gains of alphas 7–23, re-made by hand:
+- The log has a `.jsonl` twin (one JSON object per event, with named `fields`), info / warn /
+  debug levels and keeps 20 sessions. A `JobMeter` gives each full raw render and each export
+  its wall time, memory before / peak / after, processor time and thermal state (`job` lines).
+  Each selection gives its cause (click, key, programmatic); renders give their trigger and
+  drafts the requests coalesced; render cache hits and misses (cold, evicted, other edits);
+  the camera settings the first time a frame is selected; display scale and thermal state
+  at launch; a cache summary every 15 memory lines; a memory reading on entering Edit mode.
+  The file-writing part is in the core library (`LogFiles`), so it is tested on Linux.
+- The render cache keeps up to 900 MB of renders, least recently shown out first, instead of
+  the last three frames; each eviction is logged. A 61 MP render is about 240 MB (three fit),
+  45 MP about 180 MB (four), 33 MP about 131 MB (six). Core library: `RenderCache`.
+- Zoom goes to 400% (was 200%).
+- The status under the image says "Raw" again after the full render that follows an edit.
+- The Mac build runs only the Mac tests; the core tests run on Linux.
+- Only `main` and version tags publish. Releases are tagged `v0.2.0-alpha.N`; the app says
+  "0.2.0 alpha N" in the log's first line, under the empty view and in the About panel.
+- Left out: the masking launch lines (model, blending), every `mask` / `tool` line and the
+  memory-pressure handler (it only let go of masking's memory).
+- Not carried over from the alpha 23 notes: everything about masking. The alpha 6
+  measurements are below.
+
+## What is built (0.2.0 alpha 1; alpha 6 plus the list above)
 
 Folder opening (button, File menu, drag and drop, recents, drives), resizable left pane,
 thumbnails with rating, label and reject marks, the large image with raw render and face
@@ -136,7 +163,7 @@ at the bottom left (double-click the rated count to choose stars), side-by-side 
 extracting the embedded JPEG, exporting a developed 16-bit TIFF, the diagnostics log and
 memory report, an app icon.
 
-Checked by tests on Linux (64): raw and recipe reading, the settings line, sidecar editing,
+Checked by tests on Linux (71): the log files and their JSON twin, the render cache, raw and recipe reading, the settings line, sidecar editing,
 crash-safe saving, face-zoom maths, the TIFF writer, JPEG orientation, compare stepping,
 memory figures. Checked by a test on the Mac build: an exported TIFF opens in Apple's reader
 with the right pixels. Checked by the automated build's screenshots (made-up frames): the
@@ -163,11 +190,26 @@ frames shown.
   pixels in memory of its own. Alpha 6's log should show a raw render near 0.3 s, glides at
   full frame count from the first, and any draw slower than 33 ms as a "slow" line.
 
+## Measured (alpha 6, the owner's log)
+
+Same folder and Mac, two and a half minutes of use:
+- A raw render takes 0.38–0.40 s in the background (0.9 s for the very first, while
+  thumbnails load) and the sharp image arrives about 0.55 s after landing on a frame. Every
+  glide drew 17–25 frames, including the first zoom after a new image and in the side-by-side
+  view. No draw took longer than 33 ms.
+- Memory averaged 951 MB and peaked at 2.2 GB (while sliders moved). Loading the thumbnails
+  peaked at 0.8 GB, down from 1.4. Browsing sits at 1.3–1.4 GB just after each render and
+  rests near 770 MB, because the kept renders hold their memory.
+- Stepping fast renders one frame at a time, so a frame already left can hold up the wanted
+  one by up to 0.4 s. Not a complaint yet; cancel a render in flight if it becomes one.
+
 ## Next, in order
 
-1. Fix whatever the owner's use of alpha 6 shows; read the log and memory figures they send.
-   Check the alpha 6 log against "Measured" above: did the first zooms become smooth, and
-   where do average and peak memory sit now.
+1. The owner's next spec (after 0.2.0 alpha 1): Nikon Z7 NEF files don't open (only Sony ARW
+   has a recipe); the Shadow bias slider (−1…1) can't hold the photo's own default of 3.00;
+   Send to Photoshop writes Apple's numbers into `Exposure2012`, `Temperature` and `Tint`
+   (forcing `WhiteBalance=Custom`); the XMP field pattern fails on an apostrophe inside a
+   double-quoted value and can add a duplicate attribute; memory and speed with 61 MP A7CR files.
 2. Soft-focus and closed-eyes flags from Apple's face landmarks.
 3. A Settings window (label names, editor choice), Undo after reject.
 
@@ -187,11 +229,17 @@ shown, how several frames are selected for the editor, the font, the overall loo
 - Thumbnails do not show edits.
 - Each downloaded build must be allowed once in System Settings, Privacy & Security. Only an
   Apple Developer account (paid yearly) removes that step.
-- GitHub counts Mac build minutes at ten times the normal rate on a private repository.
-- The download link only works for someone signed in to GitHub while the repository is private.
-- Raw renders are kept for the last three frames, 131 MB each for a 33-megapixel frame, and
-  from alpha 6 that memory is never handed back while they are kept. Resting memory may
-  therefore sit a little higher than in alpha 5 even though the peaks should be lower.
+- The repository is public (since alpha 21): anyone can read the code and notes.
+- Kept renders hold up to 900 MB, and that memory is not handed back while they are kept
+  (until another folder is opened). With 33 MP files that is six frames, where alpha 6 kept
+  three, so resting memory can sit up to about 400 MB higher than alpha 6's.
+- The automated build keeps the app as an artifact for 14 days. If GitHub's artifact storage
+  is ever full, that upload fails and so nothing is published; the launch pictures never stop
+  a build.
+- The launch check enters Edit mode for 15 seconds on the made-up frames, to read Edit mode's
+  memory; the spec asked to drop alpha 23's longer Edit-mode check, which waited for the model.
+- The About panel and the log say "0.2.0 alpha N (build B)"; B is GitHub's run number and
+  only ever goes up.
 - In the side-by-side view "the same percentage" assumes both frames are the same size until
   each has been measured; frames of different sizes can differ for a moment after loading.
 - The zoom glide redraws the image on the processor. The log notes how many frames each glide
