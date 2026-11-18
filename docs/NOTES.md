@@ -914,6 +914,13 @@ renders as in alpha 16 even with the switch on. Nothing left out. One finding ra
 owner: the soft segment tolerance trims anti-aliased outline pixels of other colours by up to
 0.05 alpha. Details and every number: `MASKING.md`, section 19.
 
+The first Mac builds (runs 24–26) passed (j), (k) and the Photo-view check; the w = 0 check
+failed by Core Image rounding (260 of 6,300 pixels at 1/255; none at full precision). The
+owner accepted ≤ 1/255 rather than full-precision renders. The account's Actions budget was
+$0 with its free minutes used, so the owner made the repository public (free builds; the
+download link now works without signing in). macOS jobs on it have twice waited 15 minutes for
+a runner and been cancelled; a re-run got one at once.
+
 ## Still to design
 
 The owner will share screenshots of how they use Bridge. Until then these are open: where
@@ -962,7 +969,7 @@ shown, how several frames are selected for the editor, the font, the overall loo
   longer keeps either: the models go from the Linux job to the Mac job through the cache. The
   launch pictures and log are still kept as an artifact for 14 days, but are skipped, without
   stopping the release, while storage is short; it frees as old copies expire (90 days).
-- The download link only works for someone signed in to GitHub while the repository is private.
+- The repository is public (since alpha 21, for free builds): anyone can read the code and notes. A queued Mac build can be cancelled after 15 minutes without a runner; re-running it works.
 - Raw renders are kept for the last three frames, 131 MB each for a 33-megapixel frame, and
   from alpha 6 that memory is never handed back while they are kept. Resting memory may
   therefore sit a little higher than in alpha 5 even though the peaks should be lower.

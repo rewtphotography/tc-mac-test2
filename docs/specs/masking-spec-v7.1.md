@@ -110,3 +110,7 @@ Everything else, including the code-audit items and any photo-level defringe.
    Where w = 0, the result is alpha 16's path exactly, even with the switch on. Where w = 1 (the repaint core), it's the single blend. The feather gives a smooth transition between them.
 
    Add to (o): with the switch on, every pixel with w = 0 renders identically to alpha 16 under any subject and background edits. Test with Subject +3 / Background −3 on a soft hair-like edge.
+
+### Owner's decision after the first Mac build (rounding)
+
+The check above fails only by Core Image's rounding: on the soft hair edge, 260 of 6,300 pixels with w = 0 differ from alpha 16's render by 1/255, and none differ when Core Image keeps its in-between pictures at full precision. **Accepted:** at w = 0 the render matches alpha 16 to at most 1/255; renders stay at the usual precision, so with the switch off the render is alpha 16's byte for byte.

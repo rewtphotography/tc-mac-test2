@@ -214,7 +214,10 @@ final class RepaintRenderTests: XCTestCase {
         var floatDiffer = 0
         for i in stride(from: 0, to: w * h * 4, by: 4) where map[i + 2] == 0 && f16[i ..< i + 3] != fNow[i ..< i + 3] { floatDiffer += 1 }
         print("V7.1-O with float intermediates: \(floatDiffer) px with w = 0 differ")
-        XCTAssertEqual(differ, 0, "pixels with w = 0 render as alpha 16 does")
+        // Owner (spec v7.1, answer to default 4, then the rounding question): w = 0 renders as
+        // alpha 16 does, to Core Image's rounding of its in-between pictures, at most 1/255.
+        XCTAssertLessThanOrEqual(largest, 1, "pixels with w = 0 render as alpha 16 does, to 1/255")
+        XCTAssertEqual(floatDiffer, 0, "with float intermediates, pixels with w = 0 render exactly as alpha 16 does")
         XCTAssertGreaterThan(repaintedDiffer, 0, "the repaint did something where w > 0")
 
         // No local edits: the photo, pixel for pixel, repaint or not.

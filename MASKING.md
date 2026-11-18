@@ -786,7 +786,20 @@ is recomputed in box ± 4 px.
 - (n) soft tolerance: largest step between neighbours 28 of 255 (≤ 64).
 - (h) crescent: 0 of 255 left; disc edge at 70.0 px (radius 70).
 - (i) switch off: byte-identical to alpha 16 (hashes, as in section 18).
-- Mac, through `Masking.apply` (`RepaintRenderTests`, `TiffExportTests`): to follow from the Mac build.
+- Mac, through `Masking.apply` (`RepaintRenderTests`, `TiffExportTests`; Core Image's sRGB curve,
+  so slightly different from the engine's figures):
+  - (j) darkest edge pixel at α ≥ 0.9 against the brightened sleeve 0.0 L; subject-side chroma
+    before the exposure 0.0056 (sleeve 0.0050), after +3 0.0112 (brightened sleeve 0.0100);
+    band columns −3…8, steps across its limits L 0.0, (a, b) 0.0; Subject 0 / Background −3:
+    chroma 0.0055.
+  - (k) fringe against the brightened skin L 0.0, (a, b) 0.0.
+  - (o) no local edits: the render is the photo, byte for byte, with the repaint present and with
+    the switch off and on (`PHOTO-VIEW-CHECK`, 180,224 bytes). Background side: with w = 1
+    everywhere and no subject the render is the background's edit of the photo within 1/255.
+    Pixels with w = 0 under Subject +3 / Background −3 on a soft hair edge: 6,040 of 6,300
+    identical to alpha 16, 260 differ by 1/255 (Core Image's rounding of its in-between
+    pictures: with float intermediates all 6,300 are identical). **Owner accepted** ≤ 1/255;
+    renders stay at the usual precision, so the switch-off render is unchanged.
 
 **Accepted trade-offs (owner).** On a patterned or stitched edge the outer few pixels take
 the colour from just inside, so they can look slightly smoothed when local edits are on.
