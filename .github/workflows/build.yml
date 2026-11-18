@@ -22,8 +22,9 @@ jobs:
       - run: swift test
 
   # BiRefNet has no ready-made Core ML form. Its two models (the subject, and hair matting)
-  # are converted here, on Linux, once; the results are kept between builds and handed to the
-  # Mac job, which compiles them into the app. This is the only step that fetches anything
+  # are converted here, on Linux, once; the results are kept between builds in the cache,
+  # which the Mac job reads too, and compiles them into the app. (They were handed over as
+  # an artifact until alpha 18, when the repository's artifact storage ran out.) This is the only step that fetches anything
   # (the models' published weights); the app never does.
   birefnet:
     name: Convert BiRefNet (Linux, kept between builds)
@@ -37,6 +38,7 @@ jobs:
             BiRefNet.mlpackage
             BiRefNetMatting.mlpackage
           key: birefnet-two-${{ hashFiles('tools/convert_birefnet.py') }}
+          enableCrossOsArchive: true
       - if: steps.kept.outputs.cache-hit != 'true'
         uses: actions/setup-python@v5
         with:
@@ -62,13 +64,6 @@ jobs:
           pip install transformers==5.23.0 timm==1.0.31 kornia==0.9.1 einops==0.8.2 coremltools==9.0
           python -u tools/convert_birefnet.py convert BiRefNet.mlpackage 1024 ZhengPeng7/BiRefNet_HR
           python -u tools/convert_birefnet.py convert BiRefNetMatting.mlpackage 1024 ZhengPeng7/BiRefNet-matting
-      - uses: actions/upload-artifact@v4
-        with:
-          name: birefnet
-          path: |
-            BiRefNet.mlpackage
-            BiRefNetMatting.mlpackage
-          retention-days: 2
 
   mac:
     name: Mac app
@@ -88,13 +83,17 @@ jobs:
         with:
           path: build-models
           key: models-two-${{ hashFiles('scripts/fetch-models.sh', 'tools/convert_birefnet.py') }}
-      # Fetched every time: the models kept from an earlier build may be without it.
+      # Read every time: the models kept from an earlier build may be without it. The same
+      # cache entry the Linux job keeps (paths, key and cross-OS setting must match it).
       - name: BiRefNet from the Linux job
         continue-on-error: true
-        uses: actions/download-artifact@v4
+        uses: actions/cache/restore@v4
         with:
-          name: birefnet
-          path: .
+          path: |
+            BiRefNet.mlpackage
+            BiRefNetMatting.mlpackage
+          key: birefnet-two-${{ hashFiles('tools/convert_birefnet.py') }}
+          enableCrossOsArchive: true
       - name: Compile the models
         run: scripts/fetch-models.sh build-models
       # The core library's own tests run in the Linux job. Here, the ones that need a Mac,
@@ -133,13 +132,14 @@ jobs:
           echo "---- the app's own log ----"
           cat "$HOME/Library/Logs/TrainCull/"*.log || true
           mkdir -p build/logs && cp "$HOME/Library/Logs/TrainCull/"*.log build/logs/ || true
+      # The app itself is not kept as an artifact: it is on the release (and the copies used
+      # up the repository's artifact storage). The pictures and log are small, and never
+      # stop a release if storage is short.
       - uses: actions/upload-artifact@v4
-        with:
-          name: TrainCull
-          path: build/TrainCull.dmg
-      - uses: actions/upload-artifact@v4
+        continue-on-error: true
         with:
           name: launch-screenshot
+          retention-days: 14
           path: |
             build/launch.png
             build/launch-compare.png

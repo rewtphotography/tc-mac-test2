@@ -915,6 +915,11 @@ shown, how several frames are selected for the editor, the font, the overall loo
 - Each downloaded build must be allowed once in System Settings, Privacy & Security. Only an
   Apple Developer account (paid yearly) removes that step.
 - GitHub counts Mac build minutes at ten times the normal rate on a private repository.
+- The repository's artifact storage ran out at alpha 18 (every build had kept an 820 MB copy
+  of the app besides the one on its release, and an 814 MB model hand-over). The build no
+  longer keeps either: the models go from the Linux job to the Mac job through the cache. The
+  launch pictures and log are still kept as an artifact for 14 days, but are skipped, without
+  stopping the release, while storage is short; it frees as old copies expire (90 days).
 - The download link only works for someone signed in to GitHub while the repository is private.
 - Raw renders are kept for the last three frames, 131 MB each for a 33-megapixel frame, and
   from alpha 6 that memory is never handed back while they are kept. Resting memory may
