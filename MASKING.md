@@ -714,6 +714,12 @@ corrections, the fallback to plain coverage, `Refine.paste` and `restore` only b
 vectors. A test runs eight scenes, hair tiers included, and finds no share vector with a
 channel at 0 beside one over 0.1.
 
+**Acceptance for this fix** (owner, alpha 18): no teal on 7451's black sleeve edges, no
+green or olive on the skin edge in its arm–waist gap, and the same on 6303's fingers, cuff and
+sleeve, in On Black and Background −3 EV at 300%; hair edges unchanged. **Not a condition:**
+the yellow on 7451's right waist is real light from an orange-clad person behind her, and the
+owner accepts it; if the rule leaves it, that is not a failure, and nothing is to be tuned for it.
+
 On synthetic discs: a teal ring inside a black (0.012) disc, the worst chroma of the subject's
 part 0.039 → 0.017; an olive ring inside a skin disc, every ring pixel's part within the
 allowed distance of the skin's (a, b); the green kept at a one-pixel fringe 0.0106 → 0.0038.

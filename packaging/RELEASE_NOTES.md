@@ -19,7 +19,7 @@ An alpha build of TrainCull for Mac (Apple silicon, macOS 15 or later).
   edge was being set to nothing on its own.
 - The log's `light bound` line now says how many pixels were moved and by how much colour.
 
-Please look at 7451 (sleeves, the skin in the arm–waist gap, the right waist) and 6303
+Please look at 7451 (sleeves, the skin in the arm–waist gap) and 6303
 (fingers, cuff, sleeve) in **On Black** and **Background −3 EV** at 300%, base mask alone, and
 check that hair edges look the same as before. Then send the log.
 

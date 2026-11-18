@@ -863,7 +863,10 @@ Oklab (lightness, then hue and chroma within 0.02), run last. The red share of e
 the sleeve was alpha 17's own handling of a negative fit channel (moved until it reached 0);
 it now gives one share to all three, and the two other per-channel steps found are gone.
 Details in `MASKING.md` section 17. Checked on synthetic discs (three new tests); not on the
-owner's photos, which this session doesn't have.
+owner's photos, which this session doesn't have. Acceptance (owner's correction): the teal on
+7451's sleeve edges, the green/olive on its skin in the arm–waist gap, and 6303's fingers, cuff
+and sleeve. The yellow on 7451's right waist is real light from an orange-clad person behind
+her and is accepted as it is: not a pass condition, not to be tuned for.
 
 ## Still to design
 
