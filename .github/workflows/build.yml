@@ -149,7 +149,10 @@ jobs:
       # A full release, not a pre-release, so that
       # https://github.com/<owner>/<repo>/releases/latest/download/TrainCull.dmg
       # always downloads the newest build.
+      # Archived branch: only main and version tags publish, so a push here never replaces the
+      # download.
       - name: Publish
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
         run: |
           N="${{ steps.number.outputs.value }}"
           gh release create "alpha-$N" build/TrainCull.dmg \
