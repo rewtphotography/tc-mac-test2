@@ -179,8 +179,81 @@ final class SpecV7Tests: XCTestCase {
         XCTAssertGreaterThan(asSkin.insideColourStats?.recoloured ?? 0, 100)
     }
 
-    /// (f) Alpha is never changed, so the edge is where alpha 16 put it, and the photo with no
-    /// adjustments (which never uses the mask) is as it was.
+    /// (e2) The exception: an edge inside the hair zone whose inside is skin, with a green
+    /// fringe (6303's peace-sign fingers beside the face). The rule runs there and the green
+    /// goes, as in (b); without a skin model the same edge is left alone. Two greens: one as
+    /// far from the skin as 7451's measured olive, held to (b)'s 0.015; and a strong one
+    /// (red 88 against the skin's 155), whose subject part comes out skin-hued but much
+    /// darker (k ≈ 0.3): held to the skin's hue with lightness factored out, since a darker
+    /// colour of the same hue has a smaller (a, b) in Oklab.
+    func testSkinInTheHairZoneLosesItsGreen() {
+        for (green, strong) in [(SIMD3<Float>(112, 124, 84), false), (SIMD3<Float>(88, 118, 70), true)] {
+            let size = 240, c: Float = 120, radius: Float = 60
+            let skin = SIMD3<Float>(155, 113, 85), white = SIMD3<Float>(247, 247, 247)
+            var px = [UInt8](repeating: 255, count: size * size * 4)
+            var truth = Gray(w: size, h: size)
+            func ring(_ r: Float) -> Bool { r > radius - 1.4 && r <= radius - 0.4 }
+            for y in 0 ..< size {
+                for x in 0 ..< size {
+                    let dx = Float(x) + 0.5 - c, dy = Float(y) + 0.5 - c, r = (dx * dx + dy * dy).squareRoot()
+                    let a = min(max(radius - r + 0.5, 0), 1)
+                    truth.v[y * size + x] = a
+                    let col = ring(r) ? green : skin * a + white * (1 - a)
+                    for ch in 0 ..< 3 { px[(y * size + x) * 4 + ch] = UInt8(col[ch].rounded()) }
+                }
+            }
+            PlaneMath.boxBlur(&truth.v, w: size, h: size, radius: 2)
+            let photo = Photo(w: size, h: size, rowBytes: size * 4, px: px)
+            // A face in the middle of the disc: its hair zone covers the whole edge.
+            let face = PixelRect(x: 95, y: 110, w: 50, h: 50)
+            var on = MatteSettings()
+            on.insideColour = true
+            let model = SkinModel(samples: (0 ..< 60).map { i in skin / 255 + SIMD3<Float>(repeating: Float(i % 5 - 2) * 0.004) })
+            let matte = Matte(photo: photo, coarse: truth, faces: [face], settings: on, skin: model)
+            let out = matte.run(tier: .off)
+            let off = Matte(photo: photo, coarse: truth, faces: [face]).run(tier: .off)
+            let noSkin = Matte(photo: photo, coarse: truth, faces: [face], settings: on).run(tier: .off)
+            let lin = Matte.toLinear.p
+            let target = Oklab.from(linear: SIMD3(lin[155], lin[113], lin[85]))
+            var worstBefore: Float = 0, worstAfter: Float = 0, worstHue: Float = 0, inZone = 0, count = 0, leftAlone = 0
+            for y in 0 ..< size {
+                for x in 0 ..< size {
+                    let dx = Float(x) + 0.5 - c, dy = Float(y) + 0.5 - c, r = (dx * dx + dy * dy).squareRoot()
+                    let i = y * size + x
+                    guard ring(r), out.alpha[i] >= 128 else { continue }
+                    count += 1
+                    if matte.sample1(matte.hairFaces.p, x, y) >= 0.5 { inZone += 1 }
+                    if (0 ..< 3).allSatisfy({ noSkin.shares[i * 4 + $0] == off.shares[i * 4 + $0] }) { leftAlone += 1 }
+                    let I = SIMD3(lin[Int(px[i * 4])], lin[Int(px[i * 4 + 1])], lin[Int(px[i * 4 + 2])])
+                    func portion(_ sh: [UInt8]) -> SIMD3<Float> {
+                        let s = SIMD3(Float(sh[i * 4]), Float(sh[i * 4 + 1]), Float(sh[i * 4 + 2])) / 255
+                        return Oklab.from(linear: I * s / (Float(out.alpha[i]) / 255))
+                    }
+                    let before = portion(off.shares), after = portion(out.shares)
+                    worstBefore = max(worstBefore, (SIMD2(before.y, before.z) - SIMD2(target.y, target.z)).dist)
+                    worstAfter = max(worstAfter, (SIMD2(after.y, after.z) - SIMD2(target.y, target.z)).dist)
+                    // The same with the part brought to the skin's lightness (Oklab scales as a whole with linear light).
+                    if after.x > 0.01 { worstHue = max(worstHue, (SIMD2(after.y, after.z) * (target.x / after.x) - SIMD2(target.y, target.z)).dist) }
+                }
+            }
+            print("V7 (e2) skin in the hair zone, \(strong ? "strong" : "olive-strength") green \(green): \(count) fringe pixels, \(inZone) in the zone, "
+                + "\(leftAlone) left alone without a skin model · (a, b) of P/α from the skin's, worst \(worstBefore) → \(worstAfter); at the skin's lightness \(worstHue)"
+                + " · \(out.insideColourStats?.summary ?? "")")
+            XCTAssertGreaterThan(count, 100)
+            XCTAssertEqual(inZone, count, "the whole fringe lies in the hair zone")
+            XCTAssertEqual(leftAlone, count, "without the skin exception the hair zone is left alone")
+            XCTAssertGreaterThan(worstBefore, 0.03, "it was green")
+            if strong {
+                XCTAssertLessThanOrEqual(worstHue, 0.002, "skin-hued")
+            } else {
+                XCTAssertLessThanOrEqual(worstAfter, 0.015, "the green goes, as in (b)")
+            }
+        }
+    }
+
+    /// (f) Alpha is never changed, so the edge is where alpha 16 put it. (The rendered Photo
+    /// view with no adjustments is checked on the Mac, where it is drawn:
+    /// `TiffExportTests.testPhotoViewIsTheSameWhateverTheShares`.)
     func testAlphaUntouched() {
         let scene = EdgePlaceTests.Disc(subject: SIMD3(0.10, 0.10, 0.10), ground: SIMD3(0.97, 0.97, 0.97), lensBlur: 1)
         var on = MatteSettings()

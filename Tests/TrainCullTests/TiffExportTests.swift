@@ -78,6 +78,49 @@ final class TiffExportTests: XCTestCase {
         return (try XCTUnwrap(CFDataGetBytePtr(data)), data)
     }
 
+    /// Spec v7, test (f): in Photo view with no adjustments the rendered image is the photo,
+    /// pixel for pixel, whatever the mask's colour shares: the same with edge colour from
+    /// inside on and off (whose shares differ), and the same as the photo drawn alone. (In the
+    /// app that view doesn't even hand the mask to the render; this checks the blend itself.)
+    func testPhotoViewIsTheSameWhateverTheShares() throws {
+        let w = 200, h = 200
+        func distance(_ x: Int, _ y: Int) -> Double { ((Double(x) - 100) * (Double(x) - 100) + (Double(y) - 100) * (Double(y) - 100)).squareRoot() }
+        // 7451's black sleeve with its teal fringe, on white.
+        let picture = try flat(w, h) { x, y in
+            let r = distance(x, y)
+            if r > 58.6 && r <= 59.6 { return (0, 32, 28) }
+            return r < 60 ? (29, 26, 25) : (247, 247, 247)
+        }
+        let photo = try XCTUnwrap(Masking.photo(from: picture))
+        var rough = Gray(w: w, h: h)
+        for y in 0 ..< h { for x in 0 ..< w { rough.v[y * w + x] = min(max(Float(60.5 - distance(x, y)), 0), 1) } }
+        rough = rough.blurred(radius: 2)
+        func mask(_ settings: MatteSettings) throws -> (MaskResult, Data) {
+            let out = Matte(photo: photo, coarse: rough, faces: [PixelRect(x: 2, y: 2, w: 8, h: 8)], settings: settings).run(tier: .off)
+            let alpha = try XCTUnwrap(Masking.picture(gray: out.alpha, w: w, h: h))
+            let made = MaskResult(width: w, height: h, alpha: alpha, shares: try XCTUnwrap(Masking.picture(rgbx: out.shares, w: w, h: h)), skin: nil,
+                                  trimap: alpha, coarse: alpha, tier: .off, summary: "")
+            return (made, Data(out.shares))
+        }
+        var on = MatteSettings()
+        on.insideColour = true
+        let (plain, plainShares) = try mask(MatteSettings())
+        let (inside, insideShares) = try mask(on)
+        XCTAssertNotEqual(plainShares, insideShares, "edge colour from inside changed the shares")
+        let extent = CGRect(x: 0, y: 0, width: w, height: h)
+        let source = CIImage(cgImage: picture)
+        let alone = try XCTUnwrap(Imaging.pixels(source, from: extent))
+        let aloneData = try XCTUnwrap(alone.dataProvider?.data) as Data
+        for (name, m) in [("switch off", plain), ("edge colour from inside", inside)] {
+            let shown = Masking.apply(LocalRender(mask: m, edits: LocalEdits(), view: .photo, area: .subject), to: source, extent: extent)
+            let picture = try XCTUnwrap(Imaging.pixels(shown, from: extent))
+            let data = try XCTUnwrap(picture.dataProvider?.data) as Data
+            XCTAssertEqual(data, aloneData, "\(name): Photo view with no adjustments is the photo, pixel for pixel")
+        }
+        print("PHOTO-VIEW-CHECK: identical with the switch off and on (\(aloneData.count) bytes each); shares differ in "
+            + "\(zip(plainShares, insideShares).filter { $0 != $1 }.count) bytes")
+    }
+
     /// Colours blend channel by channel through the mask, and a local adjustment changes its
     /// own area and nothing else. Also proves the small blending programs load on this macOS.
     func testLocalAdjustmentChangesOnlyItsArea() throws {

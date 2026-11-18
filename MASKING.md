@@ -667,7 +667,20 @@ tolerance y`, then what was cut loose or closed.
   pixel kept as rim light. A 20-px rim: the outer pixels' (a, b) from the rim's 0.0000.
 - (e) a disc whose whole edge is in the hair zone, not skin: 0 recoloured, shares identical
   to the switch off. The same with a skin model of its colour: 5,084 recoloured.
-- (f) alpha identical with the switch on and off (4,004 pixels recoloured, 0 rim).
+- (e2) the skin exception: a disc of skin whose whole edge lies in a face's hair zone, with a
+  one-pixel green fringe just inside the edge (6303's fingers beside the face), and a skin
+  model of that skin. All 372 fringe pixels are in the zone and are recoloured; without the
+  skin model all 372 are left alone. A green as far from the skin as 7451's olive (112, 124,
+  84): (a, b) of P/α from the skin's 0.078 → 0.014 (≤ 0.015, as (b)). A strong green (88,
+  118, 70): 0.108 → 0.023 in absolute terms, because its red is so low that k is about 0.3
+  and the part comes out skin-hued but much darker, and a darker colour of the same hue has a
+  smaller (a, b); at the skin's lightness it is 0.0003 from the skin's (a, b).
+- (f) what is compared: in the core tests, alpha is identical with the switch on and off
+  (4,004 pixels recoloured, 0 rim). The rendered Photo view with no adjustments is checked on
+  the Mac (`TiffExportTests.testPhotoViewIsTheSameWhateverTheShares`): a black disc with a
+  teal fringe, masked with the switch off and on (the shares differ), drawn through
+  `Masking.apply` in Photo view, is pixel-identical to the photo drawn alone, both times. In
+  the app that view, with no adjustments, doesn't hand the mask to the render at all.
 - (g) no share vector with a channel at 0 beside one over 0.1, except where the photo's
   channel is 0, in (a), (b), (c), (f) and (h).
 - (h) pink disc, 8-px orange crescent, green ground, orange sampled, tolerance 0.05: 2,182 px
