@@ -16,11 +16,6 @@ final class FrameItem: ObservableObject, Identifiable {
     @Published var label: String?
     @Published var thumb: CGImage?
     @Published var failed: String?
-    /// Masked adjustments. Kept for the session only while the masking test runs; not saved.
-    var local = LocalEdits()
-    /// Goes up whenever the frame's mask, its local adjustments or the mask view change, so a
-    /// kept render is known to be out of date.
-    var localStamp = 0
 
     init(id: Int, url: URL, sidecarName: String?, values: SidecarValues?, adjust: [String: Float]) {
         self.adjust = adjust
@@ -107,93 +102,6 @@ final class Session: ObservableObject {
     @Published var flashed: Int?
     /// "Exporting 3 / 12" while an export runs.
     @Published var exportStatus: String?
-    /// Masking: the chosen quality, what the large image shows, the area the sliders act on,
-    /// the current frame's local adjustments, and what is going on.
-    /// Changing the tier of a photo that has a mask refines its edge again from what is
-    /// already known about its subject; the model is not run again.
-    /// Off is the mask (masking spec v4); the hair tiers are a debug comparison.
-    @Published var maskTier = MatteTier.off {
-        didSet { if maskTier != oldValue && currentMask != nil { makeMask(fresh: false, trigger: "tier changed to \(maskTier.name)") } }
-    }
-    @Published var maskView = MaskView.photo
-    @Published var localArea = LocalArea.subject
-    @Published var local = LocalEdits()
-    @Published var maskStatus: String?
-    @Published var maskBusy = false
-    @Published var maskTick = 0
-    /// How readily soft pieces are left out of the subject (the masking spec's Focus strictness).
-    @Published var focusStrictness = FocusStrictness.moderate
-    /// Debug: Apple's Vision masks instead of BiRefNet, and which processors the model runs on.
-    @Published var legacyVision = false
-    @Published var modelUnits = ModelUnits.gpu {
-        didSet {
-            if modelUnits != oldValue {
-                BiRefNetModel.shared.setUnits(modelUnits)
-                BiRefNetModel.matting.setUnits(modelUnits)
-            }
-        }
-    }
-    /// Debug: each step of the edge on its own switch, to see what it does (masking spec v5, 1.4).
-    @Published var edgeSnap = true { didSet { if edgeSnap != oldValue { edgeStepChanged("edge snap", edgeSnap) } } }
-    @Published var decontamination = true { didSet { if decontamination != oldValue { edgeStepChanged("decontamination", decontamination) } } }
-    @Published var colourGuard = true { didSet { if colourGuard != oldValue { edgeStepChanged("colour guard", colourGuard) } } }
-    @Published var edgeRecentre = true { didSet { if edgeRecentre != oldValue { edgeStepChanged("edge re-centre", edgeRecentre) } } }
-    /// The mask tools: which is chosen, the brush, and the Clean Edge and Refine Hair settings.
-    @Published var maskTool = MaskTool.none {
-        didSet {
-            guard maskTool != oldValue else { return }
-            toolChanged()
-            if maskTool == .hair { prewarmMatting("Refine Hair chosen") }
-        }
-    }
-    /// Debug (spec v7, 2): edge colour from inside, the last step of every mask and box.
-    @Published var insideColour = true { didSet { if insideColour != oldValue { edgeStepChanged("edge colour from inside", insideColour) } } }
-    /// Debug (spec v7.2.1): the bright-background edge rule (part of edge colour from inside).
-    @Published var cutBackground = true { didSet { if cutBackground != oldValue { edgeStepChanged("bright-background edges", cutBackground) } } }
-    /// Remove Colour (spec v7.2, 4): the colours picked with the eyedropper (display values),
-    /// none for the automatic guess; the colours the last box guessed; and the tolerance.
-    /// Moving the tolerance, or picking a colour, does the last Remove Colour box again in its place.
-    @Published var removeSamples: [SIMD3<Float>] = []
-    @Published var removeGuessed: [SIMD3<Float>] = []
-    @Published var removeTolerance: Double = 0.05 {
-        didSet {
-            guard removeTolerance != oldValue else { return }
-            retuneToken += 1
-            let token = retuneToken
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { if token == self.retuneToken { self.redoLast(.removeColour, why: "tolerance changed") } }
-        }
-    }
-    private var retuneToken = 0
-    /// Refine Hair's Strength (spec v7.2, 6): 0 only tidies the edge. Moving it redoes the last stroke.
-    @Published var hairStrength: Double = 0 {
-        didSet {
-            guard hairStrength != oldValue else { return }
-            retuneToken += 1
-            let token = retuneToken
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { if token == self.retuneToken { self.redoLast(.hair, why: "strength changed") } }
-        }
-    }
-    /// The brush's radius, in pixels of the photo.
-    @Published var brushSize: Double = 60 { didSet { if brushSize != oldValue { toolChanged() } } }
-    /// Show edits: every box and stroke on this photo stays drawn over it. Off, only the one being
-    /// drawn shows, held while it is worked out and faded once done.
-    @Published var showEdits = false {
-        didSet {
-            if showEdits != oldValue {
-                Log.note("tool", "show edits \(showEdits ? "on" : "off")")
-                toolChanged()
-            }
-        }
-    }
-    /// The tool job whose box or stroke is held on the large image until it is done, and its frame.
-    private var pendingJob: (job: Int, frame: Int)?
-    @Published var hairMethod = HairMethod.auto
-    @Published var hairContrast: Double = 0.5
-    /// Low on purpose: on the owner's convention photos the matting model beat colour matting even
-    /// where the backdrop was plain, so colour matting is left for a near-uniform one (a seamless).
-    @Published var hairTexture: Double = 0.03
-    /// How many tool operations the current frame's mask carries (for the Undo button).
-    @Published var refineCount = 0
     @Published var recents: [URL] = []
     @Published var volumes: [Volume] = []
     @Published var ratedCount = 0
@@ -204,13 +112,7 @@ final class Session: ObservableObject {
     @Published var minStars = 1
     /// Edit mode: the thumbnail pane makes way for the editing controls.
     @Published var editing = false {
-        didSet {
-            if !editing { thumbsWhileEditing = false; flushSave() }
-            if editing != oldValue {
-                modelFollowsEditing()
-                toolChanged()
-            }
-        }
+        didSet { if !editing { thumbsWhileEditing = false; flushSave() } }
     }
     @Published var thumbsWhileEditing = false
     /// The current frame's changed controls, and what Apple's decoder uses by default for it.
@@ -227,29 +129,7 @@ final class Session: ObservableObject {
     private var folderOpened = CFAbsoluteTimeGetCurrent()
     private var faces: [Int: DetectedFaces] = [:]
     private var chosenFace: [Int: Int] = [:]
-    private var rawCache: [(id: Int, values: [String: Float], stamp: Int, image: CGImage)] = []
-    /// The masks of the last two frames that had one made. Each is about as large as a raw render.
-    private var masks: [(id: Int, mask: MaskResult)] = []
-    private var maskRun = 0
-    private var maskJobs = 0
-    /// For each frame with a mask: the mask as Make Mask left it, what the tools have done
-    /// since, and what each replaced.
-    private var refined: [Int: (automatic: MaskResult, ops: [RefineOp], undos: [RefineUndo])] = [:]
-    /// Frames whose camera settings have been written to the log this session.
-    private var introduced = Set<Int>()
-    /// The render cache: at most this many bytes of finished pictures, least recently shown out first.
-    static let renderCacheBytes = 900 << 20
-    private var evicted = Set<Int>()
-    private var evictions = 0
-    /// What the user last did that calls for a new render, and how many requests arrived
-    /// while a draft was still being made.
-    private var renderTrigger = "selection"
-    private var draftsSkipped = 0
-    private let maskQueue = DispatchQueue(label: "mask", qos: .userInitiated)
-    private var memoryPressure: DispatchSourceMemoryPressure?
-    private var modelToken = 0
-    /// How long the model stays loaded after Edit mode is left, in case it is entered again.
-    static let modelLingers: TimeInterval = 120
+    private var rawCache: [(id: Int, values: [String: Float], image: CGImage)] = []
     private var fullSize: [Int: CGSize] = [:]
     private var editToken = 0
     private var valuesToken = 0
@@ -302,28 +182,6 @@ final class Session: ObservableObject {
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             (self?.handleKey(event) ?? false) ? nil : event
         }
-        MemoryMonitor.shared.cacheSummary = { [weak self] in
-            guard let self = self else { return nil }
-            let renderBytes = self.rawCache.reduce(0) { $0 + $1.image.bytesPerRow * $1.image.height }
-            let maskBytes = self.masks.reduce(0) { $0 + $1.mask.width * $1.mask.height * 6 }
-            defer { self.evictions = 0 }
-            let model: String = BiRefNetModel.shared.isLoaded ? "loaded" : "not loaded"
-            let renders: String = "render \(self.rawCache.count) / \(MemoryStats.plain(UInt64(renderBytes))) · masks \(self.masks.count) / \(MemoryStats.plain(UInt64(maskBytes)))"
-            return "summary · \(renders) · evictions \(self.evictions) · \(Masking.keptSummary) · model \(model)"
-        }
-        // Short of memory, the model and everything kept for remaking masks are let go; they
-        // come back when next needed.
-        let pressure = DispatchSource.makeMemoryPressureSource(eventMask: [.warning, .critical], queue: .main)
-        pressure.setEventHandler { [weak self] in
-            Log.warn("the Mac is short of memory (\(MemoryStats.plain(MemoryMonitor.footprint())) in use here): letting go of the model and the masking caches")
-            self?.maskQueue.async {
-                BiRefNetModel.shared.unload("memory pressure")
-                BiRefNetModel.matting.unload("memory pressure")
-                Masking.forgetAll("memory pressure")
-            }
-        }
-        pressure.resume()
-        memoryPressure = pressure
         // For the automated build's launch check: open a folder straight away, and optionally
         // show its first two frames side by side.
         if let path = UserDefaults.standard.string(forKey: "TCOpenFolder") {
@@ -415,16 +273,6 @@ final class Session: ObservableObject {
         faces = [:]
         chosenFace = [:]
         rawCache = []
-        evicted = []
-        introduced = []
-        Masking.forgetAll("another folder")
-        masks = []
-        refined = [:]
-        maskTool = .none
-        maskRun += 1
-        maskBusy = false
-        maskStatus = nil
-        maskView = .photo
         selected = 0
         clearSlots()
         pane = .thumbnails
@@ -471,10 +319,9 @@ final class Session: ObservableObject {
                     return
                 }
                 self.loadThumbnails(gen)
-                self.selectionChanged("programmatic (folder opened)")
+                self.selectionChanged()
                 self.show(0)
                 if UserDefaults.standard.bool(forKey: "TCCompare"), items.count > 1 { self.commandClick(1) }
-                if UserDefaults.standard.bool(forKey: "TCEdit") { self.editing = true }
             }
         }
     }
@@ -541,9 +388,7 @@ final class Session: ObservableObject {
         }
         Log.note("filter", "\(new): \(visible.count) of \(frames.count) frames shown")
         // The side-by-side view keeps its two frames whatever the filter.
-        if compare == nil, !visible.contains(where: { $0.id == selected }), let first = visible.first {
-            select(first.id, cause: "programmatic (filter hid the selected frame)")
-        }
+        if compare == nil, !visible.contains(where: { $0.id == selected }), let first = visible.first { select(first.id) }
         reveal()
     }
 
@@ -595,28 +440,6 @@ final class Session: ObservableObject {
             }
         }
         view.acceptsClick = { [weak self] in self?.clicked(index) ?? true }
-        if index == 0 {
-            view.onPick = { [weak self] point, add in self?.pickColour(point, add: add) }
-            view.onBox = { [weak self] rect, restore in
-                guard let self = self else { return }
-                let box = PixelRect(x: Int(rect.minX), y: Int(rect.minY), w: max(Int(rect.width), 1), h: max(Int(rect.height), 1))
-                var op = RefineOp(tool: self.maskTool, box: box, stroke: nil, restore: restore)
-                if op.tool == .removeColour {
-                    op.samples = self.removeSamples
-                    op.automatic = self.removeSamples.isEmpty
-                    op.tolerance = Float(self.removeTolerance)
-                }
-                self.userTool(op)
-            }
-            view.onStroke = { [weak self] points, radius, restore in
-                guard let self = self else { return }
-                let stroke = RefineStroke(points: points.map { SIMD2(Float($0.x), Float($0.y)) }, radius: Float(radius))
-                var op = RefineOp(tool: self.maskTool, box: nil, stroke: stroke, restore: restore)
-                op.hairStrength = Float(self.hairStrength)
-                self.userTool(op)
-            }
-            toolChanged()
-        }
         view.onUserZoom = { [weak self] kind in self?.userZoomed(index, kind) }
         if frame(for: index) != nil { show(index) }
     }
@@ -644,12 +467,11 @@ final class Session: ObservableObject {
         }
     }
 
-    func select(_ index: Int, cause: String = "user.click") {
+    func select(_ index: Int) {
         guard compare == nil, frames.indices.contains(index), index != selected else { return }
         flushSave()
         selected = index
-        selectionChanged(cause)
-        renderTrigger = "selection"
+        selectionChanged()
         show(0)
     }
 
@@ -658,21 +480,18 @@ final class Session: ObservableObject {
     func step(_ by: Int) {
         guard !visible.isEmpty else { return }
         if let pair = compare {
-            if let target = pair.stepTarget(by, in: visible.map { $0.id }) { setActiveFrame(target, cause: "user.key (\(by < 0 ? "←" : "→"))") }
+            if let target = pair.stepTarget(by, in: visible.map { $0.id }) { setActiveFrame(target) }
             return
         }
-        let cause = "user.key (\(by < 0 ? "←" : "→"))"
         guard let at = visible.firstIndex(where: { $0.id == selected }) else {
-            select(visible[0].id, cause: cause)
+            select(visible[0].id)
             return
         }
-        select(visible[min(max(at + by, 0), visible.count - 1)].id, cause: cause)
+        select(visible[min(max(at + by, 0), visible.count - 1)].id)
     }
 
-    /// The selected frame changed: the editing controls follow it. `cause` says who changed it,
-    /// for the log: a click, a key, or the app itself (and then which part of it). Work that
-    /// finishes in the background must never be a cause.
-    private func selectionChanged(_ cause: String) {
+    /// The selected frame changed: the editing controls follow it.
+    private func selectionChanged() {
         editToken += 1
         valuesToken += 1
         guard let item = current else {
@@ -680,15 +499,8 @@ final class Session: ObservableObject {
             defaults = [:]
             return
         }
-        Log.note("select", "\(item.name) (\(item.id + 1) of \(frames.count)) · cause: \(cause)")
-        if !introduced.contains(item.id), let shot = item.info?.shot {
-            introduced.insert(item.id)
-            Log.note("image", "\(item.name): \(shot.label())\(shot.lens.map { " · \($0)" } ?? "")")
-        }
+        Log.note("select", "\(item.name) (\(item.id + 1) of \(frames.count))")
         values = item.adjust
-        local = item.local
-        if !maskBusy { maskStatus = currentMask?.summary }
-        toolChanged()
         defaults = [:]
         let token = valuesToken
         let url = item.url
@@ -712,22 +524,13 @@ final class Session: ObservableObject {
         let name = item.name
         let formats = self.formats
         let adjust = item.adjust
-        let local = localRender(for: item)
-        let stamp = renderKey(item)
         let started = CFAbsoluteTimeGetCurrent()
 
-        if let at = rawCache.firstIndex(where: { $0.id == id && $0.values == adjust && $0.stamp == stamp }) {
-            let cached = rawCache.remove(at: at)
-            rawCache.append(cached) // most recently shown last
+        if let cached = rawCache.first(where: { $0.id == id && $0.values == adjust }) {
             view.show(cached.image, space: CGSize(width: cached.image.width, height: cached.image.height), newFrame: true, keepZoom: keepZoom)
             setState(index, "Raw")
-            Log.note("cache", "render \(name) · hit")
+            Log.note("image", "\(name): raw render reused")
             return
-        }
-        if let stale = rawCache.first(where: { $0.id == id }) {
-            Log.note("cache", "render \(name) · miss: keyChanged (\(stale.values != adjust ? "edits" : "local adjustments or mask view"))")
-        } else {
-            Log.note("cache", "render \(name) · miss: \(evicted.contains(id) ? "evicted (LRU)" : "cold")")
         }
         if let t = item.thumb {
             view.show(t, space: CGSize(width: t.width, height: t.height), newFrame: true, keepZoom: keepZoom)
@@ -764,7 +567,7 @@ final class Session: ObservableObject {
                 DispatchQueue.main.sync { stillWanted = token == slot.token }
                 guard stillWanted else { return }
                 let rendering = CFAbsoluteTimeGetCurrent()
-                let raw = Imaging.renderRaw(url, adjust, local: local)
+                let raw = Imaging.renderRaw(url, adjust)
                 let image = raw ?? Imaging.fullJpeg(url, formats)
                 if let image = image {
                     Log.note("image", "\(name): \(raw != nil ? "raw render" : "embedded JPEG (no raw render)") \(image.width)×\(image.height) in \(Log.seconds(since: rendering)), \(Log.seconds(since: started)) after selecting")
@@ -777,8 +580,8 @@ final class Session: ObservableObject {
                         if token == slot.token { self.setState(index, "Preview only") }
                         return
                     }
-                    if raw != nil { self.cache(id, adjust, stamp, image) }
-                    guard token == slot.token, item.adjust == adjust, self.renderKey(item) == stamp else { return }
+                    if raw != nil { self.cache(id, adjust, image) }
+                    guard token == slot.token, item.adjust == adjust else { return }
                     slot.view?.show(image, space: CGSize(width: image.width, height: image.height), newFrame: false)
                     self.setState(index, raw != nil ? "Raw" : "Embedded JPEG")
                 }
@@ -837,7 +640,7 @@ final class Session: ObservableObject {
     func commandClick(_ id: Int) {
         guard frames.indices.contains(id) else { return }
         if let pair = compare {
-            if id != pair.left && id != pair.right { setActiveFrame(id, cause: "user.click (⌘)") }
+            if id != pair.left && id != pair.right { setActiveFrame(id) }
             return
         }
         guard current != nil, id != selected else { return }
@@ -848,28 +651,28 @@ final class Session: ObservableObject {
         slots[0].view?.fit(animated: false)
         compare = ComparePair(left: selected, right: id, active: .right)
         selected = id
-        selectionChanged("user.click (⌘, side by side)")
+        selectionChanged()
         // The right-hand view shows its frame as soon as the window has made it (`attach`).
         if slots[1].view != nil { show(1) }
     }
 
     /// Puts another frame on the active side.
-    private func setActiveFrame(_ id: Int, cause: String) {
+    private func setActiveFrame(_ id: Int) {
         guard var pair = compare, frames.indices.contains(id) else { return }
         pair.activeFrame = id
         compare = pair
         selected = id
-        selectionChanged(cause)
+        selectionChanged()
         // A zoomed image stays zoomed on the same spot, to step through a burst at one zoom.
         show(pair.active.rawValue, keepZoom: true)
     }
 
-    func setActiveSide(_ side: ComparePair.Side, cause: String = "user.click (other image)") {
+    func setActiveSide(_ side: ComparePair.Side) {
         guard var pair = compare, pair.active != side else { return }
         pair.active = side
         compare = pair
         selected = pair.activeFrame
-        selectionChanged(cause)
+        selectionChanged()
     }
 
     /// Back to the single view, which then shows the active image.
@@ -888,7 +691,7 @@ final class Session: ObservableObject {
         } else {
             slots[0].view?.fit(animated: false)
         }
-        selectionChanged("programmatic (left side by side)")
+        selectionChanged()
         reveal()
     }
 
@@ -950,23 +753,12 @@ final class Session: ObservableObject {
         Log.note("edit", editing ? "edit mode on" : "edit mode off")
     }
 
-    private func cache(_ id: Int, _ values: [String: Float], _ stamp: Int, _ image: CGImage) {
+    private func cache(_ id: Int, _ values: [String: Float], _ image: CGImage) {
         rawCache.removeAll { $0.id == id }
-        rawCache.append((id, values, stamp, image))
-        evicted.remove(id)
-        var bytes = rawCache.reduce(0) { $0 + $1.image.bytesPerRow * $1.image.height }
-        while bytes > Session.renderCacheBytes && rawCache.count > 1 {
-            let out = rawCache.removeFirst()
-            bytes -= out.image.bytesPerRow * out.image.height
-            evicted.insert(out.id)
-            evictions += 1
-        }
+        rawCache.append((id, values, image))
+        if rawCache.count > 3 { rawCache.removeFirst() }
         fullSize[id] = CGSize(width: image.width, height: image.height)
     }
-
-    /// What a kept render of a frame is filed under besides its edits: 0 when nothing local
-    /// shows in it, so that making a mask or looking at one does not throw the plain render away.
-    private func renderKey(_ item: FrameItem) -> Int { localRender(for: item) == nil ? 0 : item.localStamp }
 
     /// The value a control shows: the changed one, else the file's default.
     func value(_ control: Control) -> Float { values[control.key] ?? defaults[control.key] ?? control.neutral }
@@ -975,7 +767,6 @@ final class Session: ObservableObject {
 
     func setValue(_ control: Control, _ new: Float) {
         guard let item = current else { return }
-        renderTrigger = "\(control.title) drag"
         let span = control.range.upperBound - control.range.lowerBound
         if let d = defaults[control.key], abs(d - new) <= span * 0.0005 {
             values[control.key] = nil
@@ -999,56 +790,39 @@ final class Session: ObservableObject {
 
     private func edited(_ item: FrameItem) {
         item.adjust = values
-        rerender(item)
+        editToken += 1
+        startDraft()
+        let token = editToken
+        let frame = heroToken
+        let url = item.url, id = item.id, adjust = item.adjust
+        // The full-size render waits until the sliders have been still for a moment.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            guard token == self.editToken, frame == self.heroToken else { return }
+            self.rawQueue.async {
+                var wanted = false
+                DispatchQueue.main.sync { wanted = token == self.editToken && frame == self.heroToken }
+                guard wanted, let image = Imaging.renderRaw(url, adjust) else { return }
+                DispatchQueue.main.async {
+                    self.cache(id, adjust, image)
+                    guard token == self.editToken, frame == self.heroToken else { return }
+                    self.hero?.show(image, space: CGSize(width: image.width, height: image.height), newFrame: false)
+                }
+            }
+        }
         pendingSave = item
         saveToken += 1
         let save = saveToken
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { if save == self.saveToken { self.flushSave() } }
     }
 
-    /// Redraws the single view after a change to the frame's edits: a quick draft at once, the
-    /// full-size render once the sliders have been still for a moment.
-    private func rerender(_ item: FrameItem) {
-        editToken += 1
-        startDraft()
-        let token = editToken
-        let frame = heroToken
-        let url = item.url, id = item.id, adjust = item.adjust
-        let local = localRender(for: item), stamp = renderKey(item)
-        let trigger = renderTrigger
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
-            guard token == self.editToken, frame == self.heroToken else { return }
-            self.rawQueue.async {
-                var wanted = false
-                DispatchQueue.main.sync { wanted = token == self.editToken && frame == self.heroToken }
-                let start = CFAbsoluteTimeGetCurrent()
-                guard wanted, let image = Imaging.renderRaw(url, adjust, local: local) else { return }
-                Log.note("image", "\(item.name): render\(local != nil ? " local-adj" : "") \(image.width)×\(image.height) (full) · trigger: \(trigger) · wall \(Log.seconds(since: start))")
-                MemoryMonitor.mark("a full render of \(item.name)")
-                DispatchQueue.main.async {
-                    self.cache(id, adjust, stamp, image)
-                    guard token == self.editToken, frame == self.heroToken else { return }
-                    self.hero?.show(image, space: CGSize(width: image.width, height: image.height), newFrame: false)
-                    self.setState(0, "Raw")
-                }
-            }
-        }
-    }
-
     /// A quick, smaller render for live feedback. One runs at a time; when it finishes and the
     /// sliders have moved on, the next one starts from the latest values.
     private func startDraft() {
-        if draftBusy { draftsSkipped += 1 }
         guard !draftBusy, let item = current, let hero = hero else { return }
         draftBusy = true
-        let coalesced = draftsSkipped
-        draftsSkipped = 0
-        let trigger = renderTrigger
-        let drafting = CFAbsoluteTimeGetCurrent()
         let token = editToken
         let frame = heroToken
         let url = item.url, adjust = item.adjust
-        let local = localRender(for: item)
         let size = fullSize[item.id]
         var scale: Float = 0.25
         if let size = size, size.width > 0 {
@@ -1056,11 +830,7 @@ final class Session: ObservableObject {
             scale = Float(min(1, max(0.1, pixels / max(size.width, size.height))))
         }
         draftQueue.async {
-            let image = Imaging.renderRaw(url, adjust, scale: scale, local: local)
-            if let image = image {
-                Log.debug("image", "\(item.name): draft\(local != nil ? " local-adj" : "") \(image.width)×\(image.height) (view, scale \(String(format: "%.2f", scale)))"
-                    + " · trigger: \(trigger) · coalesced \(coalesced) · wall \(Log.seconds(since: drafting))")
-            }
+            let image = Imaging.renderRaw(url, adjust, scale: scale)
             DispatchQueue.main.async {
                 self.draftBusy = false
                 guard frame == self.heroToken else { return }
@@ -1119,472 +889,6 @@ final class Session: ObservableObject {
         }
     }
 
-    // MARK: Masks and local adjustments (a test of TrainCull as a finishing editor)
-
-    var currentMask: MaskResult? { masks.first { $0.id == selected }?.mask }
-
-    /// What a render of this frame must add: its mask with its local adjustments, when there
-    /// is something to show.
-    private func localRender(for item: FrameItem) -> LocalRender? {
-        guard let mask = masks.first(where: { $0.id == item.id })?.mask else { return nil }
-        let view = item.id == selected && compare == nil ? maskView : .photo
-        if view == .photo && item.local.isNeutral { return nil }
-        return LocalRender(mask: mask, edits: item.local, view: view, area: localArea)
-    }
-
-    /// The model is made ready when Edit mode is entered, kept while it lasts, and let go
-    /// two minutes after it ends (masking spec v3, 2.3, and v4, phase 3).
-    private func modelFollowsEditing() {
-        guard BundledModels.hasBiRefNet else { return }
-        modelToken += 1
-        let token = modelToken
-        if editing {
-            maskQueue.async { BiRefNetModel.shared.prewarm() }
-            return
-        }
-        // Kept for two minutes after leaving, so going straight back in costs nothing.
-        DispatchQueue.main.asyncAfter(deadline: .now() + Session.modelLingers) { [weak self] in
-            guard let self = self, token == self.modelToken, !self.editing else { return }
-            self.maskQueue.async {
-                BiRefNetModel.shared.unload("Edit mode left \(Int(Session.modelLingers)) s ago")
-                BiRefNetModel.matting.unload("Edit mode left \(Int(Session.modelLingers)) s ago")
-            }
-        }
-    }
-
-    /// Loads the hair-matting model ahead of the first Refine Hair stroke (spec v7.2, 6), so
-    /// that stroke doesn't wait for it. Nothing when it is loaded already.
-    private func prewarmMatting(_ why: String) {
-        guard BundledModels.hasBiRefNet, BiRefNetModel.matting.isAvailable, !BiRefNetModel.matting.isLoaded else { return }
-        Log.note("model", "\(BiRefNetModel.matting.label): made ready ahead (\(why))")
-        maskQueue.async { BiRefNetModel.matting.prewarm() }
-    }
-
-    /// The selection rules as the panel has them set.
-    private var subjectRules: SubjectRules {
-        var rules = SubjectRules()
-        rules.focusStrictness = focusStrictness.factor
-        return rules
-    }
-
-    private var subjectSource: SubjectSource { legacyVision || !BundledModels.hasBiRefNet ? .vision : .birefnet }
-
-    /// Makes the current frame's masks at the chosen quality. The work is a numbered job in
-    /// the log, from request to completion. Finishing never changes which frame is selected.
-    /// `fresh` forgets what was known about the photo's subject first (the Remake button);
-    /// without it only the edge is refined again. A job asked for while another is running
-    /// takes its place.
-    func makeMask(fresh: Bool = true, trigger: String = "user (Make button)") {
-        guard let item = current else { return }
-        if compare != nil { endCompare() }
-        let superseding = maskBusy
-        maskBusy = true
-        maskRun += 1
-        maskJobs += 1
-        let run = maskRun, job = maskJobs
-        let tier = maskTier, source = subjectSource, rules = subjectRules, settings = edgeSettings
-        let url = item.url, id = item.id, name = item.name
-        let known = faces[id]
-        maskStatus = "Starting…"
-        let requested = CFAbsoluteTimeGetCurrent()
-        let how: String = fresh ? "from scratch" : "from what is kept"
-        let instead: String = superseding ? " · takes the place of the job still running" : ""
-        Log.note("job", "#\(job) \(tier.name) \(name) · subject from \(source.name) · focus strictness \(focusStrictness.name) · trigger: \(trigger) · \(how)\(instead)")
-        maskQueue.async {
-            var gone = false
-            DispatchQueue.main.sync { gone = run != self.maskRun }
-            if gone {
-                Log.note("job", "#\(job) superseded before it started")
-                return
-            }
-            Log.note("job", "#\(job) started · queued \(Log.seconds(since: requested))")
-            if fresh { Masking.forgetBase(url) }
-            let meter = JobMeter()
-            let working = CFAbsoluteTimeGetCurrent()
-            let result = Result { () -> MaskResult in
-                try Masking.make(url: url, tier: tier, faces: known, settings: settings, rules: rules, subject: source, progress: { text in
-                    DispatchQueue.main.async { if run == self.maskRun { self.maskStatus = "\(text)…" } }
-                }, partial: { first in
-                    // The snapped edge, shown while the hair is still being refined.
-                    Log.note("job", "#\(job) first result (Off) after \(Log.seconds(since: working))")
-                    DispatchQueue.main.async {
-                        guard run == self.maskRun else { return }
-                        self.keep(first, for: item)
-                        if self.selected == id {
-                            self.renderTrigger = "first mask"
-                            self.refreshLocal(item)
-                        }
-                    }
-                }, cancelled: {
-                    var stop = false
-                    DispatchQueue.main.sync { stop = run != self.maskRun }
-                    return stop
-                })
-            }
-            let measured = meter.finish()
-            var jobFields = meter.numbers
-            jobFields["job"] = job
-            jobFields["image"] = name
-            jobFields["tier"] = tier.name
-            Log.note("memory", "MaskJob#\(job) · \(measured.memory)", fields: jobFields)
-            Log.note("load", "MaskJob#\(job) \(tier.name) \(name) · \(measured.load)")
-            let took = Log.seconds(since: working)
-            DispatchQueue.main.async {
-                guard run == self.maskRun else {
-                    Log.note("job", "#\(job) superseded after \(took)")
-                    return
-                }
-                self.maskBusy = false
-                let still = self.selected == id
-                switch result {
-                case let .success(mask):
-                    Log.note("job", "#\(job) completed in \(took) · image selected at completion: \(still ? "yes" : "no (\(self.current?.name ?? "none"))")")
-                    self.keep(mask, for: item)
-                    // What the tools had done to the mask this one replaces is done again on it.
-                    let again = self.refined[id]?.ops ?? []
-                    self.refined[id] = (mask, [], [])
-                    if !again.isEmpty {
-                        Log.note("tool", "\(name): doing \(again.count) tool operation(s) again on the new mask")
-                        for op in again { self.applyTool(op, to: item, trigger: "replay") }
-                    }
-                    if still { self.toolChanged() }
-                    if self.editing { self.prewarmMatting("mask made") }
-                    if still {
-                        self.maskStatus = mask.summary + (Masking.blendsByChannel ? "" : " (plain blending)")
-                        if self.localArea == .skin && mask.skin == nil { self.localArea = .subject }
-                        self.renderTrigger = "mask made"
-                        self.refreshLocal(item)
-                    }
-                case let .failure(error):
-                    Log.note("job", "#\(job) failed after \(took): \(error)")
-                    if still { self.maskStatus = "No mask: \(error)." }
-                }
-            }
-        }
-    }
-
-    // MARK: Mask tools
-
-    /// The edge engine's settings as the Debug switches have them.
-    private var edgeSettings: MatteSettings {
-        var settings = MatteSettings()
-        settings.colourSnap = edgeSnap
-        settings.decontaminate = decontamination
-        settings.colourGuard = colourGuard
-        settings.recentre = edgeRecentre
-        settings.insideColour = insideColour
-        settings.inside.cut = cutBackground
-        return settings
-    }
-
-    private func edgeStepChanged(_ step: String, _ on: Bool) {
-        Log.note("mask", "debug: \(step) \(on ? "on" : "off")")
-        if currentMask != nil { makeMask(fresh: false, trigger: "\(step) switched \(on ? "on" : "off")") }
-    }
-
-    // MARK: Remove Colour
-
-    /// The eyedropper: the colour at a point of the photo (a 5×5 median of the neutral render,
-    /// the picture masks are made from), as the only sample or, with Shift, one more.
-    private func pickColour(_ point: CGPoint, add: Bool) {
-        guard let item = current else { return }
-        let url = item.url, name = item.name
-        let x = Int(point.x), y = Int(point.y)
-        maskStatus = "Picking the colour…"
-        DispatchQueue.global(qos: .userInitiated).async {
-            let picked = (try? Masking.neutral(url)).flatMap { Masking.median5($0, x: x, y: y) }
-            DispatchQueue.main.async {
-                guard let colour = picked else {
-                    self.maskStatus = "The colour couldn't be read there."
-                    return
-                }
-                // An eyedropper pick never adds to the automatic guess: it replaces it.
-                self.removeSamples = add ? self.removeSamples + [colour] : [colour]
-                let text = String(format: "%.0f, %.0f, %.0f", locale: Locale(identifier: "en_US_POSIX"), colour.x * 255, colour.y * 255, colour.z * 255)
-                Log.note("tool", "\(name): remove colour: \(add ? "added" : "picked") \(text) at \(x),\(y) · \(self.removeSamples.count) sample(s)")
-                if !self.redoLast(.removeColour, why: "colour picked") {
-                    self.maskStatus = "\(self.removeSamples.count) colour\(self.removeSamples.count == 1 ? "" : "s") to remove. Drag a box over the place."
-                }
-            }
-        }
-    }
-
-    /// Clear: back to the automatic guess, and the last box done again with it.
-    func clearRemoveSamples() {
-        removeSamples = []
-        Log.note("tool", "remove colour: picked colours cleared, back to the automatic guess")
-        redoLast(.removeColour, why: "back to the automatic guess")
-    }
-
-    /// The last operation, if it is `tool`'s and not a restore, done again in its place with
-    /// the panel's settings now (one undo step still): the tolerance, the picked colours or
-    /// the automatic guess (Remove Colour), the strength (Refine Hair). False when there was none.
-    @discardableResult
-    private func redoLast(_ tool: MaskTool, why: String) -> Bool {
-        guard let item = current, !maskBusy, var state = refined[item.id], let last = state.ops.last, last.tool == tool, !last.restore,
-              let undo = state.undos.last, let mask = currentMask else { return false }
-        do {
-            let before = try Masking.undone(mask, undo)
-            state.ops.removeLast()
-            state.undos.removeLast()
-            refined[item.id] = state
-            keep(before, for: item)
-            var op = last
-            switch tool {
-            case .removeColour:
-                op.tolerance = Float(removeTolerance)
-                op.samples = removeSamples
-                op.automatic = removeSamples.isEmpty
-            case .hair:
-                op.hairStrength = Float(hairStrength)
-            default:
-                break
-            }
-            Log.note("tool", "\(item.name): \(tool.name): \(why), the last one done again")
-            applyTool(op, to: item, trigger: why)
-            return true
-        } catch {
-            Log.warn("\(item.name): \(tool.name) couldn't be done again: \(error)")
-            return false
-        }
-    }
-
-    /// Hands the chosen tool, and what the tools have done to this frame, to the large image.
-    private func toolChanged() {
-        guard let view = slots[0].view else { return }
-        let usable = currentMask != nil && compare == nil && editing
-        if !usable && maskTool != .none {
-            maskTool = .none
-            return
-        }
-        switch maskTool {
-        case .none: view.tool = .none
-        case .edges: view.tool = .box
-        case .hair: view.tool = .brush(radius: CGFloat(brushSize))
-        case .removeColour, .edgeColour: view.tool = .box
-        }
-        view.picksColour = maskTool == .removeColour
-        let ops = refined[selected]?.ops ?? []
-        // Earlier boxes and strokes only when asked for (Show edits); never outside the edit view.
-        let shown = showEdits && currentMask != nil && compare == nil && editing
-        view.marks = shown ? ops.map { $0.mark } : []
-        if let pending = pendingJob, pending.frame != selected || !usable {
-            pendingJob = nil
-            view.pending = nil
-        }
-        if refineCount != ops.count { refineCount = ops.count }
-    }
-
-    /// A box or stroke from the large image: its mark stays there until the job is done.
-    private func userTool(_ op: RefineOp) {
-        if let job = applyTool(op) {
-            pendingJob = (job, selected)
-        } else {
-            slots[0].view?.pending = nil
-        }
-    }
-
-    /// The box or stroke of a job that has finished fades from the large image.
-    private func toolJobEnded(_ job: Int) {
-        guard let pending = pendingJob, pending.job == job else { return }
-        pendingJob = nil
-        if pending.frame == selected { slots[0].view?.fadePending() } else { slots[0].view?.pending = nil }
-    }
-
-    /// Runs one tool operation on a frame's mask, as a numbered job like making a mask.
-    @discardableResult
-    func applyTool(_ op: RefineOp, to given: FrameItem? = nil, trigger: String = "user") -> Int? {
-        guard op.tool != .none, let item = given ?? current, masks.contains(where: { $0.id == item.id }) else { return nil }
-        maskJobs += 1
-        let job = maskJobs
-        let url = item.url, id = item.id, name = item.name
-        let known = faces[id], rules = subjectRules, source = subjectSource
-        var options = RefineOptions()
-        options.settings = edgeSettings
-        options.hairMethod = hairMethod
-        options.contrastNeeded = Float(hairContrast)
-        options.textureAllowed = Float(hairTexture)
-        maskBusy = true
-        maskStatus = "\(op.tool.name)…"
-        let requested = CFAbsoluteTimeGetCurrent()
-        let what = op.box.map { "box \($0.w)×\($0.h) at \($0.x),\($0.y)" } ?? "stroke of \(op.stroke?.points.count ?? 0) points, brush \(Int(op.stroke?.radius ?? 0)) px"
-        Log.note("job", "#\(job) \(op.tool.name)\(op.restore ? " (restore)" : "") \(name) · \(what) · trigger: \(trigger)")
-        maskQueue.async {
-            // The mask as it is when this job's turn comes: earlier operations are in it.
-            var mask: MaskResult?, automatic: MaskResult?
-            DispatchQueue.main.sync {
-                mask = self.masks.first { $0.id == id }?.mask
-                automatic = self.refined[id]?.automatic
-            }
-            guard let now = mask, let base = automatic else {
-                DispatchQueue.main.async { self.maskBusy = false; self.toolJobEnded(job) }
-                Log.note("job", "#\(job) dropped: the frame has no mask any more")
-                return
-            }
-            let meter = JobMeter()
-            let result = Result { () -> (mask: MaskResult, undo: RefineUndo, op: RefineOp, message: String?) in
-                try Masking.refine(url: url, mask: now, automatic: base, op: op, options: options, faces: known, rules: rules, subject: source,
-                                   progress: { text in DispatchQueue.main.async { self.maskStatus = "\(text)…" } },
-                                   partial: { quick in
-                                       DispatchQueue.main.async {
-                                           self.keep(quick, for: item)
-                                           if self.selected == id {
-                                               self.renderTrigger = "tool, first result"
-                                               self.refreshLocal(item)
-                                           }
-                                       }
-                                   })
-            }
-            let measured = meter.finish()
-            var fields = meter.numbers
-            fields["job"] = job
-            fields["image"] = name
-            fields["tool"] = op.tool.rawValue
-            Log.note("memory", "ToolJob#\(job) · \(measured.memory)", fields: fields)
-            DispatchQueue.main.async {
-                self.maskBusy = false
-                self.toolJobEnded(job)
-                let still = self.selected == id
-                switch result {
-                case let .success(done):
-                    Log.note("job", "#\(job) completed in \(Log.seconds(since: requested))")
-                    self.keep(done.mask, for: item)
-                    if var state = self.refined[id] {
-                        // As done: Remove Colour's guessed colours are kept, so Remake does the same again.
-                        state.ops.append(done.op)
-                        state.undos.append(done.undo)
-                        self.refined[id] = state
-                    }
-                    if done.op.tool == .removeColour && still { self.removeGuessed = done.op.automatic ? done.op.samples : [] }
-                    if still {
-                        self.maskStatus = done.message ?? done.mask.summary
-                        self.renderTrigger = "tool"
-                        self.refreshLocal(item)
-                        self.toolChanged()
-                    }
-                case let .failure(error):
-                    Log.note("job", "#\(job) failed: \(error)")
-                    // A quick result may have been shown; the mask goes back to what it was.
-                    self.keep(now, for: item)
-                    if still {
-                        self.maskStatus = "\(op.tool.name) didn't work: \(error)."
-                        self.refreshLocal(item)
-                    }
-                }
-            }
-        }
-        return job
-    }
-
-    /// Takes back the last tool operation on the current frame.
-    func undoTool() {
-        guard let item = current, !maskBusy, var state = refined[item.id], let undo = state.undos.popLast(),
-              let mask = masks.first(where: { $0.id == item.id })?.mask else { return }
-        let op = state.ops.removeLast()
-        do {
-            let before = try Masking.undone(mask, undo)
-            refined[item.id] = state
-            keep(before, for: item)
-            Log.note("tool", "\(item.name): \(op.tool.name) undone · \(state.ops.count) operation(s) left")
-            maskStatus = "\(op.tool.name) undone."
-            renderTrigger = "tool undone"
-            refreshLocal(item)
-            toolChanged()
-        } catch {
-            Log.warn("\(item.name): undo failed: \(error)")
-        }
-    }
-
-    /// Holds a frame's mask: the last two frames' are kept.
-    private func keep(_ mask: MaskResult, for item: FrameItem) {
-        masks.removeAll { $0.id == item.id }
-        masks.append((item.id, mask))
-        if masks.count > 2 { masks.removeFirst() }
-        // The tools' history goes with a mask that is no longer kept.
-        for id in refined.keys where !masks.contains(where: { $0.id == id }) { refined[id] = nil }
-        maskTick += 1
-        item.localStamp += 1
-    }
-
-    /// Writes the current frame's mask debug bundle next to the raw and shows it in the Finder.
-    func exportDebugBundle() {
-        guard let item = current else { return }
-        let url = item.url, known = faces[item.id]
-        let rules = subjectRules, source = subjectSource, mask = currentMask
-        let ops = refined[item.id]?.ops ?? []
-        var switches = ["edge_snap": edgeSnap, "decontamination": decontamination, "colour_guard": colourGuard, "edge_recentre": edgeRecentre,
-                        "legacy_vision": legacyVision]
-        // (Named only when on: with it off the bundle is alpha 16's, byte for byte.)
-        if insideColour { switches["edge_colour_from_inside"] = true; switches["bright_background_edges"] = cutBackground }
-        say("Writing the debug bundle for \(item.name)…")
-        exportQueue.async {
-            do {
-                let folder = try Masking.debugBundle(url: url, faces: known, rules: rules, subject: source, mask: mask, ops: ops, switches: switches)
-                DispatchQueue.main.async {
-                    self.say("Saved \(folder.lastPathComponent) next to the raw.")
-                    NSWorkspace.shared.activateFileViewerSelecting([folder])
-                }
-            } catch {
-                Log.warn("\(item.name): debug bundle not written: \(error)")
-                DispatchQueue.main.async { self.say("The debug bundle couldn't be written: \(error).") }
-            }
-        }
-    }
-
-    /// Redraws the current frame after its mask, view or local adjustments changed.
-    private func refreshLocal(_ item: FrameItem) {
-        guard item.id == selected, compare == nil else { return }
-        rerender(item)
-    }
-
-    func setMaskView(_ view: MaskView) {
-        guard view != maskView, let item = current else { return }
-        maskView = view
-        item.localStamp += 1
-        renderTrigger = "mask view \(view.name)"
-        Log.note("mask", "view: \(view.name)")
-        refreshLocal(item)
-    }
-
-    func setLocalArea(_ area: LocalArea) {
-        guard area != localArea, let item = current else { return }
-        localArea = area
-        if maskView != .photo {
-            item.localStamp += 1
-            refreshLocal(item)
-        }
-    }
-
-    /// Changes one number of the chosen area's adjustment. `control` names it for the log.
-    func setLocal(_ control: String, _ change: (inout LocalLayer) -> Void) {
-        guard let item = current, currentMask != nil else { return }
-        renderTrigger = "\(localArea.name).\(control) drag"
-        change(&local.layers[localArea.rawValue])
-        if item.local == local { return }
-        item.local = local
-        item.localStamp += 1
-        refreshLocal(item)
-    }
-
-    func resetLocal() {
-        setLocal("reset") { $0 = LocalLayer() }
-    }
-
-    func saveMaskPictures() {
-        guard let item = current, let mask = currentMask else { return }
-        let url = item.url
-        exportQueue.async {
-            do {
-                let saved = try Export.maskPictures(mask, for: url)
-                Log.note("mask", "\(item.name): saved \(saved.map { $0.lastPathComponent }.joined(separator: ", "))")
-                DispatchQueue.main.async { self.say("Saved \(saved.count) mask pictures next to the raw.") }
-            } catch {
-                Log.note("mask", "\(item.name): mask pictures not saved: \(error)")
-                DispatchQueue.main.async { self.say("The mask pictures couldn't be saved: \(error).") }
-            }
-        }
-    }
-
     // MARK: Exports
 
     /// Extracts the embedded JPEG, or exports a developed 16-bit TIFF, for some frames: one at
@@ -1601,11 +905,7 @@ final class Session: ObservableObject {
         let total = items.count
         exportStatus = "Exporting 0 / \(total)"
         let formats = self.formats
-        let jobs = items.map { item -> (url: URL, name: String, adjust: [String: Float], shot: ShotInfo?, local: LocalRender?) in
-            var local = localRender(for: item)
-            if local?.edits.isNeutral == true { local = nil }
-            return (item.url, item.name, item.adjust, item.info?.shot, local)
-        }
+        let jobs = items.map { (url: $0.url, name: $0.name, adjust: $0.adjust, shot: $0.info?.shot) }
         Log.note("export", "\(total) \(kind.noun)(s) requested")
         exportQueue.async {
             // Let any save still on its way reach the disk first.
@@ -1628,7 +928,7 @@ final class Session: ObservableObject {
                         let out: URL
                         switch kind {
                         case .jpeg: out = try Export.embeddedJpeg(job.url, formats)
-                        case .tiff: out = try Export.developedTiff(job.url, job.adjust, shot: job.shot, local: job.local)
+                        case .tiff: out = try Export.developedTiff(job.url, job.adjust, shot: job.shot)
                         }
                         saved.append(out)
                         let size = (try? out.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
@@ -1752,23 +1052,12 @@ final class Session: ObservableObject {
 
     /// Only the shortcuts the core actions need. Returns true when the key was used.
     private func handleKey(_ event: NSEvent) -> Bool {
-        // While a mask tool is chosen: Command-Z takes its last operation back.
-        if maskTool != .none, event.modifierFlags.intersection([.command, .control, .option, .shift]) == [.command],
-           event.charactersIgnoringModifiers?.lowercased() == "z", NSApp.keyWindow === window, !(NSApp.keyWindow?.firstResponder is NSText) {
-            undoTool()
-            return true
-        }
         if !event.modifierFlags.intersection([.command, .control, .option]).isEmpty { return false }
         if NSApp.keyWindow?.firstResponder is NSText { return false }
         if NSApp.keyWindow?.attachedSheet != nil || NSApp.modalWindow != nil { return false }
         // Keys typed in another window (Diagnostics) are not for the photos.
         if let window = window, NSApp.keyWindow !== window { return false }
         guard folder != nil, !frames.isEmpty else { return false }
-        // With a brush chosen, [ and ] make it smaller and larger.
-        if maskTool == .hair, let key = event.charactersIgnoringModifiers, key == "[" || key == "]" {
-            brushSize = min(max(brushSize * (key == "]" ? 1.2 : 1 / 1.2), 4), 600)
-            return true
-        }
         switch event.keyCode {
         case 123: step(-1); return true // left
         case 124: step(1); return true // right
@@ -1791,7 +1080,7 @@ final class Session: ObservableObject {
             }
             return false
         case 48: // tab: the other image when comparing, else the next face
-            if let pair = compare { setActiveSide(pair.active.other, cause: "user.key (tab)") } else { nextFace() }
+            if let pair = compare { setActiveSide(pair.active.other) } else { nextFace() }
             return true
         case 49: NSApp.keyWindow?.toggleFullScreen(nil); return true // space
         default: break

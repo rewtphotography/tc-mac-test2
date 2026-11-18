@@ -8,30 +8,12 @@ An alpha build of TrainCull for Mac (Apple silicon, macOS 15 or later).
    **Done**, then open **System Settings → Privacy & Security**, scroll down to the message
    about TrainCull and click **Open Anyway**. This is needed once for each new build.
 
-**New in this build: one edge rule for bright backgrounds (masking spec v7.2.1)**
+**New in this build**
 
-- **No more dark specks inside finger edges.** Alpha 22's cut of background-coloured pixels
-  is gone. In its place, where the background is clearly brighter than the subject beside
-  it, the lens's colour fringe is judged on a slightly blurred copy of the photo, so single
-  pixels and noise no longer punch holes. Only coverage the colours clearly don't support is
-  taken off, softly, and both sides of the edge are repainted. Green streaks come out faint
-  rather than gone.
-- **Everywhere else (skin against a dark background, white on white, rim light) edges are
-  alpha 21's.**
-- Debug: the switch is now **Bright-background edges** (on).
-- Remove Colour, Edge Colour and Refine Hair are as in alpha 22.
-
-Please check at 300%: 6303 with Subject +2.6 / Background −3 (no dark specks or slivers; green
-streaks gone or faint); 7451 with Subject +3 / Background −3 (no teal, no dark line, no notch
-cluster); 6372 for anything new; 6957's box and the hair on 7006 and 7473 as before. Then send
-the log.
-
-**The masking test:** open **Edit** and scroll to **Mask (Test)**. Click **Make Mask**.
-**Show** switches between the photo, a red overlay, the mask, On Black, On White,
-**Background −3 EV** and a debug view of zones. Pick **Subject**, **Background** or **Skin** and
-move **Exposure**, **Saturation** or **Warmth**. Masks and local adjustments last until you
-close the folder; **Export 16-bit TIFF** includes them. The app never uses the network: both
-models are inside the download.
+- The first zoom after a new image is now a glide like the rest. It used to jump, most of all
+  with two images side by side. Stepping through frames should also feel smoother.
+- Memory is handed back sooner after each raw render and each export.
+- The log now notes any slow redraw, to show where the app still hesitates.
 
 **Since alpha 4**
 

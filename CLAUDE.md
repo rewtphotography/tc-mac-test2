@@ -2,8 +2,7 @@
 
 A lean, folder-based replacement for Adobe Bridge with raw-first editing, for one photographer
 (the owner). Read `docs/NOTES.md` before changing anything: it holds the owner's decisions,
-what is built, and what is next. For anything about masks, read `MASKING.md` first: it is the
-handover for that work.
+what is built, and what is next.
 
 ## Working with the owner
 
@@ -19,9 +18,6 @@ handover for that work.
   error to the diagnostics log (`Log.note`). Memory use is reported in plain language.
 - The owner does not use the terminal or Xcode and has no Apple Developer account. Explain
   anything they must do as plain steps in an app's own interface.
-- Specifications the owner brings in are kept in `docs/specs/`. They are written by other
-  sessions that have not seen this code: audit them against `docs/NOTES.md` and the rules
-  here before building, and record in the notes what was adopted, changed or left out.
 - Never commit photos, raw files, sidecars, logs or signing material. Tests build their files
   from synthetic bytes in code.
 - Verify your own work: check the automated build and read its logs before reporting.

@@ -17,7 +17,6 @@ struct EditPane: View {
                             }
                         }
                     }
-                    LocalPane(session: session)
                 }
                 .padding(12)
             }

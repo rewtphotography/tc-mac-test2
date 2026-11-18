@@ -15,13 +15,6 @@ final class Log {
     let fileURL: URL?
     private let queue = DispatchQueue(label: "log", qos: .utility)
     private var handle: FileHandle?
-    /// The same events, one JSON object per line, for scripts to read.
-    private var jsonHandle: FileHandle?
-    private let stamp: ISO8601DateFormatter = {
-        let f = ISO8601DateFormatter()
-        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return f
-    }()
     private let clock: DateFormatter = {
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")
@@ -29,7 +22,7 @@ final class Log {
         return f
     }()
 
-    static let keptFiles = 20
+    static let keptFiles = 10
 
     private init() {
         let fm = FileManager.default
@@ -38,10 +31,7 @@ final class Log {
         // Keep the last few sessions only.
         let old = ((try? fm.contentsOfDirectory(atPath: folder.path)) ?? []).filter { $0.hasSuffix(".log") }.sorted()
         if old.count >= Log.keptFiles {
-            for name in old.prefix(old.count - Log.keptFiles + 1) {
-                try? fm.removeItem(at: folder.appendingPathComponent(name))
-                try? fm.removeItem(at: folder.appendingPathComponent(String(name.dropLast(4)) + ".jsonl"))
-            }
+            for name in old.prefix(old.count - Log.keptFiles + 1) { try? fm.removeItem(at: folder.appendingPathComponent(name)) }
         }
         let name = DateFormatter()
         name.locale = Locale(identifier: "en_US_POSIX")
@@ -53,20 +43,10 @@ final class Log {
         } else {
             fileURL = nil
         }
-        let json = url.deletingPathExtension().appendingPathExtension("jsonl")
-        if fm.createFile(atPath: json.path, contents: nil) { jsonHandle = try? FileHandle(forWritingTo: json) }
     }
 
     /// Writes one line: the time, an area ("folder", "image", "save"…) and what happened.
-    /// `fields` are extra named values for the JSON copy of the log (numbers, names), so a
-    /// script reading it needn't pick them out of the sentence.
-    static func note(_ area: String, _ text: String, fields: [String: Any]? = nil) { shared.write(area, text, level: "info", fields: fields) }
-
-    /// Something that went wrong, or went a way it shouldn't have: a fallback taken, a limit hit.
-    static func warn(_ text: String) { shared.write("warn", text, level: "warn") }
-
-    /// Detail only wanted when digging: one line per cache lookup, per tile.
-    static func debug(_ area: String, _ text: String) { shared.write(area, text, level: "debug") }
+    static func note(_ area: String, _ text: String) { shared.write(area, text) }
 
     /// Runs `work`, notes how long it took, and returns its result.
     static func timed<T>(_ area: String, _ what: String, _ work: () throws -> T) rethrows -> T {
@@ -79,30 +59,18 @@ final class Log {
         String(format: "%.3f s", locale: Locale(identifier: "en_US_POSIX"), CFAbsoluteTimeGetCurrent() - start)
     }
 
-    private func write(_ area: String, _ text: String, level: String, fields: [String: Any]? = nil) {
+    private func write(_ area: String, _ text: String) {
         let now = Date()
         queue.async {
-            if let handle = self.handle {
-                let line = "\(self.clock.string(from: now))  \(area.padding(toLength: 8, withPad: " ", startingAt: 0)) \(text)\n"
-                try? handle.write(contentsOf: Data(line.utf8))
-            }
-            if let handle = self.jsonHandle {
-                var event: [String: Any] = ["ts": self.stamp.string(from: now), "level": level, "category": area, "message": text]
-                if let fields = fields, JSONSerialization.isValidJSONObject(fields) { event["fields"] = fields }
-                if var data = try? JSONSerialization.data(withJSONObject: event, options: [.sortedKeys]) {
-                    data.append(0x0A)
-                    try? handle.write(contentsOf: data)
-                }
-            }
+            guard let handle = self.handle else { return }
+            let line = "\(self.clock.string(from: now))  \(area.padding(toLength: 8, withPad: " ", startingAt: 0)) \(text)\n"
+            try? handle.write(contentsOf: Data(line.utf8))
         }
     }
 
     /// Waits until everything noted so far is on disk.
     func flush() {
-        queue.sync {
-            try? self.handle?.synchronize()
-            try? self.jsonHandle?.synchronize()
-        }
+        queue.sync { try? self.handle?.synchronize() }
     }
 
     /// The first lines of every log: which build, which Mac.
@@ -115,78 +83,6 @@ final class Log {
         Log.note("app", "\(appVersion) started")
         Log.note("app", "macOS \(info.operatingSystemVersionString), \(String(cString: model)), \(info.activeProcessorCount) cores, "
             + "\(MemoryStats.plain(info.physicalMemory)) of memory")
-        Log.note("app", "display scale \(NSScreen.main?.backingScaleFactor ?? 0) · thermal \(Log.thermal) · low power mode \(info.isLowPowerModeEnabled ? "on" : "off")"
-            + " · blending \(Masking.blendsByChannel ? "per colour" : "plain")")
-        Log.note("app", "subject model in this build: \(BundledModels.hasBiRefNet ? "BiRefNet (\(BiRefNetModel.version))" : "none; Vision's masks are used")")
-        Log.note("app", "hair-matting model in this build: \(BundledModels.hasMatting ? "BiRefNet-matting" : "none; Refine Hair uses colour matting only")")
-    }
-
-    /// How hot the Mac says it is running.
-    static var thermal: String {
-        switch ProcessInfo.processInfo.thermalState {
-        case .nominal: return "nominal"
-        case .fair: return "fair"
-        case .serious: return "serious"
-        case .critical: return "critical"
-        @unknown default: return "unknown"
-        }
-    }
-}
-
-/// Measures one piece of background work: how long it took, how much memory it added at its
-/// worst (read every 50 ms), how much processor time it used, and whether the Mac heated up.
-final class JobMeter {
-    private let started = CFAbsoluteTimeGetCurrent()
-    private let before = MemoryMonitor.footprint()
-    private let cpuBefore = JobMeter.cpuSeconds()
-    private let thermalBefore = Log.thermal
-    private var peak: UInt64 = 0
-    private let timer: DispatchSourceTimer
-    private let lock = NSLock()
-
-    init() {
-        peak = before
-        timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
-        timer.schedule(deadline: .now() + 0.05, repeating: 0.05)
-        timer.setEventHandler { [weak self] in
-            let now = MemoryMonitor.footprint()
-            guard let self = self else { return }
-            self.lock.lock()
-            if now > self.peak { self.peak = now }
-            self.lock.unlock()
-        }
-        timer.resume()
-    }
-
-    deinit { timer.cancel() }
-
-    /// Processor time this app has used so far, over all its threads.
-    static func cpuSeconds() -> Double {
-        var usage = rusage()
-        guard getrusage(RUSAGE_SELF, &usage) == 0 else { return 0 }
-        func seconds(_ t: timeval) -> Double { Double(t.tv_sec) + Double(t.tv_usec) / 1_000_000 }
-        return seconds(usage.ru_utime) + seconds(usage.ru_stime)
-    }
-
-    /// Stops measuring and says what was found, in two log-ready pieces.
-    /// What the last `finish` measured, as numbers: bytes of memory and seconds.
-    private(set) var numbers: [String: Any] = [:]
-
-    func finish() -> (memory: String, load: String) {
-        timer.cancel()
-        let wall = max(CFAbsoluteTimeGetCurrent() - started, 0.001)
-        let after = MemoryMonitor.footprint()
-        lock.lock()
-        let top = max(peak, after)
-        lock.unlock()
-        let cpu = max(JobMeter.cpuSeconds() - cpuBefore, 0)
-        let thermalAfter = Log.thermal
-        numbers = ["seconds": wall, "memory_before": Double(before), "memory_peak": Double(top), "memory_after": Double(after), "cpu_seconds": cpu]
-        let memory = "before \(MemoryStats.plain(before)) · peak \(MemoryStats.plain(top)) · after \(MemoryStats.plain(after))"
-        let load = String(format: "cpu %.1f core-s · avg %.1f of %d cores", locale: Locale(identifier: "en_US_POSIX"),
-                          cpu, cpu / wall, ProcessInfo.processInfo.activeProcessorCount)
-            + " · thermal \(thermalBefore)\(thermalAfter == thermalBefore ? "" : " → \(thermalAfter)")"
-        return (memory, load)
     }
 }
 
@@ -200,8 +96,6 @@ final class MemoryMonitor: ObservableObject {
     private var timer: DispatchSourceTimer?
     private var ticks = 0
     private var loggedPeak: UInt64 = 0
-    /// Asked for a line about the caches each time the regular summary is written.
-    var cacheSummary: (() -> String?)?
 
     static func footprint() -> UInt64 {
         var info = task_vm_info_data_t()
@@ -241,10 +135,7 @@ final class MemoryMonitor: ObservableObject {
             Log.note("memory", "\(MemoryStats.plain(bytes)) after \(why)")
         } else {
             ticks += 1
-            if ticks % 15 == 0 {
-                Log.note("memory", line)
-                if let summary = cacheSummary?() ?? nil { Log.note("cache", summary) }
-            }
+            if ticks % 15 == 0 { Log.note("memory", line) }
         }
         // A new high point, by more than 50 MB, is worth a line of its own.
         if stats.peak > loggedPeak + 50 * 1_048_576 {

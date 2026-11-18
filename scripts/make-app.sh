@@ -21,14 +21,6 @@ swift scripts/make-icon.swift build/AppIcon.iconset
 iconutil -c icns build/AppIcon.iconset -o "$APP/Contents/Resources/AppIcon.icns"
 rm -rf build/AppIcon.iconset
 
-# The segmentation models, if scripts/fetch-models.sh has put them in build-models. They go
-# inside the app, so the app never has to fetch anything.
-if [ -d build-models ]; then
-  for model in build-models/*.mlmodelc; do
-    [ -d "$model" ] && ditto "$model" "$APP/Contents/Resources/$(basename "$model")"
-  done
-fi
-
 # The app never uses the network. Fail the build if networking code is linked in.
 if nm -u "$APP/Contents/MacOS/TrainCull" | grep -E 'URLSession|NSURLConnection|NWConnection|nw_connection|CFNetwork|CFSocket|CFStream'; then
   echo "error: the app references networking code" >&2
