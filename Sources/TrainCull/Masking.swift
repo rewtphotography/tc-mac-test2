@@ -1257,12 +1257,17 @@ enum Masking {
             .transformed(by: CGAffineTransform(scaleX: sx, y: sy))
             .transformed(by: CGAffineTransform(translationX: extent.minX, y: extent.minY))
             .cropped(to: extent)
-        let there = image.clampedToExtent().applyingFilter("CIMedianFilter").cropped(to: extent)
+        // The repaint reads its own (edge-extended) copy of the photo, never `image` itself:
+        // a program that samples an image makes Core Image keep that image as a stored, less
+        // precise picture, and alpha 16's part of the render must keep reading the original
+        // (owner's change to spec v7.1 default 4: where w = 0, alpha 16's render exactly).
+        let here = image.clampedToExtent()
+        let there = here.applyingFilter("CIMedianFilter").cropped(to: extent)
         // The farthest a map can point: 127 photo px, at this image's scale.
         let reach = 128 * max(sx, sy) + 2
         let out = kernel.apply(extent: extent, roiCallback: { index, rect in
             index == 1 ? rect.insetBy(dx: -reach, dy: -reach) : rect
-        }, arguments: [image, there, offsets, Float(sx)])
+        }, arguments: [here, there, offsets, Float(sx)])
         return out?.cropped(to: extent)
     }
 
