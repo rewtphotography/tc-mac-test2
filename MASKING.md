@@ -907,7 +907,15 @@ is chosen and after a mask is made in Edit mode.
 - (z) eyedropper, orange 37–40% of the inside: 0 of 255 left anywhere in the box.
 - Soft edge (6-px ramp, colours fitting coverage): 0 change. (v) switch off: the hashes of
   section 18. Every earlier test passes (133 in all).
-- Mac (`RepaintRenderTests`): to follow from the build.
+- Mac, through `Masking.apply` (`RepaintRenderTests`, alpha 22's build): (s) background
+  pixels within 3 px outside the edge 0.0 L darker than the darkened wall (without the
+  background repaint 0.366), every pixel there 0.0 darker than its coverage's mix, wb = 1 on
+  the fringe; (v) on the soft hair edge under Subject +3 / Background −3, 5,180 of 5,400 pixels
+  with w = wb = 0 identical to alpha 16 and 220 at 1/255 (Core Image's rounding; none with
+  float intermediates), the owner's tolerance; no local edits: the photo, byte for byte
+  (`PHOTO-VIEW-CHECK`); (j) and (k) as in alpha 21 (sleeve edge 0.0 L darker, chroma after +3
+  0.0112 against the sleeve's 0.0100; strong green 0.0 L, 0.0 (a, b)). All 15 Mac tests pass;
+  the Refine Edges box check changed 8,472 px, as in every build since alpha 15.
 
 **Known issues added by v7.2**
 - The automatic guess counts every outside colour in the box: a box that takes in more of

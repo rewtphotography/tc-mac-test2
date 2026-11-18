@@ -934,6 +934,9 @@ slider redoes the last stroke from its kept result. Clean Edge and its test are 
 and every number: `MASKING.md`, section 20. After this build masking is closed; next is saving
 tool work and local edits (and the two-photo mask limit).
 
+**The automated build (alpha 22):** compiled first time; all Linux (133) and Mac (15) tests
+pass; launch pictures kept and looked at (normal); release published.
+
 ## Still to design
 
 The owner will share screenshots of how they use Bridge. Until then these are open: where
