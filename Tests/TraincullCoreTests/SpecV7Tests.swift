@@ -232,9 +232,15 @@ final class SpecV7Tests: XCTestCase {
         on.insideColour = true
         let far = [PixelRect(x: 2, y: 2, w: 8, h: 8)]
         let off = Matte(photo: scene.photo, coarse: scene.coarse, faces: far, firstPassPixel: 3.2).run(tier: .off)
+        // (v7.2.1: the bright-background rule may cut; with it off, the alpha is untouched.)
+        var noCut = on
+        noCut.inside.cut = false
+        let plainRepaint = Matte(photo: scene.photo, coarse: scene.coarse, faces: far, settings: noCut, firstPassPixel: 3.2).run(tier: .off)
+        XCTAssertEqual(plainRepaint.alpha, off.alpha)
         let with = Matte(photo: scene.photo, coarse: scene.coarse, faces: far, settings: on, firstPassPixel: 3.2).run(tier: .off)
-        print("V7.1 (f): \(with.repaintStats?.summary ?? "")")
-        XCTAssertEqual(with.alpha, off.alpha)
+        let moved = zip(with.alpha, off.alpha).map { abs(Int($0) - Int($1)) }
+        print("V7.1 (f): \(with.repaintStats?.summary ?? "") · with the bright-background rule (dark disc on white): \(moved.filter { $0 > 0 }.count) px cut, "
+            + "at most \(moved.max() ?? 0) of 255 · \(with.edgeColourStats?.lines.first ?? "")")
         XCTAssertGreaterThan(with.repaintStats?.core ?? 0, 100)
         XCTAssertTrue(with.log.contains { $0.hasPrefix("edge colour from inside:") })
         // Where w > 0 the shares are alpha, one value for all three.

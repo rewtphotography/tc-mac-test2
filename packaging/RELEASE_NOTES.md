@@ -8,29 +8,23 @@ An alpha build of TrainCull for Mac (Apple silicon, macOS 15 or later).
    **Done**, then open **System Settings → Privacy & Security**, scroll down to the message
    about TrainCull and click **Open Anyway**. This is needed once for each new build.
 
-**New in this build: the masking chapter closed (masking spec v7.2)**
+**New in this build: one edge rule for bright backgrounds (masking spec v7.2.1)**
 
-- **Background-coloured edge pixels are cut** automatically: green streaks on fingers,
-  orange specks by the rose, the bright notch cluster. Real rim light is kept. Debug: **Cut
-  background-coloured edge pixels** (on).
-- **The background side is repainted too:** with Background darkened, the fringe just
-  outside an edge (7451's dark green line) takes the wall's own colour.
-- **Remove Colour: drag the box straight away.** The colour to remove is guessed from the
-  box (swatches marked "auto"). If it guesses wrong, click the colour with the tool: the box
-  is done again with it (Shift-click adds one; Clear goes back to the guess). Edges stay
-  smooth, without stair-steps.
-- **Edge Colour** (tool menu): drag a box where an edge keeps a bright or coloured rim it
-  shouldn't; inside it every edge pixel takes the colour from just inside.
-- **Refine Hair: Strength**, 0 by default, only tidies the edge; raise it to let a stroke
-  add strands. Moving it redoes the last stroke. The hair model is loaded ahead, so the
-  first stroke doesn't wait.
-- **Clean Edge is gone.**
+- **No more dark specks inside finger edges.** Alpha 22's cut of background-coloured pixels
+  is gone. In its place, where the background is clearly brighter than the subject beside
+  it, the lens's colour fringe is judged on a slightly blurred copy of the photo, so single
+  pixels and noise no longer punch holes. Only coverage the colours clearly don't support is
+  taken off, softly, and both sides of the edge are repainted. Green streaks come out faint
+  rather than gone.
+- **Everywhere else (skin against a dark background, white on white, rim light) edges are
+  alpha 21's.**
+- Debug: the switch is now **Bright-background edges** (on).
+- Remove Colour, Edge Colour and Refine Hair are as in alpha 22.
 
-Please check: 7451 with Subject +3 / Background −3 at 300% (no dark green line outside the
-gap, no notch cluster, no yellow outline); 6303 default at 300% (no green streaks), then one
-Remove Colour box over the fingers without picking a colour; 6372 default (fewer orange
-specks), then one Remove Colour box over the rose without picking; 7006 with Refine Hair at
-Strength 0; 6957's Refine Edges box and the hair on 7006 and 7473 as before. Then send the log.
+Please check at 300%: 6303 with Subject +2.6 / Background −3 (no dark specks or slivers; green
+streaks gone or faint); 7451 with Subject +3 / Background −3 (no teal, no dark line, no notch
+cluster); 6372 for anything new; 6957's box and the hair on 7006 and 7473 as before. Then send
+the log.
 
 **The masking test:** open **Edit** and scroll to **Mask (Test)**. Click **Make Mask**.
 **Show** switches between the photo, a red overlay, the mask, On Black, On White,

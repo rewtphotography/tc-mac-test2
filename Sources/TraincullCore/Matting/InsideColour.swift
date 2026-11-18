@@ -34,25 +34,32 @@ public struct InsideColourSettings: Equatable {
     public var feather: Float = 2
     public var featherBlur: Float = 1.5
 
-    // Spec v7.2.
-    /// §2: cut edge pixels that clearly match the background (Debug "Cut background-coloured
-    /// edge pixels"). With it off, rim light is judged as in v7.1.
+    // Spec v7.2 and v7.2.1.
+    /// v7.2.1: the bright-background edge rule (Debug "Bright-background edges"): the cut on a
+    /// blurred copy, and both sides' repaint, where the background is clearly brighter than
+    /// the subject. With it off, alpha 21's handling (v7.1's repaint only).
     public var cut = true
-    /// §1: solid background is alpha at most `backgroundAlpha` and at least `backgroundDepth`
-    /// pixels outside the half-way line; beyond `backgroundReach` of it B̂ is unknown.
+    /// v7.2 §1: solid background is alpha at most `backgroundAlpha` and at least
+    /// `backgroundDepth` pixels outside the half-way line; beyond `backgroundReach` of it B̂ is unknown.
     public var backgroundAlpha: Float = 0.02
     public var backgroundDepth: Float = 6
     public var backgroundReach: Float = 30
-    /// §2: pixels up to this far inside the half-way line (and all of the soft edge outside it)
-    /// are judged; a pixel is background-like when it is at least `cutApart` from F̂ in (a, b)
-    /// and at most `cutNone` × that from B̂; it is cut in full at `cutFull` × that or nearer.
-    public var cutInside: Float = 6
-    public var cutApart: Float = 0.04
-    public var cutFull: Float = 0.25
-    public var cutNone: Float = 0.5
-    /// §2: within this of B̂ in full Oklab a pixel is background showing through: never rim light.
-    public var nearBackground: Float = 0.03
-    /// §3: the background side's repaint core reaches this many pixels outside the half-way line.
+    /// v7.2.1 §2: the gate g_b = smoothstep(gateLow, gateHigh, L(B̂) − L(F̂)) (Oklab L), softened
+    /// by a Gaussian reaching `gateBlur` pixels.
+    public var gateLow: Float = 0.10
+    public var gateHigh: Float = 0.20
+    public var gateBlur: Float = 3
+    /// v7.2.1 §3: the blurred copy's σ (photo pixels); confidence k falls from 1 to 0 as the
+    /// blurred colour lies `lineNear` to `lineFar` (Oklab) off the F̂–B̂ line.
+    public var blurSigma: Float = 1.5
+    public var lineNear: Float = 0.03
+    public var lineFar: Float = 0.08
+    /// v7.2.1 §3.3: the cut reaches pixels under `opaque` alpha, or up to `cutInside` pixels
+    /// inside the half-way line; enclosed holes it opens under `holeArea` pixels are closed.
+    public var opaque: Float = 0.98
+    public var cutInside: Float = 2
+    public var holeArea = 20
+    /// v7.2 §3: the background side's repaint core reaches this many pixels outside the half-way line.
     public var backCore: Float = 3
     public init() {}
 }
@@ -233,13 +240,14 @@ public enum Repaint {
     /// w > 0. `skip` says, for a pixel and its inside colour (linear), that it is excluded
     /// (the hair zone unless the inside is skin; a hair stroke): no core of its own.
     /// `matched` (Remove Colour) marks pixels that match a sampled colour: never rim light,
-    /// and never a source of the inside colour. `flags` (spec v7.2, 2: `EdgeCut`), over `rect`:
-    /// `EdgeCut.neverRim` pixels are never rim light, `EdgeCut.forceCore` ones join the core.
-    /// `rimOff` (the Edge Colour box, an eyedropper Remove Colour box): nothing is rim light.
+    /// and never a source of the inside colour. `gate` (spec v7.2.1, `EdgeCut.gate`), over
+    /// `rect`: each band pixel with an inside colour (not excluded) is core to that weight
+    /// whatever its rim light. `rimOff` (the Edge Colour box, an eyedropper Remove Colour box):
+    /// nothing is rim light.
     public static func apply(photo: Photo, alpha: UnsafePointer<UInt8>, shares: UnsafeMutablePointer<UInt8>, map: UnsafeMutablePointer<UInt8>,
                              rect: PixelRect, settings s: InsideColourSettings = InsideColourSettings(),
                              skip: (Int, Int, SIMD3<Float>) -> Bool = { _, _, _ in false },
-                             matched: ((Int, Int) -> Bool)? = nil, flags: [UInt8]? = nil, rimOff: Bool = false) -> RepaintStats {
+                             matched: ((Int, Int) -> Bool)? = nil, gate: [Float]? = nil, rimOff: Bool = false) -> RepaintStats {
         let W = photo.w, H = photo.h
         let r = rect.clamped(w: W, h: H)
         var stats = RepaintStats()
@@ -295,9 +303,7 @@ public enum Repaint {
                                 xs[ri] = Int8(min(max(sx - x, -127), 127)); ys[ri] = Int8(min(max(sy - y, -127), 127))
                                 let F = InsideColour.median3(photo, sx, sy)
                                 if skip(x, y, F) { kinds[ri] = 4; continue }
-                                let flag = flags?[ri] ?? 0
-                                if flag & EdgeCut.forceCore != 0 { kinds[ri] = 1; continue }
-                                if !rimOff && flag & EdgeCut.neverRim == 0 && matched?(x, y) != true {
+                                if !rimOff && matched?(x, y) != true {
                                     let o = (y * W + x) * 4
                                     let now = SIMD3<Float>(Float(shares[o]), Float(shares[o + 1]), Float(shares[o + 2])) / 255
                                     let C = InsideColour.rimColour(x: x, y: y, alpha: a8, part: InsideColour.linear(photo, x, y) * now, look: s.rimLook,
@@ -330,7 +336,12 @@ public enum Repaint {
             }
         }
         for k in kind where k == 3 { stats.unknown += 1 }
-        let made = feather(rect: r, tiles: tiles, core: kind.map { $0 == 1 }, protected: protected, offX: offX, offY: offY,
+        var weights = kind.map { $0 == 1 ? Float(1) : 0 }
+        if let gate = gate {
+            // Gated pixels (v7.2.1, 3.4): core to the gate's weight, rim light or not.
+            for i in 0 ..< rn where gate[i] > 0 && (kind[i] == 1 || kind[i] == 2) { weights[i] = max(weights[i], gate[i]) }
+        }
+        let made = feather(rect: r, tiles: tiles, core: weights, protected: protected, offX: offX, offY: offY,
                            alpha: alpha, shares: shares, map: map, W: W, settings: s)
         let coreCount = made.core, feathered = made.feathered
         stats.core = coreCount
@@ -363,11 +374,13 @@ public enum Repaint {
         return false
     }
 
-    /// The weight round a core (spec v7.1, 1.1): 1 on the core, fading over `feather` pixels
-    /// round it, softened, never under 1 on the core; 0 on `protected` pixels. Written into
-    /// `map` (with each pixel's offset) wherever it is over 0, and, with `shares`, shares set
-    /// to alpha there. `core`, `protected` and the offsets are over `rect`.
-    static func feather(rect r: PixelRect, tiles: [PixelRect], core: [Bool], protected: [Bool]?, offX: [Int8], offY: [Int8],
+    /// The weight round a core (spec v7.1, 1.1): the core's own weight on it (1, or a gated
+    /// pixel's g_b, v7.2.1), fading over `feather` pixels round it from the strongest core
+    /// near, softened, never under the core's own; a `protected` pixel keeps only its own
+    /// weight (0 unless gated). Written into `map` (with each pixel's offset) wherever it is
+    /// over 0, and, with `shares`, shares set to alpha there. `core`, `protected` and the
+    /// offsets are over `rect`.
+    static func feather(rect r: PixelRect, tiles: [PixelRect], core: [Float], protected: [Bool]?, offX: [Int8], offY: [Int8],
                         alpha: UnsafePointer<UInt8>, shares: UnsafeMutablePointer<UInt8>?, map: UnsafeMutablePointer<UInt8>,
                         W: Int, settings s: InsideColourSettings) -> (core: Int, feathered: Int) {
         let rw = r.w
@@ -384,13 +397,22 @@ public enum Repaint {
             let cw = crop.maxX - cx0, ch = crop.maxY - cy0
             if cw <= 0 || ch <= 0 { return }
             var isCore = [Bool](repeating: false, count: cw * ch)
-            var any = false
+            var weight = Gray(w: cw, h: ch)
+            var any = false, partial = false
             for y in 0 ..< ch {
-                for x in 0 ..< cw where core[(cy0 + y - r.y) * rw + (cx0 + x - r.x)] { isCore[y * cw + x] = true; any = true }
+                for x in 0 ..< cw {
+                    let c = core[(cy0 + y - r.y) * rw + (cx0 + x - r.x)]
+                    if c > 0 { isCore[y * cw + x] = true; weight.v[y * cw + x] = c; any = true; if c < 1 { partial = true } }
+                }
             }
             if !any { return }
             let d = PlaneMath.distance(to: isCore, w: cw, h: ch)
             var wf = d.map { 1 - smoothstep(0, s.feather, $0) }
+            if partial {
+                // The fade starts from the strongest core near (all 1s: exactly v7.1's).
+                let near = PlaneMath.extremum(weight, radius: Int(s.feather.rounded(.up)) + radius + 1, smallest: false)
+                for i in 0 ..< wf.count { wf[i] *= near.v[i] }
+            }
             var tmp = wf
             for y in 0 ..< ch {
                 for x in 0 ..< cw {
@@ -410,8 +432,8 @@ public enum Repaint {
             for y in tile.y ..< tile.maxY {
                 for x in tile.x ..< tile.maxX {
                     let li = (y - cy0) * cw + (x - cx0), ri = (y - r.y) * rw + (x - r.x)
-                    var w = max(wf[li], isCore[li] ? 1 : 0)
-                    if protected?[ri] == true { w = 0 }
+                    var w = max(wf[li], weight.v[li])
+                    if protected?[ri] == true { w = weight.v[li] }
                     let w8 = UInt8((min(max(w, 0), 1) * 255).rounded())
                     if w8 == 0 { continue }
                     let o = (y * W + x) * 4

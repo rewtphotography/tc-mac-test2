@@ -116,10 +116,10 @@ struct LocalPane: View {
                     Toggle("Edge colour from inside", isOn: $session.insideColour)
                         .controlSize(.small)
                         .help("Each edge pixel's subject colour taken from the solid subject just inside it (like Photoshop's Decontaminate Colors), and the background side's from the background just outside. Off is alpha 16's edge colour.")
-                    Toggle("Cut background-coloured edge pixels", isOn: $session.cutBackground)
+                    Toggle("Bright-background edges", isOn: $session.cutBackground)
                         .controlSize(.small)
                         .disabled(!session.insideColour)
-                        .help("Edge pixels that are clearly the background's colour lose their coverage (green streaks on fingers, orange specks). Works with Edge colour from inside.")
+                        .help("Where the background is clearly brighter than the subject beside it, the lens's colour fringe is cut back (judged on a slightly blurred copy) and both sides of the edge repainted. Off is alpha 21's edge. Works with Edge colour from inside.")
                     Picker("Hair method", selection: $session.hairMethod) {
                         ForEach(HairMethod.allCases, id: \.rawValue) { Text($0.name).tag($0) }
                     }

@@ -911,9 +911,10 @@ enum Masking {
             }
             if let edge = out.edgeColourStats {
                 if let cut = edge.cut {
-                    fields["background_cut_pixels"] = cut.cut
-                    fields["background_cut_mean_alpha"] = cut.cut > 0 ? cut.removed / Double(cut.cut) : 0
-                    fields["background_showing_through"] = cut.through
+                    fields["bright_background_gated"] = cut.gated
+                    fields["bright_background_cut_pixels"] = cut.cut
+                    fields["bright_background_cut_mean_alpha"] = cut.cut > 0 ? cut.removed / Double(cut.cut) : 0
+                    fields["bright_background_holes_restored"] = cut.holesRestored
                 }
                 fields["background_repaint_core"] = edge.back.core
                 fields["background_repaint_feathered"] = edge.back.feathered

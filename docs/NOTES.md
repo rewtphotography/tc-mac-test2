@@ -937,6 +937,16 @@ tool work and local edits (and the two-photo mask limit).
 **The automated build (alpha 22):** compiled first time; all Linux (133) and Mac (15) tests
 pass; launch pictures kept and looked at (normal); release published.
 
+## Masking spec v7.2.1 (alpha 23): one edge rule for bright backgrounds
+
+`docs/specs/masking-spec-v7.2.1.md`. v7.2 §2's cut is replaced by a gated rule decided on a
+blurred copy (§2–3), built as written. Left out, by the owner's decision during the build:
+§4 (Remove Colour deciding on the blurred copy), which left 3×3 specks at 60% coverage and put
+a soft halo round removed areas; Remove Colour stays alpha 22's. Test (p) is held to what §3
+achieves (≤ 0.55, owner: streaks faint). Defaults: the switch renamed "Bright-background
+edges"; "3 px" blur of the gate as a Gaussian reaching 3 px; "within 2 px inside" as distance
+to the nearest pixel under a half ≤ 2 (as test (p2) counts it). Details: `MASKING.md`, section 21.
+
 ## Still to design
 
 The owner will share screenshots of how they use Bridge. Until then these are open: where

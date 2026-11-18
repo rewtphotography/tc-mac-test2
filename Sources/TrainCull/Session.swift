@@ -148,8 +148,8 @@ final class Session: ObservableObject {
     }
     /// Debug (spec v7, 2): edge colour from inside, the last step of every mask and box.
     @Published var insideColour = true { didSet { if insideColour != oldValue { edgeStepChanged("edge colour from inside", insideColour) } } }
-    /// Debug (spec v7.2, 2): cut edge pixels that clearly match the background (part of edge colour from inside).
-    @Published var cutBackground = true { didSet { if cutBackground != oldValue { edgeStepChanged("cut background-coloured edge pixels", cutBackground) } } }
+    /// Debug (spec v7.2.1): the bright-background edge rule (part of edge colour from inside).
+    @Published var cutBackground = true { didSet { if cutBackground != oldValue { edgeStepChanged("bright-background edges", cutBackground) } } }
     /// Remove Colour (spec v7.2, 4): the colours picked with the eyedropper (display values),
     /// none for the automatic guess; the colours the last box guessed; and the tolerance.
     /// Moving the tolerance, or picking a colour, does the last Remove Colour box again in its place.
@@ -1515,7 +1515,7 @@ final class Session: ObservableObject {
         var switches = ["edge_snap": edgeSnap, "decontamination": decontamination, "colour_guard": colourGuard, "edge_recentre": edgeRecentre,
                         "legacy_vision": legacyVision]
         // (Named only when on: with it off the bundle is alpha 16's, byte for byte.)
-        if insideColour { switches["edge_colour_from_inside"] = true; switches["cut_background_coloured_edge_pixels"] = cutBackground }
+        if insideColour { switches["edge_colour_from_inside"] = true; switches["bright_background_edges"] = cutBackground }
         say("Writing the debug bundle for \(item.name)…")
         exportQueue.async {
             do {

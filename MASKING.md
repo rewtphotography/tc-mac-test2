@@ -923,3 +923,60 @@ is chosen and after a mask is made in Edit mode.
   eyedropper then decides.
 - The cut's (a, b) test sets lightness aside, as specified: a background of the subject's hue
   but far lighter or darker is not cut (only the notch case handles light pixels).
+
+## 21. Spec v7.2.1 (alpha 23): one edge rule for bright backgrounds
+
+`docs/specs/masking-spec-v7.2.1.md`, with the owner's two answers at its end: §4 (Remove
+Colour on the blurred copy) left out, Remove Colour stays alpha 22's; §3 built exactly as
+written, so streaks come out faint rather than gone. Replaces section 20's cut (§2 of v7.2:
+the background-like cut, its notch case, its B̂-based rim protection, and the colour-support
+default added there). Everything else in section 20 stands.
+
+**The rule** (`EdgeCut.apply`, `InsideColourSettings.cut`, Debug "Bright-background edges",
+on; it runs only while "Edge colour from inside" is on).
+- **Gate:** for band pixels (and the background side's reach) with F̂ and B̂ known and not
+  excluded (hair zone unless F̂ is skin; hair strokes), g_b = smoothstep(0.10, 0.20, L(B̂) −
+  L(F̂)) in Oklab L, then a Gaussian reaching 3 px (σ 1.5). Nowhere gated: alpha 21's handling
+  exactly (v7.1's repaint with the rim rule and the 40 px groups; no background repaint).
+- **Blurred copy:** σ 1.5 (linear) of the neutral render and of the mask, per tile. t_b on the
+  F̂ → B̂ line (linear, clamped), k = 1 − smoothstep(0.03, 0.08, Oklab distance from the copy to
+  the F̂–B̂ segment), e = max(0, t_b − (1 − α_b)) · k · g_b.
+- **Cut:** e through a 3×3 median, then a Gaussian σ 0.75 ("1.5 px"), no max with the raw
+  value; α′ = α − e only where alpha < 0.98 or the pixel is within 2 px inside the half-way
+  line (distance to the nearest pixel under a half ≤ 2); shares scaled with alpha. Holes:
+  pixels the cut took under a half, grouped (8-connected); a group not meeting the background
+  as it was, under 20 px, is put back.
+- **Repaint:** subject side, a gated band pixel with an inside colour is core to weight g_b
+  whatever its rim light (core weight = max(v7.1's core, g_b)); background side, v7.2 §3's
+  core weighted by g_b, nothing where it is 0. The feather fades from the strongest core near
+  (all-1 cores give v7.1's weights exactly); a protected rim keeps only its own gated weight.
+- Runs at the end of the base mask and inside Refine Edges, Remove Colour and Edge Colour boxes
+  (box ± 4 px). Log: `bright-background edges: G px gated, N px cut, mean alpha removed x, H px
+  of holes restored`, then both repaints' counts; JSON `bright_background_gated`, `_cut_pixels`,
+  `_cut_mean_alpha`, `_holes_restored`.
+
+**Test numbers** (`SpecV72Tests`, `SpecV7Tests`, engine's 2.2 curve; scenes in linear light;
+the owner's 6303 skin (113, 82, 72) and background (158, 202, 167)):
+- (p) pale green streak on the mask's outer three pixels (alpha 1, 0.5, 0.15) against bright
+  green: after, 136, 11, 0 of 255 (0.54 on the inner pixel; held to ≤ 0.55, owner); skin 4 px
+  or more away unchanged (0.0). 1,800 px gated, 196 cut.
+- (p2) noisy skin (2%) with 10% green spill in its outer 3 px: 0 px at alpha ≥ 0.98 more than
+  2 px inside changed; 0 new holes; largest step along the edge 0.004. 240 px cut, mean 0.046.
+- (p3) red-dip fringe, Subject +2.6 / Background −3 (engine arithmetic): no dip below both
+  neighbours (0.0 L; alpha 21 also 0.0); 0 new holes; the half-way line moved 0.0 px (the
+  copy's colours fit the mask's coverage there, so nothing is cut; the repaint does the rest).
+  Mac: see below.
+- (s) the sleeve with a background-side teal fringe: background pixels 0.0 L darker than the
+  darkened wall (0.376 without the background repaint).
+- (r) a warm rim against a dark background: 0 px gated; alpha, shares and repaint identical to
+  alpha 21's handling; no background repaint. (g0) white on white: the same.
+- (q) black sleeve on dark grey (428 px gated: the grey is lighter), green on green: 0 px cut.
+- Soft 6-px ramp against bright green whose colours fit its coverage: 0 change.
+- (f) dark disc on white with lens blur, through the engine: 24 px cut, at most 1 of 255;
+  with the rule off, alpha identical to the switch off.
+- (v) switch off: section 18's hashes. All 136 core tests pass.
+- Mac (`RepaintRenderTests`): to follow from the build.
+
+**Accepted trade-offs (owner).** A rim light against a brighter background isn't protected.
+A coloured detail at a bright-background edge thinner than about 3 px is treated more softly:
+a streak 1–2 px inside a solid mask is cut by about half.

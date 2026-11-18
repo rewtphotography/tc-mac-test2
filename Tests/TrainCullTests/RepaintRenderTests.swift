@@ -183,6 +183,23 @@ final class RepaintRenderTests: XCTestCase {
         XCTAssertLessThanOrEqual(darkMix, 0.03)
     }
 
+    /// (p3) Spec v7.2.1: the owner's measured red-dip fringe on 6303 (skin (113, 82, 72) →
+    /// (91, 83, 68) → (102, 102, 82) → (111, 124, 96) → background (158, 202, 167)) through
+    /// `Masking.apply` with Subject +2.6 EV and Background −3 EV: no edge pixel more than 0.03 L
+    /// darker than both its neighbours.
+    func testRedDipFringeRendered() throws {
+        let e = try Edge(subject: SIMD3(113, 82, 72), edge: [(SIMD3(91, 83, 68), 0.9), (SIMD3(102, 102, 82), 0.5), (SIMD3(111, 124, 96), 0.15)],
+                         ground: SIMD3(158, 202, 167))
+        let out = try linear(render(e.mask, CIImage(cgImage: e.picture), edits(subject: 2.6, background: -3)), e.extent)
+        let y = e.h / 2
+        let L = (0 ..< e.w).map { Oklab.from(linear: out($0, y)).x }
+        var dip: Float = 0
+        for x in e.x0 - 4 ..< e.x0 + 7 { dip = max(dip, min(L[x - 1], L[x + 1]) - L[x]) }
+        print("V7.2.1-P3 rendered: deepest dip below both neighbours \(dip) L · L across \((e.x0 - 2 ..< e.x0 + 5).map { String(format: "%.3f", $0 < 0 ? 0 : L[$0]) }) · "
+            + "alpha \((e.x0 - 1 ..< e.x0 + 4).map { e.alpha[y * e.w + $0] })")
+        XCTAssertLessThanOrEqual(dip, 0.03)
+    }
+
     /// (o) Every pixel with w = 0 renders exactly as alpha 16's path does, under Subject +3 and
     /// Background −3, on a soft hair-like edge whose shares differ by channel; the background
     /// side never reads C; and the views render with a repaint.
