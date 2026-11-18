@@ -140,6 +140,20 @@ final class Session: ObservableObject {
     @Published var edgeRecentre = true { didSet { if edgeRecentre != oldValue { edgeStepChanged("edge re-centre", edgeRecentre) } } }
     /// The mask tools: which is chosen, the brush, and the Clean Edge and Refine Hair settings.
     @Published var maskTool = MaskTool.none { didSet { if maskTool != oldValue { toolChanged() } } }
+    /// Debug (spec v7, 2): edge colour from inside, the last step of every mask and box.
+    @Published var insideColour = true { didSet { if insideColour != oldValue { edgeStepChanged("edge colour from inside", insideColour) } } }
+    /// Remove Colour (spec v7, 3): the colours picked with the eyedropper (display values),
+    /// and the tolerance. Moving the tolerance does the last Remove Colour box again in its place.
+    @Published var removeSamples: [SIMD3<Float>] = []
+    @Published var removeTolerance: Double = 0.05 {
+        didSet {
+            guard removeTolerance != oldValue else { return }
+            retuneToken += 1
+            let token = retuneToken
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { if token == self.retuneToken { self.retuneRemoveColour() } }
+        }
+    }
+    private var retuneToken = 0
     /// The brush's radius, in pixels of the photo.
     @Published var brushSize: Double = 60 { didSet { if brushSize != oldValue { toolChanged() } } }
     /// Show edits: every box and stroke on this photo stays drawn over it. Off, only the one being
@@ -565,10 +579,16 @@ final class Session: ObservableObject {
         }
         view.acceptsClick = { [weak self] in self?.clicked(index) ?? true }
         if index == 0 {
+            view.onPick = { [weak self] point, add in self?.pickColour(point, add: add) }
             view.onBox = { [weak self] rect, restore in
                 guard let self = self else { return }
                 let box = PixelRect(x: Int(rect.minX), y: Int(rect.minY), w: max(Int(rect.width), 1), h: max(Int(rect.height), 1))
-                self.userTool(RefineOp(tool: self.maskTool, box: box, stroke: nil, restore: restore))
+                var op = RefineOp(tool: self.maskTool, box: box, stroke: nil, restore: restore)
+                if op.tool == .removeColour {
+                    op.samples = self.removeSamples
+                    op.tolerance = Float(self.removeTolerance)
+                }
+                self.userTool(op)
             }
             view.onStroke = { [weak self] points, radius, restore in
                 guard let self = self else { return }
@@ -1226,12 +1246,62 @@ final class Session: ObservableObject {
         settings.decontaminate = decontamination
         settings.colourGuard = colourGuard
         settings.recentre = edgeRecentre
+        settings.insideColour = insideColour
         return settings
     }
 
     private func edgeStepChanged(_ step: String, _ on: Bool) {
         Log.note("mask", "debug: \(step) \(on ? "on" : "off")")
         if currentMask != nil { makeMask(fresh: false, trigger: "\(step) switched \(on ? "on" : "off")") }
+    }
+
+    // MARK: Remove Colour
+
+    /// The eyedropper: the colour at a point of the photo (a 5×5 median of the neutral render,
+    /// the picture masks are made from), as the only sample or, with Shift, one more.
+    private func pickColour(_ point: CGPoint, add: Bool) {
+        guard let item = current else { return }
+        let url = item.url, name = item.name
+        let x = Int(point.x), y = Int(point.y)
+        maskStatus = "Picking the colour…"
+        DispatchQueue.global(qos: .userInitiated).async {
+            let picked = (try? Masking.neutral(url)).flatMap { Masking.median5($0, x: x, y: y) }
+            DispatchQueue.main.async {
+                guard let colour = picked else {
+                    self.maskStatus = "The colour couldn't be read there."
+                    return
+                }
+                self.removeSamples = add ? self.removeSamples + [colour] : [colour]
+                let text = String(format: "%.0f, %.0f, %.0f", locale: Locale(identifier: "en_US_POSIX"), colour.x * 255, colour.y * 255, colour.z * 255)
+                Log.note("tool", "\(name): remove colour: \(add ? "added" : "picked") \(text) at \(x),\(y) · \(self.removeSamples.count) sample(s)")
+                self.maskStatus = "\(self.removeSamples.count) colour\(self.removeSamples.count == 1 ? "" : "s") to remove. Drag a box over the place."
+            }
+        }
+    }
+
+    func clearRemoveSamples() {
+        removeSamples = []
+        Log.note("tool", "remove colour: samples cleared")
+    }
+
+    /// The tolerance moved: the last operation, if it is a Remove Colour box, is done again in
+    /// its place with the new tolerance (one undo step still).
+    private func retuneRemoveColour() {
+        guard let item = current, !maskBusy, var state = refined[item.id], let last = state.ops.last, last.tool == .removeColour, !last.restore,
+              let undo = state.undos.last, let mask = currentMask else { return }
+        do {
+            let before = try Masking.undone(mask, undo)
+            state.ops.removeLast()
+            state.undos.removeLast()
+            refined[item.id] = state
+            keep(before, for: item)
+            var op = last
+            op.tolerance = Float(removeTolerance)
+            Log.note("tool", "\(item.name): remove colour: tolerance " + String(format: "%.3f", locale: Locale(identifier: "en_US_POSIX"), removeTolerance) + ", the last box done again")
+            applyTool(op, to: item, trigger: "tolerance changed")
+        } catch {
+            Log.warn("\(item.name): remove colour couldn't be done again: \(error)")
+        }
     }
 
     /// Hands the chosen tool, and what the tools have done to this frame, to the large image.
@@ -1246,7 +1316,9 @@ final class Session: ObservableObject {
         case .none: view.tool = .none
         case .edges: view.tool = .box
         case .hair, .clean: view.tool = .brush(radius: CGFloat(brushSize))
+        case .removeColour: view.tool = .box
         }
+        view.picksColour = maskTool == .removeColour
         let ops = refined[selected]?.ops ?? []
         // Earlier boxes and strokes only when asked for (Show edits); never outside the edit view.
         let shown = showEdits && currentMask != nil && compare == nil && editing
@@ -1393,8 +1465,10 @@ final class Session: ObservableObject {
         let url = item.url, known = faces[item.id]
         let rules = subjectRules, source = subjectSource, mask = currentMask
         let ops = refined[item.id]?.ops ?? []
-        let switches = ["edge_snap": edgeSnap, "decontamination": decontamination, "colour_guard": colourGuard, "edge_recentre": edgeRecentre,
+        var switches = ["edge_snap": edgeSnap, "decontamination": decontamination, "colour_guard": colourGuard, "edge_recentre": edgeRecentre,
                         "legacy_vision": legacyVision]
+        // (Named only when on: with it off the bundle is alpha 16's, byte for byte.)
+        if insideColour { switches["edge_colour_from_inside"] = true }
         say("Writing the debug bundle for \(item.name)…")
         exportQueue.async {
             do {

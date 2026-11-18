@@ -1,8 +1,9 @@
 # Masking: handover
 
 Written at the end of the final masking round (alpha 15) for a session that has none of the
-earlier context, and brought up to date for spec v6 (alpha 17): section 17 says what v6
-changed, and the sections it touches are corrected in place. `CLAUDE.md` has the project's rules and `docs/NOTES.md` the history, release
+earlier context. **Spec v6 (alphas 17 and 18) was reverted**: the code is alpha 16's, plus
+spec v7's two colour tools (alpha 19). Section 17 says what v6 was and why it went; section
+18 is v7. Everything else here describes the code as it is. `CLAUDE.md` has the project's rules and `docs/NOTES.md` the history, release
 by release; this file is the state of masking as it stands, how it works, what every number
 is, and what is next. The owner's specifications are in `docs/specs/` (v2 to v5, in order;
 each later one wins where they disagree).
@@ -27,23 +28,11 @@ In Edit mode, **Mask (Test)** at the bottom of the pane: Make Mask finds the pho
 subject and makes a soft mask of it; Show offers ways of looking at it (Background −3 EV
 is the one edges are judged in, at 200–400%); Subject, Background or Skin can then be
 given Exposure, Saturation and Warmth. Three tools refine a mask by hand: **Refine Edges**
-(drag a box; Shift: redraw everything in it), **Refine Hair** and **Edge Brush** (paint,
-with Strength and Tightness); Clean Edge is under Debug since v6. Option with any of them
-puts the automatic mask back (inside the automatic hand pass's squares, the mask as it was
-before that pass). Export 16-bit TIFF includes the adjustments.
-
-**How long a mask lasts** (corrected in alpha 17; until then only the last two photos kept
-theirs, and a third photo's mask silently took the first one's tool operations and local
-adjustments with it, out of the screen and out of its TIFF): a mask stays in memory until
-the folder is closed. Only a clean one (no tool operations, none waiting, no local
-adjustments) is let go, oldest first, once more than two are held. When macOS reports memory
-pressure, every mask not on screen is let go if clean or written to
-`~/Library/Caches/TrainCull/masks` (`MaskSpill.swift`) and read back when its frame is shown
-or exported; that folder is emptied when a folder is opened, when the app quits and when it
-starts. A frame with local adjustments whose mask can't be read back is made again and its
-tool operations done again; an export that can't get a frame's mask fails that frame and says
-why, rather than writing a TIFF without its adjustments. Nothing is saved with the photo
-itself yet.
+(drag a box), **Refine Hair** (paint), **Clean Edge** (paint), and since alpha 19 **Remove
+Colour** (eyedropper, then a box: section 18). Option with any of them puts the automatic
+mask back. Every mask and every Refine Edges box ends with **edge colour from inside**
+(section 18). Masks last until the folder is closed; nothing is saved with
+the photo yet. Export 16-bit TIFF includes the adjustments.
 
 A mask is two pictures the size of the photo (`MaskResult`, `Masking.swift`):
 - `alpha`: how much of each pixel the subject covers, 8 bits.
@@ -70,22 +59,23 @@ A mask is two pictures the size of the photo (`MaskResult`, `Masking.swift`):
 | `ClosedForm.swift` | closed-form matting (the Max tier; used only by Refine Hair's colour-matting path and the Debug hair tiers) |
 | `Oklab.swift` | Oklab from linear RGB, chroma, hue difference, distance |
 | `Skin.swift` | the skin mask |
-| `Refine.swift` | the tools' arithmetic: `Refine.edges` (with `limitRemovals`, `regionBlur`: v6, 2.2), `.hair` (Refine Hair and the Edge Brush, `tighten`), `.clean`, `.restore`, `.paste`, `lookArea`, `RefineStroke`, `CleanSettings`, `RefineContext`, `RefineResult` |
+| `InsideColour.swift` | **Alpha 19.** Edge colour from inside: `InsideColour.field` (depth, nearest solid source), `median3`, `shares`, `rimColour`, `isRim`, `apply` (tiled) |
+| `RemoveColour.swift` | **Alpha 19.** `Refine.removeColour`, `RemoveColourSettings`, `Refine.hairZone` (the engine's zone, per pixel) |
+| `Refine.swift` | the three tools' arithmetic: `Refine.edges`, `.hair`, `.clean`, `.restore`, `.paste`, `RefineStroke`, `CleanSettings`, `RefineContext`, `RefineResult` |
 
 `Sources/TrainCull/` is the Mac app (compiled only by the build):
 
 | File | What is in it |
 |---|---|
 | `Models.swift` | `BundledModels`, `BiRefNetModel.shared` (subject) and `.matting` (hair), load, unload, `segment` |
-| `Masking.swift` | `Masking.base` (faces, sharpness, pose, the model passes), `birefnetPass`, `make`, `handPass` (v6, 4), `refineContext`, `result`, the caches, `debugBundle`, `apply` (how a mask is used when rendering) |
-| `MaskSpill.swift` | masks written to disk under memory pressure and read back (alpha 17) |
+| `Masking.swift` | `Masking.base` (faces, sharpness, pose, the model passes), `birefnetPass`, `make`, `result`, the caches, `debugBundle`, `apply` (how a mask is used when rendering) |
 | `Refining.swift` | `MaskTool`, `RefineOp`, `RefineUndo`, `Masking.look` (a model shown one area, in one pass or tiles), `Masking.refine`, `Masking.undone` |
-| `Session.swift` | the switches (`edgeSnap`, `decontamination`, `colourGuard`, `edgeRecentre`, `lightBound`, `autoHands`, `ignoreFaces`, …), `makeMask`, `applyTool`, `undoTool`, `refined` (each photo's automatic mask, list of operations and undo data), `keep` / `evictClean` / `spillKept` / `ensureMask` / `remakeLost` (how long masks last), `maskForExport`, model lingering |
+| `Session.swift` | the switches (`edgeSnap`, `decontamination`, `colourGuard`, `edgeRecentre`, …), `makeMask`, `applyTool`, `undoTool`, `refined` (each photo's automatic mask, list of operations and undo data), model lingering |
 | `LocalPane.swift` | the Mask (Test) panel and its Debug group |
 | `HeroView.swift` | the large image; `tool`, `marks`, `onBox`, `onStroke`, `drawTools` |
 | `Log.swift` | the log and its JSONL copy; `JobMeter` (time and memory of a job) |
 
-Tests: `Tests/TraincullCoreTests` (Linux and Mac; 121 tests, synthetic pictures only; v6's in `SpecV6Tests`) and
+Tests: `Tests/TraincullCoreTests` (Linux and Mac; 117 tests, synthetic pictures only; v7's in `SpecV7Tests`) and
 `Tests/TrainCullTests` (Mac build only: runs both Core ML models on made-up pictures).
 
 ## 3. The pipeline, stage by stage
@@ -367,8 +357,6 @@ else is the default.
 | `innerTail`, `tailCoverage` | true, 0.7 | section 4.4 |
 | `costFalloff` | 50 | how fast trust in the shares falls with distance off the F–B line |
 | `colourGuard`, `guardChroma`, `guardHue` | true, 0.02, 15° | section 5 (Debug: Colour guard) |
-| `lightBound`, `lightBoundTolerance`, `lightBoundFloor` | true, 0.15, 0.01 | section 17, 1.1 (Debug: Subject light bound) |
-| `hairBoxWidth`, `hairBoxHeight`, `bodyNotHair` | 2.0, 2.4, 0.25 | section 17, 5 |
 | `guardLightness`, `guardLighter` | 0.04, true | section 5 |
 | `guardContrast`, `relaxGuards` | 0.6, false | guards on the hair tiers; off under the hair brush |
 | `snapPasses`, `snapRadius`, `snapLow`, `snapHigh` | 0, 6, 0.3, 0.7 | the old brightness snap (off since alpha 13: it left edges jagged) |
@@ -407,9 +395,8 @@ over 0.02, `OFFSET?` over 0.5 px. `Session.swift`: `modelLingers` 120 s.
 ## 11. Debug switches, debug bundle, log format
 
 **Debug group** (Mask (Test) → Debug): Hair tier (Off/Fast/High/Max; Off is the mask),
-Edge re-centre, Edge snap, Decontamination, Colour guard, Subject light bound, Automatic hands
-(each remakes this photo's edge without the model and replays the tool operations), Ignore
-faces (remakes from scratch), Clean Edge in the tool menu, Hair method (Automatic / Colour
+Edge re-centre, Edge snap, Decontamination, Colour guard, Edge colour from inside (each
+remakes this photo's edge without the model and replays the tool operations), Hair method (Automatic / Colour
 matting / Matting model) with its two threshold sliders, Legacy Vision mask, Run model on
 (CPU + GPU / CPU + Neural Engine / All), Export Debug Bundle.
 
@@ -472,9 +459,8 @@ Photoshop's Select Subject masks for all eight are the owner's reference for *se
 - **A faint green tint** remains along 6303's fingers on the soft stand-in.
 - **With the subject darkened** instead of the background, a thin coloured line can show
   at bright-subject edges (6957's hand): the shares favour the subject's side.
-- **Hair zone**: a box round each face (2.0 × 2.4 face sizes since v6), less the body. Long
-  hair below it is treated as a plain edge; with no face, the body pose's head places it, and
-  with neither there is none (section 17).
+- **Hair zone**: a box round each face. Long hair below it is treated as a plain edge;
+  with no face the whole edge counts as hair and is neither snapped nor re-centred.
 - **Refine Hair thresholds** are uncalibrated (section 7).
 - The skin mask and the Zones view are not remade after a tool operation.
 - The hair tiers (Fast/High/Max) under Debug are the old automatic colour matting, kept
@@ -534,8 +520,6 @@ Photoshop's Select Subject masks for all eight are the owner's reference for *se
 
 ## 16. Next steps: Priority 5 (UI)
 
-(Alpha 16 built a and c; b, d and e are still not built, and spec v6 left them for later.)
-
 The owner's order.
 
 **Built in alpha 16: a and c** (see `docs/NOTES.md`, "Alpha 16"). b, d and e are not.
@@ -588,156 +572,124 @@ guard` and `lightness` on the eight photos, and whether the rim is gone on the r
 7451 and 6957. If it is not, the crops in a debug bundle will say which of section 4's
 causes is still at work.
 
-## 17. Spec v6 (alpha 17)
+## 17. Spec v6 (alphas 17 and 18): reverted
 
-`docs/specs/masking-spec-v6.md`, plus two addenda from the owner (filled pinholes; masks
-lost after two photos). **Everything below was checked on synthetic pictures only.** This
-session had none of the owner's photos or proxies, so there are no before/after crops at
-all, stand-in or real, and every acceptance item that names a photo is the owner's to check.
-The owner's alpha 15 figures (spec 0): edge offset +0.20 px on 6303, +0.22 px on 7451.
+`docs/specs/masking-spec-v6.md` (and its addenda) were built in alpha 17, with a follow-up
+in alpha 18: a "subject light bound" (per channel, then reshaped into an Oklab hue rule), an
+exact sRGB curve and an sRGB copy of the render, shares never clipped per channel, limits on
+what a Refine Edges box may take out and a larger look area, Strength and Tightness on
+Refine Hair, an Edge Brush in place of Clean Edge, an automatic hand pass, a smaller hair zone
+that left out the body, an Ignore faces switch, filled pinholes at 1.0, and the lost-mask fix
+(masks kept, spilled to disk under memory pressure). On the owner's photos they made things
+worse: the box regressed on 6957 and 6372, 4-px coloured squares appeared along edges on 6303
+and 7451 (most likely the light bound's trust, which was decided per quarter-size cell), a
+grey halo appeared round 6372's prop, and the green/teal fringe was not visibly reduced.
+Spec v7 rolled the app and engine back to alpha 16 with git (`git checkout 5c95b58 --
+Sources Tests`, commit 9151f0c). **The lost-mask fix went with it** (the owner listed kept
+masks as not this round): only the last two photos keep their masks again, see
+`docs/NOTES.md`. The build workflow's storage fix, not masking code, stayed.
 
-**1.1 Subject light bound** (`Matte.boundLight`, `MatteSettings.lightBound`,
-`lightBoundTolerance` 0.15, `lightBoundFloor` 0.01). Runs last in `finish`, after the
-colour guard, so nothing raises a share past it. Band pixels with alpha over 0.004 (part
-covered, or fully covered within the inner tail's reach), away from `lightExcluded` (the
-hair zone; under the hair brush, the stroke; not an Edge Brush stroke), and only where the
-subject colour can be believed: re-centring measured the edge there (`knownQ` > 0.05) or
-certain subject lies within three quarter-size cells (`subjectNear`, about 12 px). Each
-channel's share ≤ (cover × F + 0.01 + 0.15 F) ÷ I in linear light, F the edge-local subject
-colour, cover as the guard's lightness bound has it. Only lowers. **Applies only with
-Decontamination on** (a choice made here: with it off the shares are the mask, which is what
-that switch is for). Log: `light bound: N pixels lowered, mean drop x`; JSON
-`light_bound_lowered`, `light_bound_mean_drop`. On a synthetic black disc with a one-pixel
-green fringe the green the subject keeps at the fringe falls from 0.0106 to 0.0062 (linear),
-the rest being inside the tolerance. Photo view with no adjustments: unchanged by
-construction (shares are used only by adjustments and the mask views).
+## 18. Spec v7 (alpha 19): edge colour from inside, Remove Colour
 
-**1.2 One colour space.** `Masking.photo(from:)` draws the neutral render (Display P3) into
-sRGB before the engine sees it; the proxies were already sRGB. The exact sRGB curve
-(`srgbToLinear`, `linearToSRGB`, `sRGBToLinearTable` in `Planes.swift`) replaces every
-`pow(x, 2.2)` (`Matte.toLinear`, `Refine.toLinear`, `hairMethod`, `recentre`'s colours,
-`F.png`). `Imaging.ciContext` is given `extendedLinearSRGB` as its working space explicitly
-(the Mac's default; the log's first lines now name it). The debug bundle's pictures are
-tagged: photo pieces sRGB (now converted, as the engine sees them), masks and shares linear.
+`docs/specs/masking-spec-v7.md`. Two blunt colour tools on top of alpha 16. **Checked on
+synthetic pictures built from the owner's measured pixels only**; this session has none of
+the photos.
 
-**1.3** `Matte.unclipped`: shares unclipped, then scaled down together if a channel passes 1,
-or moved towards the single share just enough if one is below 0. A channel with under 0.002
-of light (linear) takes the single share: divided by almost nothing it would scale the other
-two to nothing.
+**Rollback check (i).** With edge colour from inside off and no Remove Colour box, the engine's
+output is alpha 16's byte for byte: `SpecV7Tests.testOutputIsAlpha16sWithTheSwitchOff`
+compares FNV hashes of alpha and shares, taken from the alpha 16 code itself, for the Off and
+High tiers of the strand scene, a disc with and without a face, and a Refine Edges box. The
+debug bundle names the switch only when it is on, so with it off it too is alpha 16's.
 
-**2 Refine Edges.** `lookArea(box:faceHeight:)`: 15% each side or enough for a side of
-max(face height, 1024), moved inside the photo rather than cut. `limitRemovals`: the edge
-band is max(1.5 model pixels, 6 px) from the present mask's 0.5 line; what the answer would
-take out beyond it, region by region (connected), is taken out only if (a) the median blur
-of the sharpness map's edges inside the region shrunk by 3 px (`regionBlur`; never `dense`,
-never `SubjectSelect.edgeSharp`, which reads the region's boundary, the subject's own sharp
-edge) is at or over the focus limit (`SubjectRules.focusLimit`, the selection rules' own),
-with at least 30 such edges (counted on the map, scaled by its size); or (b) its focus can't
-be told and its mean Oklab distance is under 0.05 from the background's colours and over 0.2
-from the subject's; or (c) half of it is a pocket `openGaps` would open. Kept regions keep
-their present values, and so does the edge band round them (otherwise a rose the model
-dropped came back a band smaller). The subject's colours for (b) come from where the mask
-and the model agree (a mask 20 px too wide would lend its rim of ground to "the subject");
-the background's from where the mask says background. Shift: `replace`, alpha 15's
-behaviour, logged `mode: replace`. Log per box: the look area's size, one line per region of
-200 px or more with its verdict and figures, a count of smaller ones, the mean change along
-the box's border, and `BOXSEAM?` over 0.15.
+**Edge colour from inside** (`InsideColour`, `MatteSettings.insideColour`, Debug "Edge colour
+from inside", on in the app, off in the engine's defaults). The last step of `Matte.finish`
+(after decontamination and the colour guard), so it also ends every Refine Edges box (its
+patch runs the engine); off for Clean Edge and Refine Hair patches. Never changes alpha.
+- Solid subject: alpha ≥ 0.98 (250/255) and at least 6 px inside, measured as the distance
+  from the pixel's centre to the nearest pixel under a half (`solidDepth`). Its colour: the
+  render in linear light (the engine's 2.2 curve, as in alpha 16), each channel the median of
+  the 3×3 round it.
+- Nearest-solid fill: outward from the solid subject's own border, breadth first, each pixel
+  taking the source of the neighbour it was reached from, within 30 px of that source
+  (`reach`); beyond, the inside colour is unknown and the pixel is left. (A breadth-first
+  fill rather than `SharpnessMap`'s push-pull: push-pull averages, and the spec wants the
+  nearest.)
+- Edge band: alpha over 1/255, from the soft edge's outer end to 4 px inside the half-way
+  line: depth ≤ 5 on the measure above (`bandInside`; the pixel the line runs beside is 1).
+- Per pixel: P = I × shares; the rim test below; otherwise P′ = k·α·F̂ with
+  k = min(1, minₖ Iₖ ÷ (α·F̂ₖ)), shares P′ ÷ I (0 where the photo has no light).
+- **Rim light, changed from the spec** (two defaults, owner to confirm): the threshold is
+  **0.05**, not 0.03, in Oklab L; and a part-covered pixel is judged by the nearest fully
+  covered pixel within 3 px (`rimLook`), using that pixel's own part ÷ alpha from the shares as
+  they were. Why: on the spec's own test (a) the sleeve is L 0.191 and its teal pixel
+  (0, 39, 33) is 0.226, 0.034 lighter (dark colours take big Oklab steps for a few code
+  values), so 0.03 keeps it as rim light; and part-covered pixels still hold some background
+  light after decontamination, so judged on their own a teal edge against white read lighter
+  than a real rim against a dark ground, and no threshold passed both (a) and (d). The real
+  rim in (d) is 0.084 lighter. With the photo's own colour at the neighbour instead of its
+  part, a lens's spill of a bright background (alpha 15's pale rim) read as rim light.
+- Not under Refine Hair strokes; in the hair zone (alpha 16's box, unchanged) only where the
+  skin model says the inside colour is skin (value ≥ 0.5). The skin model is learned as the
+  skin mask's is, from cheeks and nose, where the first-pass mask is sure. With no face the
+  whole outline is hair zone in alpha 16's engine, so only skin is recoloured there.
+- Tiled (256 px, with a 40 px apron), every change worked out first and written after, so
+  tiles never read each other's half-done work.
+- Log: `edge colour from inside: N pixels recoloured, M skipped as brighter (rim light), U
+  with no inside colour, mean Oklab ΔE x`; JSON `inside_colour_recoloured`, `_rim`,
+  `_unknown`, `_delta_e`.
 
-**3 Brushes.** Refine Hair takes Strength and Tightness (`Refine.tighten`: above 0 the floor
-rises to 0.4 at +1 and the rest is stretched; below 0 the top 0.4 at −1 goes solid); 1 and 0
-give exactly alpha 15's result. On colour matting's path Tightness is applied to its answer
-under the stroke (shares scaled with alpha) and Strength through the stroke's weight. The
-**Edge Brush** is the matting path with guards kept and `forcedIsHair: false`: the stroke is
-held as the model drew it but is no hair zone, so the light bound applies. Matting model only;
-without it the brush says so. Clean Edge: Debug → "Clean Edge in the tool menu". Choosing
-Refine Hair or the Edge Brush loads the matting model at once.
+**Remove Colour** (`Refine.removeColour`, tool "Remove Colour"). A click with the tool picks
+a colour: a 5×5 median of the neutral render (`Masking.median5`); Shift-click adds one. The
+panel shows them as swatches with Clear, and a Tolerance slider (Oklab, 0.01–0.15, 0.05).
+A box acts only inside itself and within 40 px of the mask's outline either side. Per pixel:
+B the nearest sample (Oklab), F̂ the inside colour as above; within the tolerance of B, t = 1;
+else within the tolerance of the segment F̂–B (Oklab), t = the fraction along B − F̂ in linear
+light; α′ = min(α, 1 − t). The change in alpha is softened (Gaussian σ 0.75, "radius 1.5"),
+averaged over pixels that had coverage to lose (else bare background beside a removed
+piece diluted it and left a ghost), inside the box only. Pieces under 50 px it cut loose go;
+holes under 50 px it opened close. Changed pixels get P′ = k·α′·F̂ from the inside colour of the
+new mask (no inside colour: shares scaled with alpha, all three together); unchanged edge
+pixels in the box get edge colour from inside as usual. Laid in through the box's 6 px soft
+edge like Refine Edges. Stored as an operation with its samples and tolerance (in the debug
+bundle's `regions.json` too), undone, replayed after Remake, Option-restore as for any box.
+Moving the tolerance does the last operation again in its place if it is a Remove Colour box
+(no new undo step). Log: `remove colour: N px changed, mean alpha removed x, samples k,
+tolerance y`, then what was cut loose or closed.
 
-**4 Automatic hand pass** (`Masking.handPass`, Debug "Automatic hands"). After the edge,
-for each wrist of the primary pose at `poseConfidence`: a square 1.3 face heights, 0.45 face
-heights beyond the wrist along elbow→wrist; the §2 logic on it (one look, tiles if large).
-Skipped with no face (nothing to size it by), no wrist, the square mostly off the frame, the
-wrist out of focus (sharpness map median within 0.3 face heights of it over the focus limit),
-or no mask edge in the square. The model's answers are kept on the `SubjectBase`, so a tier
-change or a Debug switch doesn't run the model on the hands again. What each square replaced
-is kept on the `MaskResult` (`beforeHands`) for Option-restore. Not an operation: not in Undo
-or Show edits; done again by Make and Remake. Logged per hand; JSON `hand_passes`. **Time on
-the owner's Mac not measured**: one model pass (about 0.9 s) and one engine run on the patch
-per hand, the first time.
+**Test numbers** (`SpecV7Tests`, the engine's 2.2 curve; the owner's 7451 values):
+- (a) sleeve (29, 26, 25) on white, the six edge pixels: chroma of P/α before 0.0099, 0.0246,
+  0.0356, 0.0420, 0.0338, 0.0154 → after 0.0057, 0.0043, 0.0000, 0.0000, 0.0047, 0.0062
+  (the sleeve itself 0.0062 on this curve); all ≤ 0.012. The two pixels with red 0 come out
+  at 0: their subject part is black, all their light goes to the background.
+- (b) skin (155, 113, 85): (a, b) of P/α from the skin's 0.0097, 0.0141, 0.0052 (≤ 0.015).
+- (c) waist (127, 87, 63), edge alphas 1, 1, 0.6 on a warm ground: 0.0073, 0.0132, 0.0051.
+- (d) a 3-px rim (222, 150, 92), Oklab L 0.736 against the skin's 0.653: unchanged, every
+  pixel kept as rim light. A 20-px rim: the outer pixels' (a, b) from the rim's 0.0000.
+- (e) a disc whose whole edge is in the hair zone, not skin: 0 recoloured, shares identical
+  to the switch off. The same with a skin model of its colour: 5,084 recoloured.
+- (f) alpha identical with the switch on and off (4,004 pixels recoloured, 0 rim).
+- (g) no share vector with a channel at 0 beside one over 0.1, except where the photo's
+  channel is 0, in (a), (b), (c), (f) and (h).
+- (h) pink disc, 8-px orange crescent, green ground, orange sampled, tolerance 0.05: 2,182 px
+  changed, mean alpha removed 0.693; the most coverage left anywhere on the crescent 26 of
+  255 (four corner pixels, the softening); the disc's edge at 70.0 px where the crescent was
+  and 70.25 px elsewhere (radius 70); the orange 58 px inside untouched.
+- (i) byte-identical to alpha 16, above.
 
-**5 Hair zone.** `hairBoxWidth` 2.0 and `hairBoxHeight` 2.4 face sizes (was 2.6 × 3.0). The
-primary pose's limbs and joints, 0.25 face heights either side (`bodyNotHair`), are taken out.
-No face: a stand-in face from the pose (`BodyPose.headBox`: centred on the nose, or 0.75 of
-its side above the neck; side 0.45 × shoulder width); no pose head either: no hair zone (it
-used to be "all hair", with no clean-up anywhere). The Zones view outlines the zone. Debug
-"Ignore faces" makes a mask as if no face had been found (it is part of the base's key).
-Logged: `hair zone from …`; JSON `hair_zone_from`. Three older tier tests use a synthetic
-"head" whose strands reach beyond the smaller box; they run with the old box size.
+**Acceptance on real photos (the owner):** at 300% in On Black and Background −3 EV:
+7451 no teal on the sleeve edges, no olive on the skin in the arm–waist gap (the right waist's
+yellow may stay); 6303 no green along fingers, cuff, sleeve and no 4-px squares; 6957 the
+box removes the finger slivers and the blurry hair in the gap as in alpha 16; 6372 with the
+orange wall sampled, a box round the rose removes the orange without eating petals or the
+hand; 7006 and 7473 hair unchanged from alpha 16.
 
-**Addendum: filled pinholes** come out of `SubjectSelect.keep` at 1.0 (they were at 0.51,
-had no half-way line for the close-ups or re-centring to find, and stayed half see-through).
-
-**Acceptance, all for the owner** (Background −3 EV and On Black at 300%, base mask alone):
-6303 no green on fingers, cuff, hand, no teal on the sleeve; 7451 none on the sleeve or in
-the arm–waist gap; 6957's hands and hair, 7006's hair, 7473's window hair, footwear and the
-guard counts no worse; the `light bound` line for all eight. Boxes on 6957 (gap, fingers),
-6372 (tight on the rose, loose over rose and hand, the loose one again with Shift), footwear.
-Refine Hair on 7006 at Tightness +0.5; the Edge Brush along 6303's middle finger. 6957's
-hands with no boxes; 6303's peace sign no worse; the time Make Mask gains on all eight. 6303
-in the Zones view: hand and sleeves outside the zone; 7473's window hair unchanged; a photo
-with Ignore faces on gets its edge cleaned.
-
-**The light bound reshaped (alpha 18).** On the owner's 7451 the first form lowered
-37,771 pixels and changed nothing visible: it held each channel's brightness, and the teal
-pixels on the black sleeve (0, 32, 28 through the shares, beside a sleeve of 29, 26, 25), the
-olive ones on the skin in the arm–waist gap and the yellow ones on the right waist were no
-brighter than the subject in any channel, only the wrong balance of channels. Its absolute
-tolerance (0.01 linear, about 25/255) was also as large as the sleeve itself. Now
-(`Matte.holdPortion`): the subject's part of the pixel, P = I × shares in linear light, is
-put in Oklab; its lightness is held to 1.1 × that of coverage × F plus 0.005
-(`portionLightness`, `portionLightnessPlus`), by scaling the Oklab vector (which keeps the
-hue); its (a, b) must lie within 0.02 (`portionHue`) of F's (a, b), both scaled by P's
-lightness over F's, and is moved to the nearest point within if not; out-of-gamut results
-are pulled back towards F at the same lightness until in; the new shares are P' ÷ I, scaled
-down together if one would pass 1. Fully covered pixels just inside the edge get it as far as
-the inner tail reaches. It still runs last, still not in the hair zone or under Refine Hair,
-still only with Decontamination on. Log: `light bound: N pixels moved towards the subject's
-colour, mean ΔE x`; JSON `light_bound_lowered` (the count) and `light_bound_mean_delta_e`.
-
-**The red share of 0** on the same sleeve came from 1.3 as built in alpha 17: when the colour
-fit put a channel below zero, all three were moved towards the single share only until that
-channel reached 0, leaving red at 0 beside green and blue. A negative channel now gives the
-single share to all three (the fit doesn't explain such a pixel). Every other path that
-writes shares was checked: the inner tail's "only take light away" step under 10% coverage
-took the smaller of each channel and now scales all three together; the colour-matting
-Tightness scaled and cut each channel at 255 and now never lets one pass; the guard's
-corrections, the fallback to plain coverage, `Refine.paste` and `restore` only blend whole
-vectors. A test runs eight scenes, hair tiers included, and finds no share vector with a
-channel at 0 beside one over 0.1.
-
-**Acceptance for this fix** (owner, alpha 18): no teal on 7451's black sleeve edges, no
-green or olive on the skin edge in its arm–waist gap, and the same on 6303's fingers, cuff and
-sleeve, in On Black and Background −3 EV at 300%; hair edges unchanged. **Not a condition:**
-the yellow on 7451's right waist is real light from an orange-clad person behind her, and the
-owner accepts it; if the rule leaves it, that is not a failure, and nothing is to be tuned for it.
-
-On synthetic discs: a teal ring inside a black (0.012) disc, the worst chroma of the subject's
-part 0.039 → 0.017; an olive ring inside a skin disc, every ring pixel's part within the
-allowed distance of the skin's (a, b); the green kept at a one-pixel fringe 0.0106 → 0.0038.
-
-**Known issues added by v6**
-- Within the inner tail's reach (a few pixels inside the edge), a subject whose colour
-  changes right at its edge (a patterned costume, a highlight) has its part held to the
-  colour read beside the edge: with the background darkened, that pattern or highlight
-  there can come out a little flatter or darker. Debug "Subject light bound" off to confirm;
-  then widen `portionHue` or raise `portionLightness`.
-- The light bound trusts the edge-local subject colour. Where that is wrong (a highlight on
-  the subject brighter than its colour beside the edge, by more than the 15% tolerance), the
-  bound darkens it once the background is darkened. Switch "Subject light bound" off to
-  confirm; then raise `lightBoundTolerance`.
-- A wide uniform fringe (two pixels or more) is read as the subject's own colour beside the
-  edge, and the bound then lets it stay (seen on a synthetic disc; a real lens fringe is about
-  one pixel).
-- A region the box would take out whose focus can't be measured and whose colour is near
-  neither side is kept: a box can then leave a piece the model rightly dropped. Shift does
-  what alpha 15 did.
-- The hand pass needs a face (to size its square) and a pose; with Ignore faces on, it is off.
+**Known issues added by v7**
+- Where the fringe's photo has a channel at 0 (7451's (0, 32, 28)), k is 0: the subject's
+  part there is black, and with the background darkened the pixel shows only its own (teal)
+  light at an eighth. Blunt, as specified; not compensated.
+- The rim test's two changes above are defaults made here, not the owner's numbers.
+- No face: alpha 16 treats the whole outline as hair zone, so edge colour from inside acts only
+  where the inside is skin (and with no face there is no skin model: not at all).
+- Remove Colour's segment test uses the inside colour of the mask before the box; where the
+  mask takes in more than 6 px of the wall, the "inside" there is the wall and only the
+  "within tolerance of B" rule acts, which is what removes such a piece.

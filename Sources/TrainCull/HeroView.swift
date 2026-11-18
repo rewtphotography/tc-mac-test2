@@ -91,6 +91,10 @@ final class HeroNSView: NSView {
     static let fadeSeconds: CFTimeInterval = 0.6
     /// A box dragged out, in pixels of the photo; `restore` when Option was held.
     var onBox: ((CGRect, Bool) -> Void)?
+    /// With the box tool, a click (no drag) picks a colour instead (Remove Colour's
+    /// eyedropper): the point in pixels of the photo, and whether Shift was held (add a sample).
+    var picksColour = false
+    var onPick: ((CGPoint, Bool) -> Void)?
     /// A stroke painted, as points in pixels of the photo, with the brush's radius.
     var onStroke: (([CGPoint], CGFloat, Bool) -> Void)?
     private var dragStart: CGPoint?
@@ -377,10 +381,12 @@ final class HeroNSView: NSView {
             switch tool {
             case .box:
                 let box = CGRect(x: min(start.x, end.x), y: min(start.y, end.y), width: abs(end.x - start.x), height: abs(end.y - start.y)).intersection(whole)
-                // A click, or a sliver: not a box.
+                // A click, or a sliver: not a box. With the eyedropper, a click picks a colour.
                 if box.width * shownScale >= 8 && box.height * shownScale >= 8 {
                     pending = .box(box, restore: dragRestores)
                     onBox?(box, dragRestores)
+                } else if picksColour, hypot(end.x - start.x, end.y - start.y) * shownScale < 4, whole.contains(end) {
+                    onPick?(end, event.modifierFlags.contains(.shift))
                 }
             case let .brush(radius):
                 let points = dragPoints.filter { whole.insetBy(dx: -radius, dy: -radius).contains($0) }

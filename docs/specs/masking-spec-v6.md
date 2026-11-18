@@ -1,3 +1,7 @@
+> **Reverted (spec v7, alpha 19).** Everything below was built in alphas 17 and 18 and taken
+> out again: the code went back to alpha 16 with git. Kept here as the record. See
+> `docs/specs/masking-spec-v7.md` and `MASKING.md`, section 17.
+
 # TrainCull Masking — Spec v6: Edge Colour, Smarter Box, Brushes, Hands, Hair Zone
 
 **Status:** implementation spec for the next build. **Everything here ships in one build.** There are no phases. If anything can't be done, stop and ask the owner before deferring it.

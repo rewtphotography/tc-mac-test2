@@ -127,7 +127,7 @@ Bridge, Photoshop or Lightroom has it)
   folder tree, a calibration table mapping Apple's values to Camera Raw's.
 - Subject, hair and skin masks: see "Masking" below.
 
-## What is built (alpha 17)
+## What is built (alpha 19)
 
 Folder opening (button, File menu, drag and drop, recents, drives), resizable left pane,
 thumbnails with rating, label and reject marks, the large image with raw render and face
@@ -135,7 +135,8 @@ zoom with a glide, ratings and labels, edit mode with 15 of Apple's raw controls
 sidecar, Send to Photoshop, the one-line bar under the image, click-to-filter on the counts
 at the bottom left (double-click the rated count to choose stars), side-by-side compare,
 extracting the embedded JPEG, exporting a developed 16-bit TIFF, the diagnostics log and
-memory report, an app icon, and the masking test with its three refine tools (see "Masking").
+memory report, an app icon, and the masking test with its four refine tools and edge colour
+from inside (see "Masking"; spec v6 was built and reverted, v7 is what is there).
 
 Checked by tests on Linux (109): raw and recipe reading, the settings line, sidecar editing,
 crash-safe saving, face-zoom maths, the TIFF writer, JPEG orientation, compare stepping,
@@ -186,11 +187,11 @@ Same folder and Mac, two and a half minutes of use:
    200–300%: is the pale rim gone on 6303's fingers and sleeve, 7451's waist and arm,
    6957's hand and waist? The log's new `edge placement` line gives the offset and the edge
    widths on the real photos; nothing in alpha 15 has been seen on one.
-3. The owner checks spec v6 (alpha 17) on the eight photos: the acceptance list is in
-   `MASKING.md`, section 17; and the mask-keeping fix on four photos.
+3. The owner checks spec v7 (alpha 19) on the photos: the acceptance list is in
+   `MASKING.md`, section 18, and the two rim-light defaults made here want a yes or no.
 4. Priority 5 of the final masking round: the tool overlay bug and Show edits are built
-   (alpha 16); the edit stack, the history panel and reorder mode are not (spec v6 left them
-   for later). Written out as steps in `MASKING.md`, section 16.
+   (alpha 16); the edit stack, the history panel and reorder mode are not. Written out as
+   steps in `MASKING.md`, section 16.
 5. Tune when Refine Hair may use colour matting, on seamless-backdrop shots from the owner.
 6. Soft-focus and closed-eyes flags from Apple's face landmarks.
 7. A Settings window (label names, editor choice), Undo after reject.
@@ -874,6 +875,23 @@ With the build no longer keeping the app or the models as artifacts, the second 
 alpha 18; the app loads BiRefNet on entering Edit. The launch pictures could not be kept
 (storage still full) and the release went ahead without them, as now set up.
 
+## Masking spec v7 (alpha 19): rollback, then two colour tools
+
+`docs/specs/masking-spec-v7.md`. From the owner's testing of alphas 17 and 18: alpha 16 was
+the last good build; 17 and 18 regressed the box (6957, 6372), added 4-px coloured squares
+(6303, 7451) and a grey halo (6372's prop), and didn't visibly reduce the fringe. Spec v6 is
+marked reverted.
+
+- **Rolled back with git** (`git checkout 5c95b58 -- Sources Tests`, commit 9151f0c): the
+  app and engine are alpha 16's. The lost-mask fix of alpha 17 went too (the owner listed
+  kept masks as not this round); see Known caveats. The workflow's storage fix stayed.
+- **Edge colour from inside** and **Remove Colour**, as specified, except two defaults in
+  the rim-light test (threshold 0.05, part-covered pixels judged by a covered neighbour),
+  without which the spec's own tests (a) and (d) can't both pass. Details, every test's
+  numbers and the known issues: `MASKING.md`, section 18.
+- With the switch off the engine's output is alpha 16's byte for byte (a test holds hashes
+  taken from the alpha 16 code), and the debug bundle names the switch only when it is on.
+
 ## Still to design
 
 The owner will share screenshots of how they use Bridge. Until then these are open: where
@@ -896,14 +914,10 @@ shown, how several frames are selected for the editor, the font, the overall loo
   screen, and fades when its own job ends.
 - The tools work on the mask of the photo being shown and are kept until the folder is
   closed, like the mask itself; nothing of them is saved with the photo yet.
-- Masks with tool operations or local adjustments all stay in memory (about 330 MB each at
-  33 MP with operations: the mask and the automatic one) until macOS reports memory pressure;
-  then those not on screen go to disk, about the same size each, and come back in a second
-  or so when shown. A frame shown just after may appear for a moment without its adjustments.
-- A remade mask for an export (only if one on disk can't be read) runs the model again: tens
-  of seconds for a frame with several tool operations.
-- The automatic hand pass adds up to two model passes to the first Make Mask of a photo.
-- Ignore faces (Debug) remakes the mask from scratch, model included.
+- **Only the last two photos keep their masks** (alpha 16's behaviour, back since the v7
+  rollback): a third photo's mask drops the first one's, with its tool operations, and that
+  photo's Subject / Background / Skin adjustments then stop showing and are left out of its
+  TIFF. Alpha 17 fixed this; the fix went with the rollback (kept masks: not this round).
 - A Refine Edges box over a large area (more than about 1,840 px across at full size)
   shows a quick result first and the tiled one a few seconds later.
 - The first Refine Hair stroke loads the hair-matting model (a second or two, about as

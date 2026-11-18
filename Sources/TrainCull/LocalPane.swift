@@ -37,7 +37,7 @@ struct LocalPane: View {
                     Picker("Tool", selection: $session.maskTool) {
                         ForEach(MaskTool.allCases, id: \.rawValue) { Text($0.name).tag($0) }
                     }
-                    .help("Refine Edges: drag a box round fingers, footwear, a gap or a prop. Refine Hair: paint over hair. Clean Edge: paint along a hard edge that still has a rim. Hold Option to put the automatic mask back instead.")
+                    .help("Refine Edges: drag a box round fingers, footwear, a gap or a prop. Refine Hair: paint over hair. Clean Edge: paint along a hard edge that still has a rim. Remove Colour: click the background colour the mask took in, then drag a box over it. Hold Option to put the automatic mask back instead.")
                     Toggle("Show edits", isOn: $session.showEdits)
                         .help("Keeps every box and stroke made on this photo drawn over it. Off, each shows only while it is drawn and worked out.")
                     if session.maskTool != .none {
@@ -61,6 +61,30 @@ struct LocalPane: View {
                                  value: Binding(get: { Float(session.cleanTightness) }, set: { session.cleanTightness = abs(Double($0)) < 0.03 ? 0 : Double($0) }),
                                  reset: { session.cleanTightness = 0 })
                             .help("Above 0 pulls the edge in towards the subject; below 0 lets it out")
+                    }
+                    if session.maskTool == .removeColour {
+                        HStack(spacing: 4) {
+                            if session.removeSamples.isEmpty {
+                                Text("No colour picked yet")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(Theme.muted)
+                            }
+                            ForEach(Array(session.removeSamples.enumerated()), id: \.offset) { _, c in
+                                RoundedRectangle(cornerRadius: 3)
+                                    .fill(Color(.sRGB, red: Double(c.x), green: Double(c.y), blue: Double(c.z), opacity: 1))
+                                    .frame(width: 18, height: 18)
+                                    .overlay(RoundedRectangle(cornerRadius: 3).stroke(Color.white.opacity(0.5), lineWidth: 1))
+                            }
+                            Spacer()
+                            Button("Clear") { session.clearRemoveSamples() }
+                                .controlSize(.small)
+                                .disabled(session.removeSamples.isEmpty)
+                                .help("Forgets the colours picked")
+                        }
+                        LocalRow(title: "Tolerance", text: String(format: "%.3f", session.removeTolerance), changed: session.removeTolerance != 0.05, range: 0.01 ... 0.15,
+                                 value: Binding(get: { Float(session.removeTolerance) }, set: { session.removeTolerance = Double($0) }),
+                                 reset: { session.removeTolerance = 0.05 })
+                            .help("How close to a picked colour a pixel must be to go. Moving it does the last Remove Colour box again.")
                     }
                     Button(session.refineCount == 0 ? "Undo" : "Undo (\(session.refineCount))") { session.undoTool() }
                         .controlSize(.small)
@@ -88,6 +112,9 @@ struct LocalPane: View {
                     Toggle("Colour guard", isOn: $session.colourGuard)
                         .controlSize(.small)
                         .help("The last check that no edge pixel comes out more colourful, or a different hue, than the photo has it")
+                    Toggle("Edge colour from inside", isOn: $session.insideColour)
+                        .controlSize(.small)
+                        .help("Each edge pixel's subject colour taken from the solid subject just inside it (like Photoshop's Decontaminate Colors). Off is alpha 16's edge colour.")
                     Picker("Hair method", selection: $session.hairMethod) {
                         ForEach(HairMethod.allCases, id: \.rawValue) { Text($0.name).tag($0) }
                     }

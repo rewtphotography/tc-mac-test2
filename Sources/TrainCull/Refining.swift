@@ -5,7 +5,7 @@ import TraincullCore
 
 /// The mask tools (masking spec v5, section 2).
 enum MaskTool: String, CaseIterable {
-    case none, edges, hair, clean
+    case none, edges, hair, clean, removeColour
 
     var name: String {
         switch self {
@@ -13,6 +13,7 @@ enum MaskTool: String, CaseIterable {
         case .edges: return "Refine Edges"
         case .hair: return "Refine Hair"
         case .clean: return "Clean Edge"
+        case .removeColour: return "Remove Colour"
         }
     }
 
@@ -22,6 +23,7 @@ enum MaskTool: String, CaseIterable {
         case .edges: return "Drag a box round fingers, footwear, a gap or a prop's edge. Hold Option while dragging to put the automatic mask back inside the box."
         case .hair: return "Paint over curls or flowing hair. Hold Option while painting to put the automatic mask back."
         case .clean: return "Paint along a hard edge that still has a rim. Hold Option while painting to put the automatic mask back."
+        case .removeColour: return "Click the background colour that the mask has taken in (Shift-click to add more), then drag a box over the place. Only the edge, up to 40 px in, is touched. Hold Option while dragging to put the automatic mask back."
         }
     }
 }
@@ -47,6 +49,9 @@ struct RefineOp {
     /// Option was held: put the automatic mask back here.
     var restore: Bool
     var clean = CleanSettings()
+    /// Remove Colour (spec v7, 3): the colours sampled (display values) and the tolerance.
+    var samples: [SIMD3<Float>] = []
+    var tolerance: Float = 0.05
 
     var mark: HeroNSView.Mark {
         if let box = box { return .box(CGRect(x: box.x, y: box.y, width: box.w, height: box.h), restore: restore) }
@@ -153,7 +158,8 @@ extension Masking {
         keptLock.unlock()
         guard let photo = kept ?? Masking.photo(from: reference) else { throw Failure("the rendered photo isn't in the expected 8-bit form") }
         let context = RefineContext(photo: photo, faces: found.faces, defocus: found.ranking.sharpness?.dense,
-                                    subjectSharpness: found.ranking.primary?.sharp, settings: options.settings)
+                                    subjectSharpness: found.ranking.primary?.sharp, settings: options.settings,
+                                    skin: options.settings.insideColour ? skinModel(found, photo: photo) : nil)
 
         var alpha = alpha0, shares = shares0
         var touched: PixelRect?
@@ -280,6 +286,11 @@ extension Masking {
                     }
                 }
                 notes.insert(why, at: 0)
+            case .removeColour:
+                guard let box = op.box else { throw Failure("no box was drawn") }
+                guard !op.samples.isEmpty else { throw Failure("no colour was picked: click the colour to remove first") }
+                progress("Removing the colour")
+                lay(Refine.removeColour(box: box, samples: op.samples, tolerance: op.tolerance, alpha: alpha0, shares: shares0, context: context))
             case .none:
                 throw Failure("no tool is chosen")
             }

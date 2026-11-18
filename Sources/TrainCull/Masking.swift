@@ -203,6 +203,22 @@ enum Masking {
         return Photo(w: image.width, h: image.height, rowBytes: image.bytesPerRow, bytes: UnsafeRawBufferPointer(start: base, count: length))
     }
 
+    /// The colour at a point of a rendered picture, each channel the median of the 5×5
+    /// around it, as displayed (0 to 1). For Remove Colour's eyedropper.
+    static func median5(_ image: CGImage, x: Int, y: Int) -> SIMD3<Float>? {
+        guard image.bitsPerComponent == 8, image.bitsPerPixel == 32, let data = image.dataProvider?.data, let p = CFDataGetBytePtr(data),
+              x >= 0, y >= 0, x < image.width, y < image.height else { return nil }
+        var r: [UInt8] = [], g: [UInt8] = [], b: [UInt8] = []
+        for yy in max(y - 2, 0) ... min(y + 2, image.height - 1) {
+            for xx in max(x - 2, 0) ... min(x + 2, image.width - 1) {
+                let o = yy * image.bytesPerRow + xx * 4
+                r.append(p[o]); g.append(p[o + 1]); b.append(p[o + 2])
+            }
+        }
+        func mid(_ v: [UInt8]) -> Float { Float(v.sorted()[v.count / 2]) / 255 }
+        return SIMD3(mid(r), mid(g), mid(b))
+    }
+
     /// A Vision result as a plane of numbers from 0 to 1, top row first.
     static func gray(from buffer: CVPixelBuffer) -> Gray? {
         CVPixelBufferLockBaseAddress(buffer, .readOnly)
@@ -730,6 +746,28 @@ enum Masking {
 
     // MARK: Making a mask
 
+    /// The photo's skin colour, learned from the cheeks and nose of each face where the
+    /// first-pass mask is sure: for edge colour from inside, which in the hair zone acts only
+    /// on skin (spec v7, 2). The finished mask's skin mask is learned the same way, later.
+    static func skinModel(_ found: SubjectBase, photo: Photo) -> SkinModel? {
+        let W = photo.w, H = photo.h
+        var samples: [SIMD3<Float>] = []
+        for f in found.faces.prefix(4) {
+            let spots: [(Double, Double)] = [(0.28, 0.58), (0.72, 0.58), (0.5, 0.52)]
+            let r = max(f.w / 40, 3)
+            for (u, v) in spots {
+                let sx = f.x + Int(Double(f.w) * u), sy = f.y + Int(Double(f.h) * v)
+                for y in (sy - r) ... (sy + r) {
+                    for x in (sx - r) ... (sx + r) where x >= 0 && y >= 0 && x < W && y < H {
+                        let sure = found.coarse.sample((Float(x) + 0.5) * Float(found.coarse.w) / Float(W), (Float(y) + 0.5) * Float(found.coarse.h) / Float(H))
+                        if sure >= 0.97 { samples.append(photo.rgb(x, y)) }
+                    }
+                }
+            }
+        }
+        return SkinModel(samples: samples)
+    }
+
     /// Makes the masks for one raw file. Runs for seconds; call it off the main thread.
     /// What is known about the photo's subject is kept, so making it again at another tier
     /// only refines the edge again. `partial` is handed the Off mask as soon as it is ready.
@@ -754,7 +792,7 @@ enum Masking {
         var ready: Matte?
         keptLock.lock()
         // (Set up afresh when a Debug switch has changed how the edge is made.)
-        let signature = "\(settings.colourSnap)|\(settings.decontaminate)|\(settings.colourGuard)|\(settings.recentre)"
+        let signature = "\(settings.colourSnap)|\(settings.decontaminate)|\(settings.colourGuard)|\(settings.recentre)|\(settings.insideColour)"
         if let kept = keptMatte, kept.base === found, kept.signature == signature { ready = kept.matte }
         keptLock.unlock()
         if ready != nil {
@@ -764,7 +802,7 @@ enum Masking {
             guard let photo = photo(from: reference) else { throw Failure("the rendered photo isn't in the expected 8-bit form") }
             let fresh = Matte(photo: photo, coarse: found.coarse, faces: found.faces, patches: found.patches, settings: settings,
                               defocus: found.ranking.sharpness?.dense, subjectSharpness: found.ranking.primary?.sharp,
-                              firstPassPixel: found.firstPassPixel)
+                              firstPassPixel: found.firstPassPixel, skin: settings.insideColour ? skinModel(found, photo: photo) : nil)
             if key != nil {
                 keptLock.lock()
                 keptMatte = (found, fresh, signature)
@@ -855,6 +893,12 @@ enum Masking {
                                               ("first_pass_edge_width", out.edgeOffsetBefore.maskWidth), ("first_pass_pixel", base.firstPassPixel)]
             for (key, value) in placed { if let value = value { fields[key] = Double(value) } }
             fields["edge_points_measured"] = out.edgeOffset.measured
+            if let inside = out.insideColourStats {
+                fields["inside_colour_recoloured"] = inside.recoloured
+                fields["inside_colour_rim"] = inside.rim
+                fields["inside_colour_unknown"] = inside.unknown
+                fields["inside_colour_delta_e"] = Double(inside.meanDeltaE)
+            }
             fields["colour_guard_corrections"] = out.guardCorrections
             fields["lightness_corrections"] = out.lightnessCorrections
             Log.note("mask", "\(name): \(summary)", fields: fields)
@@ -1022,7 +1066,11 @@ enum Masking {
         var boxes: [[String: Any]] = [], strokes: [[String: Any]] = []
         for op in ops {
             if let box = op.box {
-                let entry: [String: Any] = ["tool": op.tool.rawValue, "restore": op.restore, "box_full": [box.x, box.y, box.w, box.h]]
+                var entry: [String: Any] = ["tool": op.tool.rawValue, "restore": op.restore, "box_full": [box.x, box.y, box.w, box.h]]
+                if op.tool == .removeColour {
+                    entry["samples"] = op.samples.map { [Double($0.x * 255), Double($0.y * 255), Double($0.z * 255)] }
+                    entry["tolerance"] = Double(op.tolerance)
+                }
                 boxes.append(entry)
             } else if let stroke = op.stroke {
                 let points: [[Double]] = stroke.points.map { [Double($0.x), Double($0.y)] }

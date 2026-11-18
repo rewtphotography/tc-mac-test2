@@ -8,20 +8,24 @@ An alpha build of TrainCull for Mac (Apple silicon, macOS 15 or later).
    **Done**, then open **System Settings → Privacy & Security**, scroll down to the message
    about TrainCull and click **Open Anyway**. This is needed once for each new build.
 
-**New in this build: the green, teal and yellow edge line, second try**
+**New in this build: back to alpha 16, plus two colour tools (masking spec v7)**
 
-- In alpha 17 the **Subject light bound** ran but changed nothing you could see: it only
-  stopped an edge pixel being *brighter* than the subject, and the teal, olive and yellow
-  pixels were no brighter, just the wrong colour. Now the subject's part of each edge pixel
-  keeps the subject's own colour and is no lighter than it; the rest goes with the
-  background. Debug: **Subject light bound** (on), to compare.
-- A second cause of the teal line on 7451's black sleeve is fixed: one colour channel of the
-  edge was being set to nothing on its own.
-- The log's `light bound` line now says how many pixels were moved and by how much colour.
+- **Everything from alphas 17 and 18 is gone.** Masks, Refine Edges and the tool menu are
+  alpha 16's again. That includes the fix for lost masks: once more, only the last two
+  photos keep their masks, tool edits and Subject / Background / Skin adjustments.
+- **Edge colour from inside** (automatic): each edge pixel's colour is taken from the solid
+  subject just inside it, as Photoshop's Decontaminate Colors does. Aimed at the teal on
+  7451's sleeve, the olive on its skin in the arm–waist gap, and the green on 6303's peace
+  sign. Rim light (an edge brighter than the inside) is left alone. Debug: **Edge colour from
+  inside** (on).
+- **Remove Colour** (tool menu): click the background colour the mask took in (Shift-click
+  to add more), then drag a box over the place. Only the edge, up to 40 px in, is touched.
+  **Tolerance** sets how close a colour must be; moving it redoes the last box.
 
-Please look at 7451 (sleeves, the skin in the arm–waist gap) and 6303
-(fingers, cuff, sleeve) in **On Black** and **Background −3 EV** at 300%, base mask alone, and
-check that hair edges look the same as before. Then send the log.
+Please check, at 300% in On Black and Background −3 EV: 7451's sleeve and the skin in the
+gap; 6303's fingers, cuff and sleeve (no green, no small squares); 6957 with a box over the
+fingers and the gap, as in alpha 16; 6372 with the orange wall picked and a box round the
+rose; and that hair on 7006 and 7473 looks as in alpha 16. Then send the log.
 
 **The masking test:** open **Edit** and scroll to **Mask (Test)**. Click **Make Mask**.
 **Show** switches between the photo, a red overlay, the mask, On Black, On White,
