@@ -947,6 +947,10 @@ achieves (≤ 0.55, owner: streaks faint). Defaults: the switch renamed "Bright-
 edges"; "3 px" blur of the gate as a Gaussian reaching 3 px; "within 2 px inside" as distance
 to the nearest pixel under a half ≤ 2 (as test (p2) counts it). Details: `MASKING.md`, section 21.
 
+**The automated build (alpha 23):** compiled first time; all Linux (136) and Mac (16) tests
+pass; launch pictures looked at (normal); release published. The Mac job waited 15 minutes for
+a runner and was cancelled once more; re-run, it got one at once.
+
 ## Still to design
 
 The owner will share screenshots of how they use Bridge. Until then these are open: where

@@ -975,7 +975,12 @@ the owner's 6303 skin (113, 82, 72) and background (158, 202, 167)):
 - (f) dark disc on white with lens blur, through the engine: 50 px cut, at most 2 of 255;
   with the rule off, alpha identical to the switch off.
 - (v) switch off: section 18's hashes. All 136 core tests pass.
-- Mac (`RepaintRenderTests`): to follow from the build.
+- Mac, through `Masking.apply` (alpha 23's build, 16 tests pass): (p3) rendered with Subject
+  +2.6 / Background −3, no dip below both neighbours (0.0 L; L across the edge 0.855, 0.855,
+  0.827, 0.694, 0.529, 0.399, 0.399); (s) background pixels 0.0 L darker than the darkened wall
+  (0.366 without the background repaint); (v) w = wb = 0 on the soft hair edge: 5,180 of 5,400
+  identical to alpha 16, 220 at 1/255 (none with float intermediates); no local edits: the
+  photo, byte for byte; (j), (k) unchanged (sleeve edge 0.0 L darker; strong green 0.0).
 
 **Accepted trade-offs (owner).** A rim light against a brighter background isn't protected.
 A coloured detail at a bright-background edge thinner than about 3 px is treated more softly:
