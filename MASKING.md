@@ -674,7 +674,11 @@ tolerance y`, then what was cut loose or closed.
   84): (a, b) of P/α from the skin's 0.078 → 0.014 (≤ 0.015, as (b)). A strong green (88,
   118, 70): 0.108 → 0.023 in absolute terms, because its red is so low that k is about 0.3
   and the part comes out skin-hued but much darker, and a darker colour of the same hue has a
-  smaller (a, b); at the skin's lightness it is 0.0003 from the skin's (a, b).
+  smaller (a, b); at the skin's lightness it is 0.0003 from the skin's (a, b). **Expected
+  behaviour of edge colour from inside** (owner): the darker part is correct, the pixel being
+  mostly background light, and putting light back would bring the green line back. So a strong
+  fringe is tested on colour with lightness factored out; the olive-strength case and (b), (c)
+  are held to 0.015 including lightness.
 - (f) what is compared: in the core tests, alpha is identical with the switch on and off
   (4,004 pixels recoloured, 0 rim). The rendered Photo view with no adjustments is checked on
   the Mac (`TiffExportTests.testPhotoViewIsTheSameWhateverTheShares`): a black disc with a

@@ -62,6 +62,13 @@ This works like Photoshop's Decontaminate Colors. It never looks at the backgrou
   than the inside, isn't protected in the outer few pixels. Wider rims keep their colour
   anyway, through the inside sample.
 
+**Expected behaviour (owner):** where a fringe is far from the inside colour (a strong green
+such as (88,118,70) beside skin (155,113,85)), k is small (about 0.3) and the subject's part
+comes out skin-hued but much darker. That is correct: the pixel is mostly background light,
+and putting light back would bring the green line back. Such a case is tested on colour with
+lightness factored out, not held to 0.015 in absolute (a, b). The olive-strength case and
+tests (b) and (c) keep 0.015 including lightness.
+
 **Expected side effect:** where k < 1, the subject's side is slightly darker than α·F̂. On White can show such a pixel a touch darker. That's correct, because the pixel contains background light. Don't compensate.
 
 **Where it runs:**
