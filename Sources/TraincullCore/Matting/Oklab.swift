@@ -16,18 +16,6 @@ public enum Oklab {
                      0.0259040371 * l3 + 0.7827717662 * m3 - 0.8086757660 * s3)
     }
 
-    /// Back to linear-light RGB. Out-of-gamut colours come back with channels below 0 or above 1.
-    @inline(__always)
-    public static func toLinear(_ lab: SIMD3<Float>) -> SIMD3<Float> {
-        let l3 = lab.x + 0.3963377774 * lab.y + 0.2158037573 * lab.z
-        let m3 = lab.x - 0.1055613458 * lab.y - 0.0638541728 * lab.z
-        let s3 = lab.x - 0.0894841775 * lab.y - 1.2914855480 * lab.z
-        let l = l3 * l3 * l3, m = m3 * m3 * m3, s = s3 * s3 * s3
-        return SIMD3(4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
-                     -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
-                     -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s)
-    }
-
     /// How colourful: the distance from grey.
     @inline(__always)
     public static func chroma(_ lab: SIMD3<Float>) -> Float { (lab.y * lab.y + lab.z * lab.z).squareRoot() }

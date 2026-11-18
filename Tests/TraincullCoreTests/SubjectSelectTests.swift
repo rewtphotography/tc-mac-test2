@@ -54,26 +54,6 @@ final class SubjectSelectTests: XCTestCase {
         XCTAssertFalse(tidied[5 * W + 5], "the surround is not a hole")
     }
 
-    /// Spec v6 addendum: a pinhole that tidy() fills comes out solid, not at 0.51.
-    func testFilledPinholeIsSolid() {
-        let w = 800, h = 800
-        var soft = Gray(w: w, h: h)
-        var luma = Gray(w: w, h: h, fill: 0.2)
-        for y in 0 ..< h {
-            for x in 0 ..< w {
-                let dx = Float(x) - 400, dy = Float(y) - 400
-                if dx * dx + dy * dy <= 200 * 200 { soft.v[y * w + x] = 0.98; luma.v[y * w + x] = 0.8 }
-            }
-        }
-        // A hole 3 pixels across in the middle, the model's answer there near 0.
-        for y in 399 ... 401 { for x in 399 ... 401 { soft.v[y * w + x] = 0.05 } }
-        let map = SharpnessMap(luma: luma)
-        let (mask, _) = SubjectSelect.keep(soft, sharpness: map, face: nil)
-        for y in 399 ... 401 { for x in 399 ... 401 { XCTAssertEqual(mask.v[y * w + x], 1, "the filled pinhole is solid subject") } }
-        XCTAssertEqual(mask.v[300 * w + 400], 0.98, accuracy: 1e-6, "the rest of the disc keeps the model's value")
-        XCTAssertEqual(mask.v[10 * w + 10], 0, "outside stays out")
-    }
-
     func testKeepsThePersonAndTheirPropAndDropsTheRest() {
         let scene = Scene()
         let map = SharpnessMap(luma: scene.luma)

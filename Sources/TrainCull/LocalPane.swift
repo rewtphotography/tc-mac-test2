@@ -35,9 +35,9 @@ struct LocalPane: View {
             if mask != nil {
                 VStack(alignment: .leading, spacing: 8) {
                     Picker("Tool", selection: $session.maskTool) {
-                        ForEach(MaskTool.menu(withClean: session.showCleanEdge), id: \.rawValue) { Text($0.name).tag($0) }
+                        ForEach(MaskTool.allCases, id: \.rawValue) { Text($0.name).tag($0) }
                     }
-                    .help("Refine Edges: drag a box round fingers, footwear, a gap or a prop (Shift: redraw everything in the box). Refine Hair: paint over hair. Edge Brush: paint along a hard edge. Hold Option to put the automatic mask back instead.")
+                    .help("Refine Edges: drag a box round fingers, footwear, a gap or a prop. Refine Hair: paint over hair. Clean Edge: paint along a hard edge that still has a rim. Hold Option to put the automatic mask back instead.")
                     Toggle("Show edits", isOn: $session.showEdits)
                         .help("Keeps every box and stroke made on this photo drawn over it. Off, each shows only while it is drawn and worked out.")
                     if session.maskTool != .none {
@@ -46,21 +46,11 @@ struct LocalPane: View {
                             .foregroundStyle(Theme.muted)
                             .fixedSize(horizontal: false, vertical: true)
                     }
-                    if session.maskTool == .hair || session.maskTool == .edgeBrush || session.maskTool == .clean {
+                    if session.maskTool == .hair || session.maskTool == .clean {
                         LocalRow(title: "Brush size", text: "\(Int(session.brushSize)) px", changed: false, range: 4 ... 600,
                                  value: Binding(get: { Float(session.brushSize) }, set: { session.brushSize = Double($0) }),
                                  reset: { session.brushSize = 60 })
                             .help("The brush's radius in pixels of the photo. The [ and ] keys change it too.")
-                    }
-                    if session.maskTool.usesMattingModel {
-                        LocalRow(title: "Strength", text: String(format: "%.2f", session.brushStrength), changed: session.brushStrength != 1, range: 0 ... 1,
-                                 value: Binding(get: { Float(session.brushStrength) }, set: { session.brushStrength = Double($0) }),
-                                 reset: { session.brushStrength = 1 })
-                            .help("How far the matting model's answer is laid in under the stroke")
-                        LocalRow(title: "Tightness", text: String(format: "%+.2f", session.brushTightness), changed: session.brushTightness != 0, range: -1 ... 1,
-                                 value: Binding(get: { Float(session.brushTightness) }, set: { session.brushTightness = abs(Double($0)) < 0.03 ? 0 : Double($0) }),
-                                 reset: { session.brushTightness = 0 })
-                            .help("Above 0 leaves faint flyaways and grey haze out; below 0 keeps more of them")
                     }
                     if session.maskTool == .clean {
                         LocalRow(title: "Strength", text: String(format: "%.2f", session.cleanStrength), changed: session.cleanStrength != 1, range: 0 ... 1,
@@ -98,18 +88,6 @@ struct LocalPane: View {
                     Toggle("Colour guard", isOn: $session.colourGuard)
                         .controlSize(.small)
                         .help("The last check that no edge pixel comes out more colourful, or a different hue, than the photo has it")
-                    Toggle("Subject light bound", isOn: $session.lightBound)
-                        .controlSize(.small)
-                        .help("At an edge the subject's part of each pixel keeps the subject's own colour and is no lighter than it: a green, teal or yellow fringe goes with the background. Needs Decontamination.")
-                    Toggle("Automatic hands", isOn: $session.autoHands)
-                        .controlSize(.small)
-                        .help("Make Mask also refines each hand as a Refine Edges box would. Switching it remakes this photo's edge.")
-                    Toggle("Ignore faces", isOn: $session.ignoreFaces)
-                        .controlSize(.small)
-                        .help("The mask is made as if no face had been found, to try the no-face path on any photo. Remakes the mask.")
-                    Toggle("Clean Edge in the tool menu", isOn: $session.showCleanEdge)
-                        .controlSize(.small)
-                        .help("The older Clean Edge brush, replaced by the Edge Brush")
                     Picker("Hair method", selection: $session.hairMethod) {
                         ForEach(HairMethod.allCases, id: \.rawValue) { Text($0.name).tag($0) }
                     }

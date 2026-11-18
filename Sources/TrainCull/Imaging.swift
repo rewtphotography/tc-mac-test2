@@ -16,11 +16,7 @@ enum Imaging {
     static let firstReadBytes = 512 * 1024
     static let thumbnailPixels = 400
 
-    /// Core Image's working space is set to linear sRGB (its default on the Mac, made certain
-    /// here, spec v6, 1.2): local adjustments blend through the mask's colour shares in this
-    /// space, and the shares are worked out in linear sRGB.
-    static let ciContext = CIContext(options: [.cacheIntermediates: false,
-                                               .workingColorSpace: CGColorSpace(name: CGColorSpace.extendedLinearSRGB) ?? CGColorSpaceCreateDeviceRGB()])
+    static let ciContext = CIContext(options: [.cacheIntermediates: false])
 
     /// The embedded JPEG bytes a recipe points at.
     private static func jpegData(_ src: ByteSource, _ ref: JpegRef) -> Data? {

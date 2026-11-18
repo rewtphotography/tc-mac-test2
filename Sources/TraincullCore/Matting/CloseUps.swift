@@ -215,26 +215,6 @@ public struct BodyPose {
         return nil
     }
 
-    /// A stand-in face for a photo where none was found (spec v6, section 5): centred on the
-    /// nose, or a little above the neck, as wide as 0.45 of the shoulders and as high as
-    /// wide. Nil without a nose or neck, or without both shoulders to size it by.
-    public func headBox(_ least: Float = 0.3) -> PixelRect? {
-        let j = sure(least)
-        guard let l = j["leftShoulder"], let r = j["rightShoulder"] else { return nil }
-        let shoulders = ((l.x - r.x) * (l.x - r.x) + (l.y - r.y) * (l.y - r.y)).squareRoot()
-        let side = 0.45 * shoulders
-        if side < 4 { return nil }
-        let centre: (x: Float, y: Float)
-        if let nose = j["nose"] {
-            centre = (nose.x, nose.y)
-        } else if let neck = j["neck"] {
-            centre = (neck.x, neck.y - 0.75 * side)
-        } else {
-            return nil
-        }
-        return PixelRect(x: Int(centre.x - side / 2), y: Int(centre.y - side / 2), w: Int(side), h: Int(side))
-    }
-
     /// Which of several poses belongs to a face: the one whose head is nearest the face's
     /// centre, if that is within one and a half face heights. Nil when none is.
     public static func match(_ poses: [BodyPose], face: PixelRect, least: Float = 0.3) -> Int? {

@@ -201,7 +201,7 @@ public enum Refine {
         return centres
     }
 
-    static let toLinear: [Float] = sRGBToLinearTable
+    static let toLinear: [Float] = (0 ..< 256).map { pow(Float($0) / 255, 2.2) }
 
     @inline(__always) static func lab(_ photo: Photo, _ x: Int, _ y: Int) -> SIMD3<Float> {
         let c = photo.rgb(x, y)
@@ -470,8 +470,8 @@ public enum Refine {
         // about 0.25, dark hair against a dark brown room 0.1. (Until the final round this
         // was a proportional measure that reached 1 at a tenth of that; it read 1.00 on
         // every stroke.)
-        let apart = Oklab.distance(Oklab.from(linear: SIMD3(srgbToLinear(f.x), srgbToLinear(f.y), srgbToLinear(f.z))),
-                                   Oklab.from(linear: SIMD3(srgbToLinear(b.x), srgbToLinear(b.y), srgbToLinear(b.z))))
+        let apart = Oklab.distance(Oklab.from(linear: SIMD3(pow(f.x, 2.2), pow(f.y, 2.2), pow(f.z, 2.2))),
+                                   Oklab.from(linear: SIMD3(pow(b.x, 2.2), pow(b.y, 2.2), pow(b.z, 2.2))))
         let contrast = min(apart / 0.6, 1)
         // How busy: the background's brightness against its own local average, taken over the
         // sure background alone (so the subject's edge in the window doesn't count as busyness).
@@ -541,26 +541,9 @@ public struct RefineContext {
     public var defocus: Gray?
     public var subjectSharpness: Float?
     public var settings: MatteSettings
-    /// The sharpness map itself (at its own size, covering the photo): a region's focus is
-    /// judged from the edges measured inside it (spec v6, 2.2), never from `dense`.
-    public var sharpness: SharpnessMap?
-    /// The most blurred a part may be and still count as in focus, in the map's units: the
-    /// subject's sharpness plus the Focus strictness allowance.
-    public var focusLimit: Float?
-    /// The primary subject's face, in pixels of the photo: a box's look area is sized from it.
-    public var subjectFace: PixelRect?
-    /// The primary person's body pose, in pixels of the photo.
-    public var body: BodyPose?
 
-    public init(photo: Photo, faces: [PixelRect], defocus: Gray? = nil, subjectSharpness: Float? = nil, settings: MatteSettings = MatteSettings(),
-                sharpness: SharpnessMap? = nil, focusLimit: Float? = nil, subjectFace: PixelRect? = nil, body: BodyPose? = nil) {
+    public init(photo: Photo, faces: [PixelRect], defocus: Gray? = nil, subjectSharpness: Float? = nil, settings: MatteSettings = MatteSettings()) {
         self.photo = photo; self.faces = faces; self.defocus = defocus; self.subjectSharpness = subjectSharpness; self.settings = settings
-        self.sharpness = sharpness; self.focusLimit = focusLimit; self.subjectFace = subjectFace; self.body = body
-    }
-
-    /// The body pose moved into a patch's own pixels.
-    func body(in r: PixelRect) -> BodyPose? {
-        body.map { BodyPose(joints: $0.joints.mapValues { BodyPose.Joint(x: $0.x - Float(r.x), y: $0.y - Float(r.y), confidence: $0.confidence) }) }
     }
 }
 
@@ -574,10 +557,6 @@ public struct RefineResult {
     /// Refine Edges: the sides of the looked-at area the subject runs off, where the area
     /// could be grown to follow it (a staff, a sword). Left, top, right, bottom.
     public var runsOff: (left: Bool, top: Bool, right: Bool, bottom: Bool) = (false, false, false, false)
-    /// Refine Edges: the mean change along the box's border, where a box that re-decided too
-    /// much shows as a rectangle (`BOXSEAM?` over 0.15).
-    public var borderChange: Float = 0
-    public var warnings: [String] = []
 }
 
 extension Refine {
@@ -614,18 +593,10 @@ extension Refine {
         faces.map { PixelRect(x: $0.x - r.x, y: $0.y - r.y, w: $0.w, h: $0.h) }
     }
 
-    /// The area a box's closer look should cover (spec v6, 2.1): the box and 15% more each
-    /// side, or more, so that each side is at least a face height and at least 1024 pixels:
-    /// a box drawn tight round a rose gave the model too little round it to know the rose was
-    /// hers. Moved, not cut, where it would run off the photo.
-    public static func lookArea(box: PixelRect, w: Int, h: Int, faceHeight: Int? = nil) -> PixelRect {
-        let least = max(faceHeight ?? 0, 1024)
-        let dx = max(Int((Float(box.w) * 0.15).rounded(.up)), (least - box.w + 1) / 2)
-        let dy = max(Int((Float(box.h) * 0.15).rounded(.up)), (least - box.h + 1) / 2)
-        var r = PixelRect(x: box.x - dx, y: box.y - dy, w: min(box.w + 2 * dx, w), h: min(box.h + 2 * dy, h))
-        r.x = min(max(r.x, 0), w - r.w)
-        r.y = min(max(r.y, 0), h - r.h)
-        return r.clamped(w: w, h: h)
+    /// The area a box's closer look should cover: the box and 15% more each side.
+    public static func lookArea(box: PixelRect, w: Int, h: Int) -> PixelRect {
+        let dx = Int((Float(box.w) * 0.15).rounded(.up)), dy = Int((Float(box.h) * 0.15).rounded(.up))
+        return PixelRect(x: box.x - dx, y: box.y - dy, w: box.w + 2 * dx, h: box.h + 2 * dy).clamped(w: w, h: h)
     }
 
     /// The area the matting model should be shown for a hair stroke: its bounds and 20% more each side.
@@ -639,35 +610,18 @@ extension Refine {
     /// the mask's place inside the box, as far as it belongs to the subject already there;
     /// pockets of background inside the box are opened; then the edge is snapped, given its
     /// colour shares and checked by the colour guard like any other.
-    ///
-    /// Since spec v6 (2.2) a box refines the edge and does not re-decide the area: near the
-    /// mask's edge the model's answer is taken as it is, but further in, an area the mask
-    /// calls subject is taken out only if it is out of focus, or plainly the background's
-    /// colour where its focus can't be told, or an enclosed pocket of background. `replace`
-    /// (Shift with the box) takes the model's answer everywhere in the box, as before.
-    public static func edges(box: PixelRect, look: PixelRect, answer: Gray, alpha: [UInt8], context c: RefineContext,
-                             replace: Bool = false) -> RefineResult {
+    public static func edges(box: PixelRect, look: PixelRect, answer: Gray, alpha: [UInt8], context c: RefineContext) -> RefineResult {
         let W = c.photo.w, H = c.photo.h
         let patch = Refine.patch(around: look, margin: margin(W, H), w: W, h: H)
         let current = plane(alpha, width: W, patch)
         let inBox = weight(box: box, in: patch, feather: 6)
         // The model's answer, at the photo's size over the area it was shown.
         let full = answer.fitted(w: look.w, h: look.h)
-        let lookInPatch = PixelRect(x: look.x - patch.x, y: look.y - patch.y, w: look.w, h: look.h)
-        let was = current.cropped(lookInPatch)
+        let was = current.cropped(PixelRect(x: look.x - patch.x, y: look.y - patch.y, w: look.w, h: look.h))
         let (kept, pieces, dropped) = keepTouching(full, current: was)
         // With re-centring on, the engine steepens the new edge itself, by as much as the
         // photo's own edge says; here only the haze is taken off.
-        var firmed = firm(kept, haze: c.settings.haze, gain: c.settings.recentre ? 1 : c.settings.steepen)
-        // How many photo pixels one pixel of the model's answer covered: the scale of what it can get wrong.
-        let modelPixel = max(Float(max(look.w, look.h)) / Float(max(max(answer.w, answer.h), 1)), 1)
-        var regionLog: [String] = []
-        if !replace {
-            let limited = limitRemovals(proposal: firmed, current: was, box: inBox.cropped(lookInPatch), look: look,
-                                        modelPixel: modelPixel, context: c)
-            firmed = limited.proposal
-            regionLog = limited.log
-        }
+        let firmed = firm(kept, haze: c.settings.haze, gain: c.settings.recentre ? 1 : c.settings.steepen)
         var next = current
         for y in 0 ..< look.h {
             for x in 0 ..< look.w {
@@ -679,164 +633,24 @@ extension Refine {
         let photo = c.photo.cropped(patch)
         let gaps = openGaps(photo: photo, alpha: next, box: inBox)
         var settings = patchSettings(from: c.settings)
+        // How many photo pixels one pixel of the model's answer covered: the scale of what it can get wrong.
+        let modelPixel = max(Float(max(look.w, look.h)) / Float(max(max(answer.w, answer.h), 1)), 1)
         // Where the photo can't say how wide an edge is, a much-enlarged answer is steepened
         // as the automatic mask's is; one the model gave at about the photo's own size is left.
         if c.settings.recentre && modelPixel > 1.5 { settings.steepen = c.settings.steepen }
         let out = Matte(photo: photo, coarse: gaps.alpha, faces: moved(c.faces, by: patch), settings: settings,
                         defocus: region(c.defocus, photoW: W, photoH: H, patch), subjectSharpness: c.subjectSharpness,
-                        firstPassPixel: modelPixel, body: c.body(in: patch)).run(tier: .off)
-        var log = ["box \(box.w)×\(box.h) px at \(box.x),\(box.y)\(replace ? " · mode: replace" : "") · the model was shown \(look.w)×\(look.h) px round it"
-            + " · the model's pieces: \(pieces) kept, \(dropped) dropped (not part of the subject) · gaps opened \(gaps.opened)"]
-        log += regionLog
+                        firstPassPixel: modelPixel).run(tier: .off)
+        var log = ["box \(box.w)×\(box.h) px at \(box.x),\(box.y) · the model's pieces: \(pieces) kept, \(dropped) dropped (not part of the subject) · gaps opened \(gaps.opened)"]
         log += gaps.log
-        log += out.log.filter { $0.hasPrefix("snap") || $0.hasPrefix("colour guard") || $0.hasPrefix("decontaminated") || $0.hasPrefix("light bound") || $0.hasPrefix("edge placement") }
+        log += out.log.filter { $0.hasPrefix("snap") || $0.hasPrefix("colour guard") || $0.hasPrefix("decontaminated") || $0.hasPrefix("edge placement") }
         var result = RefineResult(patch: patch, weight: inBox, output: out, log: log)
-        // The box's border: where the box meets the mask outside it.
-        var sum: Float = 0, n: Float = 0
-        for i in 0 ..< inBox.v.count where inBox.v[i] > 0 && inBox.v[i] < 1 {
-            sum += abs(Float(out.alpha[i]) / 255 - current.v[i])
-            n += 1
-        }
-        result.borderChange = n > 0 ? sum / n : 0
-        let border = String(format: "%.3f", locale: Locale(identifier: "en_US_POSIX"), result.borderChange)
-        if result.borderChange > 0.15 {
-            result.warnings.append("BOXSEAM? mean change \(border) along the box's border")
-        }
-        result.log.append("mean change along the box's border \(border)")
         // Only what is new counts as running off: the subject that was already there always does.
         var added = kept
         for i in 0 ..< added.v.count where was.v[i] >= 0.5 { added.v[i] = 0 }
         let off = touchesBorder(added)
         result.runsOff = (off.left && look.x > 0, off.top && look.y > 0, off.right && look.maxX < W, off.bottom && look.maxY < H)
         return result
-    }
-
-    /// Why a region a box's model answer would take out was taken out or kept.
-    public enum RegionVerdict: String {
-        case outOfFocus = "removed: out of focus"
-        case colour = "removed: its focus can't be told and its colour is the background's"
-        case gap = "removed: an enclosed pocket of background"
-        case protected = "kept: in focus, or not plainly background"
-    }
-
-    /// How blurred a region is, from the sharpness map's edges inside it (spec v6, 2.2): the
-    /// region shrunk by `erode` pixels, so that the subject's own sharp outline beside it is
-    /// not what is measured, and only where the map found an edge (never its filled-in
-    /// `dense` values: a flat wall beside a sharp rose would read sharp). Nil, "can't tell",
-    /// with fewer than `least` edge pixels of the map inside. `region` is `w` by `h` at
-    /// `origin` in a photo `photoW` by `photoH`.
-    public static func regionBlur(_ region: [Bool], w: Int, h: Int, origin: (x: Int, y: Int), photoW: Int, photoH: Int,
-                                  map: SharpnessMap, erode: Int = 3, least: Int = 30) -> (blur: Float?, edges: Int) {
-        let inner = PlaneMath.extremum(Gray(w: w, h: h, v: region.map { $0 ? 1 : 0 }), radius: erode, smallest: true)
-        let kx = Float(map.w) / Float(photoW), ky = Float(map.h) / Float(photoH)
-        var seen = Set<Int>()
-        var values: [Float] = []
-        for y in 0 ..< h {
-            for x in 0 ..< w where inner.v[y * w + x] >= 0.5 {
-                let mx = min(Int((Float(origin.x + x) + 0.5) * kx), map.w - 1), my = min(Int((Float(origin.y + y) + 0.5) * ky), map.h - 1)
-                let cell = my * map.w + mx
-                if seen.insert(cell).inserted && map.edge[cell] { values.append(map.sigma[cell]) }
-            }
-        }
-        if values.count < least { return (nil, values.count) }
-        values.sort()
-        return (values[values.count / 2], values.count)
-    }
-
-    /// The limits on what a box may take out (spec v6, 2.2). `proposal` and `current` cover
-    /// the look area; `box` is the box's weight over it.
-    static func limitRemovals(proposal: Gray, current: Gray, box: Gray, look: PixelRect, modelPixel: Float,
-                              context c: RefineContext) -> (proposal: Gray, log: [String]) {
-        let w = proposal.w, h = proposal.h, n = w * h
-        let inside = current.v.map { $0 >= 0.5 }
-        let toOutside = PlaneMath.distance(to: inside.map { !$0 }, w: w, h: h)
-        let band = max(1.5 * modelPixel, 6)
-        // What the answer would take out, and of that what lies beyond the edge band.
-        var removal = [Bool](repeating: false, count: n), beyond = removal
-        for i in 0 ..< n where box.v[i] > 0 && inside[i] && proposal.v[i] < 0.5 {
-            removal[i] = true
-            if toOutside[i] > band { beyond[i] = true }
-        }
-        let (labels, count) = SubjectSelect.label(beyond, w: w, h: h)
-        if count == 0 { return (proposal, []) }
-        var area = [Int](repeating: 0, count: count + 1)
-        for l in labels where l > 0 { area[Int(l)] += 1 }
-        // The colours either side of the edge round the box, and the pockets the gap test would open.
-        let photo = c.photo.cropped(look)
-        // The subject's colours from where the mask and the model agree it is subject (a mask
-        // that is too wide would otherwise lend its rim of background to "the subject"), the
-        // background's from where the mask says background.
-        let near = PlaneMath.extremum(box, radius: 20, smallest: false)
-        var agreed = current
-        for i in 0 ..< n where proposal.v[i] < 0.5 { agreed.v[i] = 0 }
-        let sides = (subject: sideColours(photo: photo, alpha: agreed, near: near).subject,
-                     background: sideColours(photo: photo, alpha: current, near: near).background)
-        let gaps = openGaps(photo: photo, alpha: current, box: box)
-        var opened = [Bool](repeating: false, count: n)
-        for i in 0 ..< n where inside[i] && gaps.alpha.v[i] < 0.5 { opened[i] = true }
-        let megapixels = c.sharpness.map { Float($0.w * $0.h) / 2_800_000 } ?? 1
-        let least = max(Int((30 * megapixels).rounded()), 10)
-        var verdicts = [RegionVerdict](repeating: .protected, count: count + 1)
-        var log: [String] = []
-        var small = (removed: 0, kept: 0)
-        for l in 1 ... count {
-            let region = labels.map { Int($0) == l }
-            var verdict = RegionVerdict.protected
-            var detail = ""
-            var focusKnown = false
-            if let map = c.sharpness, let limit = c.focusLimit {
-                let measured = regionBlur(region, w: w, h: h, origin: (look.x, look.y), photoW: c.photo.w, photoH: c.photo.h, map: map, least: least)
-                if let blur = measured.blur {
-                    focusKnown = true
-                    detail = String(format: "edge blur %.2f (limit %.2f) from %d edges inside", locale: Locale(identifier: "en_US_POSIX"), blur, limit, measured.edges)
-                    if blur >= limit { verdict = .outOfFocus }
-                } else {
-                    detail = "\(measured.edges) edges inside, too few to judge focus"
-                }
-            }
-            if verdict == .protected && !focusKnown && !sides.subject.isEmpty && !sides.background.isEmpty {
-                // Its colour, against the colours beside the edge, as the eye judges it.
-                var dS: Float = 0, dB: Float = 0, k: Float = 0
-                let step = max(area[l] / 2000, 1)
-                var seen = 0
-                for i in 0 ..< n where region[i] {
-                    seen += 1
-                    if seen % step != 0 { continue }
-                    let c3 = lab(photo, i % w, i / w)
-                    var s = Float.infinity, b = Float.infinity
-                    for x in sides.subject { s = min(s, Oklab.distance(c3, x)) }
-                    for x in sides.background { b = min(b, Oklab.distance(c3, x)) }
-                    dS += s; dB += b; k += 1
-                }
-                if k > 0 {
-                    dS /= k; dB /= k
-                    detail += (detail.isEmpty ? "" : " · ") + String(format: "colour %.3f from the background's, %.3f from the subject's", locale: Locale(identifier: "en_US_POSIX"), dB, dS)
-                    if dB < 0.05 && dS > 0.2 { verdict = .colour }
-                }
-            }
-            if verdict == .protected {
-                var inGap = 0
-                for i in 0 ..< n where region[i] && opened[i] { inGap += 1 }
-                if 2 * inGap >= area[l] { verdict = .gap }
-            }
-            verdicts[l] = verdict
-            if area[l] >= 200 {
-                log.append("region of \(area[l]) px beyond the edge band (\(Int(band.rounded())) px): \(verdict.rawValue)\(detail.isEmpty ? "" : " · " + detail)")
-            } else if verdict == .protected {
-                small.kept += 1
-            } else {
-                small.removed += 1
-            }
-        }
-        if small.kept + small.removed > 0 { log.append("smaller regions beyond the edge band: \(small.removed) removed, \(small.kept) kept") }
-        // A kept region keeps its present values, and so does the edge band round it: a rose
-        // the model dropped would otherwise come back a band's width smaller.
-        var keep = Gray(w: w, h: h)
-        for i in 0 ..< n where labels[i] > 0 && verdicts[Int(labels[i])] == .protected { keep.v[i] = 1 }
-        keep = PlaneMath.extremum(keep, radius: Int(band.rounded(.up)) + 1, smallest: false)
-        var out = proposal
-        for i in 0 ..< n where removal[i] && keep.v[i] > 0.5 { out.v[i] = current.v[i] }
-        return (out, log)
     }
 
     /// Clean Edge: the near yes-or-no decision under the stroke, then colour shares and the guard.
@@ -874,22 +688,15 @@ extension Refine {
     /// stroke: High, and the closed-form solve on top when the stroke is small enough.
     /// Either way the guards are off under the stroke, and the colour shares and colour
     /// guard follow.
-    ///
-    /// `strength` and `tightness` (spec v6, 3.1): the matte is put through `tighten` and then
-    /// laid in only so far, `current + (matte − current) × strength`. At 1 and 0 the result
-    /// is exactly as before. `edge`: the Edge Brush (3.2), the same matting path for a hard
-    /// edge: guards kept, and the stroke is no hair zone, so the light bound applies under it.
     public static func hair(stroke: RefineStroke, look: PixelRect?, answer: Gray?, alpha: [UInt8], context c: RefineContext,
-                            strength: Float = 1, tightness: Float = 0, edge: Bool = false,
                             progress: (String) -> Void = { _ in }, cancelled: () -> Bool = { false }) -> RefineResult {
         let W = c.photo.w, H = c.photo.h
         let patch = Refine.patch(around: bounds(of: stroke, w: W, h: H), margin: margin(W, H), w: W, h: H)
         let current = plane(alpha, width: W, patch)
-        var under = weight(stroke: stroke, in: patch)
+        let under = weight(stroke: stroke, in: patch)
         let photo = c.photo.cropped(patch)
         var settings = patchSettings(from: c.settings)
-        settings.relaxGuards = !edge
-        let amount = min(max(strength, 0), 1), tight = min(max(tightness, -1), 1)
+        settings.relaxGuards = true
         let blur = region(c.defocus, photoW: W, photoH: H, patch)
         var log: [String] = []
         let out: MatteOutput
@@ -903,17 +710,14 @@ extension Refine {
                 for x in 0 ..< patch.w where under.v[y * patch.w + x] > 0 {
                     let px = patch.x + x - look.x, py = patch.y + y - look.y
                     if px < 0 || py < 0 || px >= look.w || py >= look.h { continue }
+                    let v = full.v[py * look.w + px]
                     let i = y * patch.w + x
-                    let v = tighten(full.v[py * look.w + px], tight)
-                    let wanted = current.v[i] + (v - current.v[i]) * amount
-                    next.v[i] += (wanted - next.v[i]) * under.v[i]
+                    next.v[i] += (v - next.v[i]) * under.v[i]
                 }
             }
             out = Matte(photo: photo, coarse: next, faces: moved(c.faces, by: patch), settings: settings,
-                        defocus: blur, subjectSharpness: c.subjectSharpness, forced: under, body: c.body(in: patch), forcedIsHair: !edge).run(tier: .off)
-            log.append("stroke of \(stroke.points.count) points, brush \(Int(stroke.radius)) px · the matting model's matte laid in under the stroke"
-                + String(format: " · strength %.2f, tightness %+.2f", locale: Locale(identifier: "en_US_POSIX"), amount, tight)
-                + (edge ? " · as a hard edge: guards kept, the light bound applies" : ""))
+                        defocus: blur, subjectSharpness: c.subjectSharpness, forced: under).run(tier: .off)
+            log.append("stroke of \(stroke.points.count) points, brush \(Int(stroke.radius)) px · the matting model's matte laid in under the stroke")
         } else {
             // Colour matting is for the edge, and for blobs and strands near it. Deep inside
             // the mask it has nothing to go by but colour, and a sleeve the colour of nothing
@@ -931,42 +735,12 @@ extension Refine {
                               defocus: blur, subjectSharpness: c.subjectSharpness, forced: edgeOnly)
             // The closed-form solve is slow; it is for strokes of up to about a megapixel and a half.
             let tier: MatteTier = matte.mattedCount <= 1_500_000 ? .max : .high
-            var matted = matte.run(tier: tier, progress: progress, cancelled: cancelled)
-            // Tightness on colour matting's answer under the stroke; the shares follow the alpha.
-            if tight != 0 {
-                for y in 0 ..< patch.h {
-                    for x in 0 ..< patch.w where under.v[y * patch.w + x] > 0 {
-                        let i = y * patch.w + x
-                        let a = Float(matted.alpha[i]) / 255
-                        let t = tighten(a, tight)
-                        matted.alpha[i] = UInt8((t * 255).rounded())
-                        // All three by the same factor, and never so far that one passes 255.
-                        let most = Float(max(matted.shares[i * 4], max(matted.shares[i * 4 + 1], matted.shares[i * 4 + 2])))
-                        let k = a > 0.004 ? min(t / a, 255 / max(most, 1)) : 0
-                        for ch in 0 ..< 3 { matted.shares[i * 4 + ch] = UInt8((Float(matted.shares[i * 4 + ch]) * k).rounded()) }
-                    }
-                }
-            }
-            out = matted
-            // Strength: laid in only so far.
-            if amount < 1 { for i in 0 ..< under.v.count { under.v[i] *= amount } }
-            log.append("stroke of \(stroke.points.count) points, brush \(Int(stroke.radius)) px · colour matting (\(tier.name)) over \(matte.mattedCount) px"
-                + String(format: " · strength %.2f, tightness %+.2f", locale: Locale(identifier: "en_US_POSIX"), amount, tight))
+            out = matte.run(tier: tier, progress: progress, cancelled: cancelled)
+            log.append("stroke of \(stroke.points.count) points, brush \(Int(stroke.radius)) px · colour matting (\(tier.name)) over \(matte.mattedCount) px")
             log += out.log.filter { $0.hasPrefix("max") || $0.hasPrefix("high trust") }
         }
-        log += out.log.filter { $0.hasPrefix("colour guard") || $0.hasPrefix("decontaminated") || $0.hasPrefix("light bound") }
+        log += out.log.filter { $0.hasPrefix("colour guard") || $0.hasPrefix("decontaminated") }
         return RefineResult(patch: patch, weight: under, output: out, log: log)
-    }
-
-    /// The brushes' Tightness (spec v6, 3.1), −1 to 1, on a matte value. Above 0 the level
-    /// below which the matte goes to 0 rises (to 0.4 at 1) and the rest is stretched to fill
-    /// the range: faint flyaways and grey haze drop out. Below 0 the opposite: everything is
-    /// raised, so that the top 0.4 (at −1) is solid. 0 changes nothing.
-    public static func tighten(_ v: Float, _ t: Float) -> Float {
-        if t == 0 { return v }
-        let k = 0.4 * min(abs(t), 1)
-        if t > 0 { return min(max((v - k) / (1 - k), 0), 1) }
-        return min(max(v / (1 - k), 0), 1)
     }
 
     /// ⌥ with any tool: the automatic mask put back inside a box or under a stroke.

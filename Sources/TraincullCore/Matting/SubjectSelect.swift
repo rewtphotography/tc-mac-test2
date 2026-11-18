@@ -55,9 +55,6 @@ public struct SubjectRules {
     /// How far either side of a limb's line counts as that limb, in face heights.
     public var capsule: Float = 0.35
     public var poseConfidence: Float = 0.3
-    /// Debug (spec v6, 5.4): the faces are not looked for, as if none had been found, to
-    /// try the no-face path on any photo. Read by the app.
-    public var ignoreFaces = false
 
     public init() {}
 
@@ -69,14 +66,6 @@ public struct SubjectRules {
         let fh = Float(faceHeight) / Float(max(frameHeight, 1))
         let t = min(max((fh - 0.05) / 0.15, 0), 1)
         return (1.0 - 0.8 * t) * focusStrictness
-    }
-
-    /// The most blurred a part may be and still count as in focus with the subject (the
-    /// limit `keep` uses), in the sharpness map's units. `faceHeight` and `frameHeight` in
-    /// the map's pixels.
-    public func focusLimit(subjectSharpness sp: Float, faceHeight: Int?, frameHeight: Int) -> Float {
-        let strict = max(faceHeight.map { strictness(faceHeight: $0, frameHeight: frameHeight) } ?? focusStrictness, 0.05)
-        return sp + sharpAllowance / strict
     }
 }
 
@@ -213,7 +202,7 @@ public enum SubjectSelect {
         // Everything is judged against the subject's own face (its eyes), not a fixed number.
         let sp = face.flatMap { map.faceSharp($0) } ?? edgeSharp(piece(primary), map) ?? 1
         let strict = max(face.map { rules.strictness(faceHeight: $0.h, frameHeight: h) } ?? rules.focusStrictness, 0.05)
-        let limit = rules.focusLimit(subjectSharpness: sp, faceHeight: face?.h, frameHeight: h)
+        let limit = sp + rules.sharpAllowance / strict
         decision.subjectSharpness = sp
         decision.strictness = strict
         decision.limit = limit
@@ -275,18 +264,12 @@ public enum SubjectSelect {
             decision.details.append(parts.joined(separator: " · "))
         }
 
-        let inKept = lab.map { kept.contains(Int($0)) }
-        let keepMask = tidy(inKept, w: w, h: h, rules: rules)
+        let keepMask = tidy(lab.map { kept.contains(Int($0)) }, w: w, h: h, rules: rules)
         // The soft fringe just outside the kept pieces stays; the dropped pieces go entirely.
         let near = PlaneMath.extremum(Gray(w: w, h: h, v: keepMask.map { $0 ? 1 : 0 }), radius: 6, smallest: false)
         var out = Gray(w: w, h: h)
         for i in 0 ..< n {
-            if keepMask[i] && !inKept[i] {
-                // A pinhole tidy() filled: solid subject. At 0.51 it had no half-way line for
-                // the close-ups or re-centring to find, stayed half see-through, and showed as
-                // a spot once subject and background were edited differently (spec v6 addendum).
-                out.v[i] = 1
-            } else if keepMask[i] {
+            if keepMask[i] {
                 out.v[i] = max(soft.v[i], 0.51)
             } else if near.v[i] > 0.5 && !hard[i] {
                 out.v[i] = soft.v[i]

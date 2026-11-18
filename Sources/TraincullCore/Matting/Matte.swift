@@ -166,26 +166,6 @@ public struct MatteSettings {
     /// A colour change counts as an edge from this much per pixel (all three channels
     /// together, in linear light, each from 0 to 1), and fully at three times it.
     public var edgeStrength: Float = 0.012
-    /// The subject light bound (masking spec v6, 1.1, reshaped by the follow-up after alpha
-    /// 17): at an edge, the subject's part of a pixel's light (the pixel times its shares)
-    /// may be no lighter than `portionLightness` × the subject's colour at that coverage
-    /// (+ `portionLightnessPlus`, Oklab L), and its hue and chroma no further than
-    /// `portionHue` (Oklab a, b, scaled by its lightness over the subject's) from the
-    /// subject's colour beside the edge. Whatever light it loses goes to the background.
-    /// (The first form held each channel's brightness, and a teal pixel no brighter than
-    /// a black sleeve passed in every channel.)
-    public var lightBound = true
-    public var portionLightness: Float = 1.1
-    public var portionLightnessPlus: Float = 0.005
-    public var portionHue: Float = 0.02
-    /// The hair zone round each face (spec v6, section 5): a box this many face widths wide
-    /// and face heights high, centred a quarter of a face height above the face's middle.
-    /// (2.6 × 3.0 until v6: on 6303 its border ran through the peace sign.)
-    public var hairBoxWidth: Float = 2.0
-    public var hairBoxHeight: Float = 2.4
-    /// The primary person's limbs and joints are never hair: this many face heights either
-    /// side of each is taken out of the zone.
-    public var bodyNotHair: Float = 0.25
 
     public init() {}
 }
@@ -227,12 +207,6 @@ public struct MatteOutput {
     /// Where the finished edge sits against the photo's own, and where the first pass's did.
     public var edgeOffset = EdgeOffset()
     public var edgeOffsetBefore = EdgeOffset()
-    /// How many edge pixels the subject light bound moved, and by how much on average (Oklab ΔE
-    /// of the subject's part of the pixel).
-    public var lightBounded = 0
-    public var lightBoundDeltaE: Float = 0
-    /// Where the hair zone came from: "faces", "the body pose's head", "none" or "the brush".
-    public var hairZoneFrom = ""
 }
 
 /// How clean a finished edge is, measured in a ring 3 to 10 pixels either side of the
@@ -285,17 +259,6 @@ public final class Matte {
     /// the mask is the matting model's and is not moved; the colours beside a clear edge
     /// there, and the light just inside it, are still worked out as anywhere else.
     var hairFaces = Buf<Float>(0, 0)
-    /// Where the subject light bound is not applied, 0 to 1: the hair zone and, under the
-    /// hair brush, the stroke (spec v6, 1.1). Not an Edge Brush stroke.
-    var lightExcluded = Buf<Float>(0, 0)
-    /// At quarter size: how far re-centring measured the photo's edge there (0 to 1), and
-    /// whether certain subject lies within about ten pixels. The light bound trusts the
-    /// subject's colour only where one of the two holds.
-    var knownQ: Buf<Float>?
-    var subjectNear = Buf<Float>(0, 0)
-    let body: BodyPose?
-    let forcedIsHair: Bool
-    var hairZoneFrom = "faces"
     /// The three-way split and band of the whole edge. `triq` and `band` are these while the
     /// edge is snapped, and their hair-zone part while colour matting runs.
     var tri0 = Buf<UInt8>(0, 0)
@@ -365,16 +328,9 @@ public final class Matte {
     ///     box round each head, is the hair zone.
     ///   - firstPassPixel: photo pixels for each pixel of the model answer the rough mask
     ///     came from. Without it, the rough mask's own pixel size is used.
-    ///   - body: the primary person's body pose, in pixels of the photo: its limbs are never
-    ///     hair, and with no face its head places the hair zone (spec v6, section 5).
-    ///   - forcedIsHair: false for the Edge Brush: the stroke is held as the matting model
-    ///     drew it, but it is a hard edge, and the light bound applies under it.
     public init(photo: Photo, coarse: Gray, faces: [PixelRect], patches: [HeadPatch] = [], settings: MatteSettings = MatteSettings(),
-                defocus: Gray? = nil, subjectSharpness: Float? = nil, forced: Gray? = nil, firstPassPixel: Float? = nil,
-                body: BodyPose? = nil, forcedIsHair: Bool = true) {
+                defocus: Gray? = nil, subjectSharpness: Float? = nil, forced: Gray? = nil, firstPassPixel: Float? = nil) {
         self.forced = forced
-        self.body = body
-        self.forcedIsHair = forcedIsHair
         self.firstPassPixel = max(firstPassPixel ?? Float(photo.w) / Float(max(coarse.w, 1)), 1)
         self.photo = photo
         self.settings = settings
@@ -470,21 +426,11 @@ public final class Matte {
         // The hair zone: around each head, outside the oval of the face. Curly hair masks tend
         // to fill the gaps between curls, so the certain-subject region is pulled in further there.
         // It fades in over a few pixels: a hard edge to the zone would show as a straight line in the mask.
-        // With no face, the body pose's head stands in for one; with neither there is no
-        // hair zone, and the whole outline is a plain edge (spec v6, section 5).
         var hair = [Float](repeating: 0, count: qw * qh)
-        var heads = faces
-        if heads.isEmpty, let made = body?.headBox() {
-            heads = [made]
-            hairZoneFrom = "the body pose's head"
-        } else if heads.isEmpty {
-            hairZoneFrom = "none (no face and no head in the body pose)"
-        }
-        for f in heads {
+        for f in faces {
             let fw = Float(f.w), fh = Float(f.h)
-            let bw = settings.hairBoxWidth * fw, bh = settings.hairBoxHeight * fh
             let cx = Float(f.x) + fw / 2, cy = Float(f.y) + fh / 2 - 0.25 * fh
-            let head = PixelRect(x: Int(cx - bw / 2), y: Int(cy - bh / 2), w: Int(bw), h: Int(bh)).clamped(w: W, h: H)
+            let head = PixelRect(x: Int(cx - 1.3 * fw), y: Int(cy - 1.5 * fh), w: Int(2.6 * fw), h: Int(3.0 * fh)).clamped(w: W, h: H)
             let ovalY = Float(f.y) + 0.325 * fh, a = fw / 2, b = 1.35 * fh / 2
             if head.isEmpty { continue }
             for qy in (head.y / 4) ..< min((head.maxY + 3) / 4, qh) {
@@ -498,12 +444,8 @@ public final class Matte {
                 }
             }
         }
-        // The body is never hair: hands, forearms and shoulders near the face get the plain edge's clean-up.
-        if let body = body, let faceHeight = heads.first.map({ Float($0.h) }), !heads.isEmpty {
-            let limbs = Matte.bodyCells(body, radius: settings.bodyNotHair * faceHeight, qw: qw, qh: qh)
-            for i in 0 ..< qw * qh { hair[i] *= 1 - limbs[i] }
-        }
-        if !settings.hairOnly { hair = [Float](repeating: 1, count: qw * qh) }
+
+        if faces.isEmpty || !settings.hairOnly { hair = [Float](repeating: 1, count: qw * qh) }
         hairFaces = Buf(hair)
         // Painted with the hair brush: the stroke is the hair zone, whatever the faces say.
         var painted: [Bool]?
@@ -530,13 +472,6 @@ public final class Matte {
             painted = marks
         }
         hairQ = Buf(hair)
-        if forced != nil && !forcedIsHair, let f = forced?.resized(w: qw, h: qh) {
-            // The Edge Brush: its stroke is held, but it is no hair zone for the light bound.
-            lightExcluded = Buf((0 ..< qw * qh).map { hairFaces.p[$0] * (1 - min(max(f.v[$0], 0), 1)) })
-        } else {
-            lightExcluded = Buf(hair)
-        }
-        if forced != nil { hairZoneFrom = forcedIsHair ? "the hair brush" : "the edge brush (faces only)" }
         classify(hair)
         if let painted = painted {
             for i in 0 ..< qw * qh where painted[i] { triq.p[i] = 1 }
@@ -611,9 +546,6 @@ public final class Matte {
             if sureIn.v[i] >= settings.foregroundThreshold { kinds.p[i] = 2 } else if sureOut.v[i] <= settings.backgroundThreshold { kinds.p[i] = 0 }
         }
         colourKind = kinds
-        // Certain subject within about ten pixels: three quarter-size cells.
-        let sureSubject = Gray(w: qw, h: qh, v: (0 ..< qw * qh).map { kinds.p[$0] == 2 ? 1 : 0 })
-        subjectNear = Buf(PlaneMath.extremum(sureSubject, radius: 3, smallest: false).v)
         fq = Buf(pushPull(weightFor: 2))
         bq = Buf(pushPull(weightFor: 0))
         fEdge = fq
@@ -1370,8 +1302,8 @@ public final class Matte {
 
     // MARK: Finish
 
-    /// 8-bit sRGB values to linear light, by the exact sRGB curve (masking spec v6, 1.2).
-    static let toLinear = Buf<Float>(sRGBToLinearTable)
+    /// 8-bit display values to linear light, near enough for a ratio.
+    static let toLinear = Buf<Float>((0 ..< 256).map { pow(Float($0) / 255, 2.2) })
 
     /// What the checks on a finished mask count, over the uncertain band.
     struct BandStats {
@@ -1494,8 +1426,7 @@ public final class Matte {
                                 // full; they add any only as coverage rises from 5% to 10%. A
                                 // pixel of bright background that is 4% subject would otherwise
                                 // keep 4% of the background's light: a faint line outside the edge.
-                                // (All three together, by the same factor: never one channel on its own.)
-                                let lowered: SIMD3<Float> = tails && al < 0.1 ? fit.shares * min(1, al / max(fit.shares.max(), 1e-6)) : plain
+                                let lowered: SIMD3<Float> = tails && al < 0.1 ? pointwiseMin(fit.shares, plain) : plain
                                 let moved: SIMD3<Float> = (lowered - plain) + (fit.shares - lowered) * max(part, 0)
                                 s = plain + moved
                                 local.cleaned += 1
@@ -1537,13 +1468,6 @@ public final class Matte {
             guardCorrections = corrected.fixed
             log.append("colour guard: \(corrected.fixed) of \(corrected.checked) edge pixels had gained colour and were put back\(corrected.fixed > 0 ? guardNote : "")\(lightnessNote)")
         }
-        var bounded = (moved: 0, deltaE: Float(0))
-        // Part of decontamination: with that off, the shares are the mask, as before.
-        if settings.lightBound && settings.decontaminate && haveOff {
-            bounded = holdPortion(alpha8, shares)
-            log.append("light bound: \(bounded.moved) pixels moved towards the subject's colour, mean ΔE "
-                + String(format: "%.4f", locale: Locale(identifier: "en_US_POSIX"), bounded.deltaE) + " (Oklab, the subject's part of the pixel)")
-        }
         let n = qw * qh
         var tri8 = [UInt8](repeating: 0, count: n), hair8 = [UInt8](repeating: 0, count: n), zones = [UInt8](repeating: 0, count: n)
         for i in 0 ..< n {
@@ -1560,11 +1484,7 @@ public final class Matte {
         out.lightnessCorrections = lightnessCorrections
         out.edgeOffset = edgeOffset(of: alpha8)
         out.edgeOffsetBefore = offsetBefore
-        out.lightBounded = bounded.moved
-        out.lightBoundDeltaE = bounded.deltaE
-        out.hairZoneFrom = hairZoneFrom
         log.append("edge placement: " + out.edgeOffset.summary)
-        log.append("hair zone from \(hairZoneFrom)")
         return out
     }
 
@@ -1632,150 +1552,13 @@ public final class Matte {
         // background's light, strongly coloured: it showed as soon as the subject was darkened.
         let fromSubject: Float = luma(fl) * byColour, fromBackground: Float = luma(bl) * (1 - byColour)
         let toSubject: Float = fromSubject / max(fromSubject + fromBackground, 1e-6)
-        let own: SIMD3<Float> = fl * byColour + rest * toSubject
-        let together: Float = min(max(luma(own) / max(luma(Il), 1e-4), 0), 1)
-        let each = Matte.unclipped(own: own, pixel: Il, together: together)
+        let own: SIMD3<Float> = pointwiseMax(fl * byColour + rest * toSubject, SIMD3<Float>(repeating: 0))
+        let each: SIMD3<Float> = pointwiseMin(own / pointwiseMax(Il, SIMD3<Float>(repeating: 1e-4)), SIMD3<Float>(repeating: 1))
+        let together: Float = min(luma(own) / max(luma(Il), 1e-4), 1)
         let bright: Float = blownOut(B)
         let single = SIMD3<Float>(repeating: together)
         let model: SIMD3<Float> = each + (single - each) * bright
         return (plain + (model - plain) * trust, byColour)
-    }
-
-    /// The subject's share of each channel, `own` over the pixel's light, with nothing cut
-    /// off channel by channel (masking spec v6, 1.3): a channel over 1 scales all three
-    /// down together, and one below 0 gives the single share `together` to all three. A channel
-    /// with next to no light of its own (a pure colour) says nothing about the split and
-    /// takes `together`; divided by almost nothing it would scale the other two to nothing.
-    @inline(__always)
-    static func unclipped(own: SIMD3<Float>, pixel Il: SIMD3<Float>, together: Float) -> SIMD3<Float> {
-        var each = SIMD3<Float>(repeating: together)
-        for c in 0 ..< 3 where Il[c] > 0.002 { each[c] = own[c] / Il[c] }
-        // A channel the fit puts below 0 means the fit doesn't explain the pixel (a lens's
-        // fringe, as a rule): the subject's part then takes the pixel's own colour, one share
-        // for all three. (Moved only until that channel reached 0, as alpha 17 did, it left a
-        // red share of exactly 0 beside green and blue ones: a teal rim on a black sleeve.)
-        if each.min() < 0 { return SIMD3<Float>(repeating: max(together, 0)) }
-        let highest = each.max()
-        if highest > 1 { each /= highest }
-        return pointwiseMax(each, SIMD3<Float>(repeating: 0))
-    }
-
-    /// The quarter-size cells within `radius` photo pixels of a body pose's limbs and joints,
-    /// softened by a cell so the hair zone fades out round them.
-    static func bodyCells(_ body: BodyPose, radius: Float, qw: Int, qh: Int) -> [Float] {
-        let small = BodyPose(joints: body.joints.mapValues { BodyPose.Joint(x: $0.x / 4, y: $0.y / 4, confidence: $0.confidence) })
-        let hard = small.confirmed(radius: max(radius / 4, 1), w: qw, h: qh)
-        var soft = hard.map { $0 ? Float(1) : 0 }
-        soft = PlaneMath.extremum(Gray(w: qw, h: qh, v: soft), radius: 1, smallest: false).v
-        PlaneMath.boxBlur(&soft, w: qw, h: qh, radius: 1)
-        return soft
-    }
-
-    /// The subject light bound (masking spec v6, 1.1, as reshaped after alpha 17). Runs
-    /// last, after the colour guard, so nothing undoes it. Away from the hair zone, and only
-    /// where the subject's colour beside the edge can be believed (re-centring measured the
-    /// edge there, or certain subject is within about ten pixels), the subject's part of
-    /// each edge pixel's light, P = I × shares (linear), is held to the subject's colour F:
-    /// no lighter than `portionLightness` × the lightness of coverage × F (+ a little), and
-    /// in Oklab its (a, b) within `portionHue` of F's, both scaled by P's lightness over F's.
-    /// The new shares are P' / I, all three scaled down together if one would pass 1; what
-    /// P loses goes to the background. A teal pixel at the edge of a black sleeve, as dark
-    /// as the sleeve, then keeps the sleeve's colour, and its teal goes when the background
-    /// is darkened. Just inside the edge (coverage all but full) it acts as far as the inner
-    /// tail reaches, fading out further in.
-    func holdPortion(_ alpha8: Buf<UInt8>, _ shares: Buf<UInt8>) -> (moved: Int, deltaE: Float) {
-        let b = band0, W = self.W, qw = self.qw
-        if b.isEmpty { return (0, 0) }
-        let src = photo.p, rowBytes = photo.rowBytes, lin = Matte.toLinear.p, t0 = tri0.p
-        let fp = fEdge.p, bp = bEdge.p, excluded = lightExcluded.p, near = subjectNear.p
-        let measured = knownQ?.p, inside = insideNear.count == qw * qh ? insideNear.p : nil
-        let lighter = settings.portionLightness, plus = settings.portionLightnessPlus, hue = settings.portionHue
-        let lock = NSLock()
-        var moved = 0
-        var removed = 0.0
-        @inline(__always) func linear(_ c: SIMD3<Float>) -> SIMD3<Float> {
-            SIMD3(lin[Int(min(max(c.x, 0), 1) * 255)], lin[Int(min(max(c.y, 0), 1) * 255)], lin[Int(min(max(c.z, 0), 1) * 255)])
-        }
-        parallelRows(b.h) { rows in
-            var n = 0
-            var sum = 0.0
-            for by in rows {
-                let y = b.y + by
-                for x in b.x ..< b.maxX where t0[(y >> 2) * qw + (x >> 2)] == 1 {
-                    let a8 = alpha8.p[y * W + x]
-                    if a8 <= 1 { continue }
-                    let al = Float(a8) / 255
-                    // Part-covered pixels fully; all but fully covered ones as far as the inner tail reaches.
-                    var reach: Float = 1
-                    if a8 >= 254 {
-                        guard let inside = inside else { continue }
-                        reach = smoothstep(0, 0.3, 1 - sample1(inside, x, y))
-                        if reach <= 0 { continue }
-                    }
-                    let keepOut = min(max(sample1(excluded, x, y), 0), 1)
-                    if keepOut >= 0.99 { continue }
-                    let believed = (measured.map { sample1($0, x, y) } ?? 0) > 0.05 || sample1(near, x, y) > 0.5
-                    if !believed { continue }
-                    let o = (y * W + x) * 4
-                    let s = SIMD3<Float>(Float(shares.p[o]), Float(shares.p[o + 1]), Float(shares.p[o + 2])) / 255
-                    if s.max() <= 0.004 { continue }
-                    let i = y * rowBytes + x * 4
-                    let I = SIMD3<Float>(lin[Int(src[i])], lin[Int(src[i + 1])], lin[Int(src[i + 2])])
-                    let f3 = sample3(fp, x, y), b3 = sample3(bp, x, y)
-                    let F = linear(f3), B = linear(b3)
-                    let FLab = Oklab.from(linear: F)
-                    if FLab.x < 0.01 { continue }
-                    let across = F - B
-                    let byColour = min(max(dot3(I - B, across) / (dot3(across, across) + 1e-7), 0), 1)
-                    let told = Matte.apart(f3, b3, low: settings.colourLow, high: settings.colourHigh, floor0: settings.colourFloor,
-                                           floor1: settings.colourFull, plain: settings.colourPlain)
-                    let cover = al + max(byColour - al, 0) * told
-                    let P = I * s
-                    let before = Oklab.from(linear: P)
-                    var lab = before
-                    // Lightness. Scaling linear light by m scales the whole Oklab vector by
-                    // m^(1/3), so scaling the vector keeps the hue.
-                    let most = Oklab.from(linear: F * max(cover, 0)).x * lighter + plus
-                    if lab.x > most && lab.x > 0 { lab *= most / lab.x }
-                    // Hue and chroma: within `hue` of the subject's own, at this lightness.
-                    let r = min(lab.x / FLab.x, 1.5)
-                    let centre = SIMD2<Float>(FLab.y, FLab.z) * r, radius = hue * r
-                    let ab = SIMD2<Float>(lab.y, lab.z), d = ab - centre
-                    let distance = (d * d).sum().squareRoot()
-                    if distance > radius { lab = SIMD3(lab.x, centre.x + d.x * radius / distance, centre.y + d.y * radius / distance) }
-                    if Oklab.distance(lab, before) < 1e-4 { continue }
-                    var P2 = Oklab.toLinear(lab)
-                    if P2.min() < 0 {
-                        // Out of gamut: back towards the subject's colour at this lightness (F
-                        // scaled, which is in gamut) until it is in.
-                        let safe = Oklab.from(linear: F * (r * r * r))
-                        var lo: Float = 0, hi: Float = 1 // how far from `safe` towards `lab`
-                        for _ in 0 ..< 10 {
-                            let mid = (lo + hi) / 2
-                            if Oklab.toLinear(safe + (lab - safe) * mid).min() >= 0 { lo = mid } else { hi = mid }
-                        }
-                        P2 = pointwiseMax(Oklab.toLinear(safe + (lab - safe) * lo), SIMD3<Float>(repeating: 0))
-                    }
-                    var s2 = s
-                    for c in 0 ..< 3 where I[c] > 1e-4 { s2[c] = P2[c] / I[c] }
-                    let highest = s2.max()
-                    if highest > 1 { s2 /= highest }
-                    let k = (1 - keepOut) * reach
-                    let now = s + (s2 - s) * k
-                    let r8 = (now * 255).rounded(.toNearestOrAwayFromZero)
-                    let nr = UInt8(min(max(r8.x, 0), 255)), ng = UInt8(min(max(r8.y, 0), 255)), nb = UInt8(min(max(r8.z, 0), 255))
-                    if nr == shares.p[o] && ng == shares.p[o + 1] && nb == shares.p[o + 2] { continue }
-                    shares.p[o] = nr; shares.p[o + 1] = ng; shares.p[o + 2] = nb
-                    n += 1
-                    sum += Double(Oklab.distance(before, Oklab.from(linear: I * now)))
-                }
-            }
-            lock.lock()
-            moved += n
-            removed += sum
-            lock.unlock()
-        }
-        return (moved, moved > 0 ? Float(removed / Double(moved)) : 0)
     }
 
     /// The colour guard (masking spec v5, 1.1). Every edge pixel whose channels have

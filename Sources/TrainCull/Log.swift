@@ -116,8 +116,7 @@ final class Log {
         Log.note("app", "macOS \(info.operatingSystemVersionString), \(String(cString: model)), \(info.activeProcessorCount) cores, "
             + "\(MemoryStats.plain(info.physicalMemory)) of memory")
         Log.note("app", "display scale \(NSScreen.main?.backingScaleFactor ?? 0) · thermal \(Log.thermal) · low power mode \(info.isLowPowerModeEnabled ? "on" : "off")"
-            + " · blending \(Masking.blendsByChannel ? "per colour" : "plain")"
-            + " · Core Image works in \((Imaging.ciContext.workingColorSpace?.name as String?) ?? "an unnamed space") · the edge engine in sRGB")
+            + " · blending \(Masking.blendsByChannel ? "per colour" : "plain")")
         Log.note("app", "subject model in this build: \(BundledModels.hasBiRefNet ? "BiRefNet (\(BiRefNetModel.version))" : "none; Vision's masks are used")")
         Log.note("app", "hair-matting model in this build: \(BundledModels.hasMatting ? "BiRefNet-matting" : "none; Refine Hair uses colour matting only")")
     }

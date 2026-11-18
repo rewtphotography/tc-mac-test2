@@ -89,15 +89,13 @@ final class HeroNSView: NSView {
     private var fadeStart: CFTimeInterval?
     private var fadeTimer: Timer?
     static let fadeSeconds: CFTimeInterval = 0.6
-    /// A box dragged out, in pixels of the photo; `restore` when Option was held, `replace` when Shift was.
-    var onBox: ((CGRect, Bool, Bool) -> Void)?
+    /// A box dragged out, in pixels of the photo; `restore` when Option was held.
+    var onBox: ((CGRect, Bool) -> Void)?
     /// A stroke painted, as points in pixels of the photo, with the brush's radius.
     var onStroke: (([CGPoint], CGFloat, Bool) -> Void)?
     private var dragStart: CGPoint?
     private var dragPoints: [CGPoint] = []
     private var dragRestores = false
-    /// Shift was held as the drag began: a box replaces the mask inside it outright.
-    private var dragReplaces = false
     private var hover: CGPoint?
     private var tracking: NSTrackingArea?
     static let deadZone = 0.05
@@ -347,7 +345,6 @@ final class HeroNSView: NSView {
         downPoint = p
         guard tool != .none, image != nil, space.width > 0 else { return }
         dragRestores = event.modifierFlags.contains(.option)
-        dragReplaces = event.modifierFlags.contains(.shift)
         dragStart = spacePoint(p)
         dragPoints = [spacePoint(p)]
         needsDisplay = true
@@ -383,7 +380,7 @@ final class HeroNSView: NSView {
                 // A click, or a sliver: not a box.
                 if box.width * shownScale >= 8 && box.height * shownScale >= 8 {
                     pending = .box(box, restore: dragRestores)
-                    onBox?(box, dragRestores, dragReplaces)
+                    onBox?(box, dragRestores)
                 }
             case let .brush(radius):
                 let points = dragPoints.filter { whole.insetBy(dx: -radius, dy: -radius).contains($0) }
