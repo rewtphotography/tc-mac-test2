@@ -188,7 +188,7 @@ Same folder and Mac, two and a half minutes of use:
    6957's hand and waist? The log's new `edge placement` line gives the offset and the edge
    widths on the real photos; nothing in alpha 15 has been seen on one.
 3. The owner checks spec v7 (alpha 19) on the photos: the acceptance list is in
-   `MASKING.md`, section 18, and the two rim-light defaults made here want a yes or no.
+   `MASKING.md`, section 18.
 4. Priority 5 of the final masking round: the tool overlay bug and Show edits are built
    (alpha 16); the edit stack, the history panel and reorder mode are not. Written out as
    steps in `MASKING.md`, section 16.
@@ -885,9 +885,11 @@ marked reverted.
 - **Rolled back with git** (`git checkout 5c95b58 -- Sources Tests`, commit 9151f0c): the
   app and engine are alpha 16's. The lost-mask fix of alpha 17 went too (the owner listed
   kept masks as not this round); see Known caveats. The workflow's storage fix stayed.
-- **Edge colour from inside** and **Remove Colour**, as specified, except two defaults in
-  the rim-light test (threshold 0.05, part-covered pixels judged by a covered neighbour),
-  without which the spec's own tests (a) and (d) can't both pass. Details, every test's
+- **Edge colour from inside** and **Remove Colour**, as specified, with two amendments to
+  the rim-light test that the spec's own tests (a) and (d) needed and the owner confirmed
+  (threshold 0.05 on the engine's 2.2 curve; part-covered pixels judged by a covered
+  neighbour), and the trade-off they accept (thin or faint rims aren't protected in the outer
+  pixels). In the spec and in `MASKING.md`, section 18. Details, every test's
   numbers and the known issues: `MASKING.md`, section 18.
 - With the switch off the engine's output is alpha 16's byte for byte (a test holds hashes
   taken from the alpha 16 code), and the debug bundle names the switch only when it is on.

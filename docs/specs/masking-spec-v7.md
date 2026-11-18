@@ -50,6 +50,18 @@ This works like Photoshop's Decontaminate Colors. It never looks at the backgrou
    - New shares: s′ = P′ / I (0 where I_c = 0).
 4. Alpha is unchanged, so the edge stays where alpha 16 put it. Light taken off the subject's side goes to the background.
 
+**Amendments (owner, after the first test results):**
+- **Rim-light threshold 0.05**, not 0.03, in Oklab L, with the engine's pow-2.2 curve (back in
+  use since the rollback). On test (a) the sleeve's teal pixel (0,39,33) is 0.034 lighter
+  than the sleeve (29,26,25) on that curve; a real rim (test (d)) is about 0.08 lighter.
+- **A part-covered pixel is judged by its nearest fully covered neighbour** (alpha ≥ 250/255,
+  within 3 px): that neighbour's subject part ÷ alpha, from the shares before this step. Its
+  own part still holds some background light, and against a white wall a fringe read lighter
+  than a real rim.
+- **Accepted trade-off:** a rim thinner than the soft edge, or less than about 10% brighter
+  than the inside, isn't protected in the outer few pixels. Wider rims keep their colour
+  anyway, through the inside sample.
+
 **Expected side effect:** where k < 1, the subject's side is slightly darker than α·F̂. On White can show such a pixel a touch darker. That's correct, because the pixel contains background light. Don't compensate.
 
 **Where it runs:**

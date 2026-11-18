@@ -618,10 +618,10 @@ patch runs the engine); off for Clean Edge and Refine Hair patches. Never change
   line: depth ≤ 5 on the measure above (`bandInside`; the pixel the line runs beside is 1).
 - Per pixel: P = I × shares; the rim test below; otherwise P′ = k·α·F̂ with
   k = min(1, minₖ Iₖ ÷ (α·F̂ₖ)), shares P′ ÷ I (0 where the photo has no light).
-- **Rim light, changed from the spec** (two defaults, owner to confirm): the threshold is
-  **0.05**, not 0.03, in Oklab L; and a part-covered pixel is judged by the nearest fully
-  covered pixel within 3 px (`rimLook`), using that pixel's own part ÷ alpha from the shares as
-  they were. Why: on the spec's own test (a) the sleeve is L 0.191 and its teal pixel
+- **Rim light, as amended by the owner** (in the spec): the threshold is **0.05**, not 0.03,
+  in Oklab L on the engine's pow-2.2 curve; and a part-covered pixel is judged by the nearest
+  fully covered pixel within 3 px (`rimLook`), using that pixel's own part ÷ alpha from the
+  shares as they were. Why: on the spec's own test (a) the sleeve is L 0.191 and its teal pixel
   (0, 39, 33) is 0.226, 0.034 lighter (dark colours take big Oklab steps for a few code
   values), so 0.03 keeps it as rim light; and part-covered pixels still hold some background
   light after decontamination, so judged on their own a teal edge against white read lighter
@@ -697,10 +697,14 @@ orange wall sampled, a box round the rose removes the orange without eating peta
 hand; 7006 and 7473 hair unchanged from alpha 16.
 
 **Known issues added by v7**
+- **Accepted trade-off of the rim test** (owner): a rim thinner than the soft edge (no fully
+  covered rim pixel within 3 px of the half-covered ones), or one less than about 10% brighter
+  than the inside (under 0.05 in L), isn't protected in the outer few pixels: they take the
+  inside colour. Wider rims keep their colour anyway, through the inside sample (test (d),
+  20-px rim).
 - Where the fringe's photo has a channel at 0 (7451's (0, 32, 28)), k is 0: the subject's
   part there is black, and with the background darkened the pixel shows only its own (teal)
   light at an eighth. Blunt, as specified; not compensated.
-- The rim test's two changes above are defaults made here, not the owner's numbers.
 - No face: alpha 16 treats the whole outline as hair zone, so edge colour from inside acts only
   where the inside is skin (and with no face there is no skin model: not at all).
 - Remove Colour's segment test uses the inside colour of the mask before the box; where the
