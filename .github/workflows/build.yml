@@ -1,12 +1,15 @@
 name: Build
 
 # Every branch builds and tests. Only `main` and version tags (v0.2.0-alpha.1 and so on)
-# publish a release; see the publish job at the end.
+# publish a release; see the publish job at the end. A push of a commit GitHub already has
+# (such as a new branch made from another) changes no files, so starts no build: use
+# Actions → Build → Run workflow for that.
 on:
   push:
     branches: ["**"]
     tags: ["v*"]
     paths-ignore: ["docs/**", "**.md"]
+  workflow_dispatch:
 
 permissions:
   contents: read
