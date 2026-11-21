@@ -1316,7 +1316,7 @@ final class Session: ObservableObject {
             case resetAll
         }
         let steps: [Step] = [
-            .set("exposure", { _ in 0.5 }), .drag("shadowBoost", [1.0, 1.2, 1.5]), .set("highlightRecovery", { 1 - $0 }),
+            .set("exposure", { _ in 0.5 }), .drag("shadowBoost", [1.0, 1.2, 1.5]), .set("vibrance", { _ in -0.2 }),
             .set("baselineExposure", { $0 + 1 }), .set("temperature", { _ in 4500 }), .set("tint", { _ in 10 }),
             .set("gamutMapping", { 1 - $0 }), .set("lensCorrection", { 1 - $0 }), .drag("exposure", [0.6, 0.8, 1.0]),
             .set("saturation", { _ in 1.3 }), .set("vibrance", { _ in 0.3 }), .set("contrast", { _ in 0.5 }),

@@ -153,6 +153,72 @@ every old tag still works) plus the few non-masking gains of alphas 7–23, re-m
 - Not carried over from the alpha 23 notes: everything about masking. The alpha 6
   measurements are below.
 
+## RAW panel spec (0.2.0 alpha 2)
+
+The owner's spec (pasted in, 2026-11-21): the RAW panel in pipeline order, new Apple
+controls, red dots for unsupported ones, a structured change log, and self-tests T1–T13.
+Audited against the code first; what was adopted, changed or left out:
+- **Adopted:** five sections that fold away (remembered per section), in the spec's order,
+  with "New name (Apple name)" for Local contrast (Contrast), Blacks (Shadow bias), Tone curve
+  (Boost) and Shadows (Shadow boost). New: Decoder line, Lens correction, White balance by
+  point, Baseline exposure, Gamut mapping. Existing sliders keep their keys, ranges, defaults,
+  what they send to Apple and their sidecar fields. Controls with an is…Supported flag that
+  Apple reports false are greyed out with a red dot ("Not supported for this file") and
+  nothing is sent for them (`RawPanel.sendable`, and again in `Adjust.apply`). Every change
+  logs one `change` line (file, control, appleProperty, old/new, appleDefault, readBackValue,
+  renderMs, peakMemoryMB, zoom, isDragEnd, cause) when the full render showing it is on
+  screen; a drag logs once at its end; Reset All logs one line per control it resets; each
+  selected file logs one `raw` line with every Apple default and supported flag.
+- **Left out:** Highlight recovery (`isHighlightRecoveryEnabled`): not in Apple's raw filter
+  on macOS 15 (no such property, no mention of highlights in any Core Image header). No row,
+  nothing saved; the owner chose this. `CIHighlightShadowAdjust` is a different control and
+  may come later under its own name.
+- **Defaults chosen:** the decoder line reads "RAW 8 (DNG)" for a DNG decoder. White balance
+  by point stores Apple's read-back as Temperature and Tint (the existing fields, so
+  `WhiteBalance=Custom`); the point itself is not saved. New controls are saved under
+  TrainCull's namespace, toggles as True / False, only when moved. Baseline exposure's
+  slider is −3…+3 EV (Apple gives no range). Gamut mapping has no is…Supported property, so
+  it never gets a red dot. Saturation and Vibrance are Core Image filters: their read-back
+  is the value asked for. T9's "5×5 patch" is judged on the patch's mean colour (the DNG has
+  noise by design).
+- **Tests:** no raw file may be kept in the repository, so the decoder tests run on a
+  made-up DNG built in code (`SyntheticDng`: gradient, neutral grey patch, blocks clipped in
+  one and two channels, noise; also stored on its side, orientation 6). Its results are DNG
+  results, not ARW findings. The ARW figures (Shadow bias true defaults, Shadow boost
+  read-backs, red dots) come from the owner's log. The launch check opens the DNG
+  (`-TCListDNG`, launch check only: no recipe lists DNGs) and drives the panel with a script
+  (`-TCScript`, T12).
+- **Minimum macOS:** every property used is part of `CIRAWFilter`, macOS 12.0; the header
+  marks availability on the class only (the build prints it, step "Raw filter API").
+
+## How the preview is rendered (0.2.0 alpha 2; for the later performance build)
+
+- A new `CIRAWFilter` is made, and the raw file re-decoded, for every render: each selection
+  render, each draft, each full render after an edit, each export, and once more on selection
+  to read Apple's defaults. Nothing is reused between slider changes.
+- Draft mode (`isDraftModeEnabled`) is never set, so it stays Apple's default (off) in every
+  case. While a slider moves, drafts use `scaleFactor` sized to the view (0.1–1); once the
+  sliders are still for 0.4 s, a full-resolution render (scale 1) follows. The selection
+  render is always full resolution, at fit and at 100% alike; fit only shrinks it on screen.
+- Selecting a frame shows its thumbnail at once, then the camera's large embedded JPEG
+  (status "Preview"), then 0.15 s later TrainCull's full raw render (status "Raw"). If
+  Apple's decoder can't develop the file, the full embedded JPEG stays ("Embedded JPEG").
+  "Raw · Fit" means the image is TrainCull's own full render of the raw with the edits, shown
+  whole in the view; drafts during a drag are shown while the label still says "Raw".
+- Core Image works in 16-bit half float, linear, extended sRGB primaries (the context's
+  defaults; caching of intermediates off). The preview is rendered to 8-bit RGBA in Display
+  P3; the TIFF export to 16-bit in ProPhoto RGB.
+- Renders run off the main thread: drafts one at a time on their own queue (requests while
+  one runs are coalesced into the next); full renders on another queue. A render not yet
+  started is skipped if newer edits arrived; one already running is not cancelled; its result
+  is kept in the cache but not shown.
+- Saturation (`CIColorControls`) then Vibrance (`CIVibrance`) are applied to Apple's
+  output image, in Core Image's linear working space, before any clamp (the clamp is the
+  final render into 8- or 16-bit); only when moved.
+- Other differences from the export: drafts are smaller renders; the preview is 8-bit and
+  P3, so smooth gradients can band where the 16-bit ProPhoto TIFF won't; macOS converts the
+  P3 preview to the display's own profile.
+
 ## What is built (0.2.0 alpha 1; alpha 6 plus the list above)
 
 Folder opening (button, File menu, drag and drop, recents, drives), resizable left pane,
@@ -163,7 +229,7 @@ at the bottom left (double-click the rated count to choose stars), side-by-side 
 extracting the embedded JPEG, exporting a developed 16-bit TIFF, the diagnostics log and
 memory report, an app icon.
 
-Checked by tests on Linux (71): the log files and their JSON twin, the render cache, raw and recipe reading, the settings line, sidecar editing,
+Checked by tests on Linux (77): the RAW panel's layout, red dots, decoder line and sidecar round trip, the made-up DNG, the log files and their JSON twin, the render cache, raw and recipe reading, the settings line, sidecar editing,
 crash-safe saving, face-zoom maths, the TIFF writer, JPEG orientation, compare stepping,
 memory figures. Checked by a test on the Mac build: an exported TIFF opens in Apple's reader
 with the right pixels. Checked by the automated build's screenshots (made-up frames): the
@@ -203,8 +269,17 @@ Same folder and Mac, two and a half minutes of use:
 - Stepping fast renders one frame at a time, so a frame already left can hold up the wanted
   one by up to 0.4 s. Not a complaint yet; cancel a render in flight if it becomes one.
 
+## Waiting for a newer macOS
+
+- RAW 9 (the newer raw decoder): requires macOS 27; add when the Mac is updated.
+- Highlight recovery (`isHighlightRecoveryEnabled`): requires macOS 27; add when the Mac is updated.
+
 ## Next, in order
 
+0. The owner opens their four a7 IV test ARWs in 0.2.0 alpha 2 and sends the log: its `raw`
+   lines give Shadow bias's true default, Apple's other defaults and the red dots per file;
+   its `change` lines give the Shadow boost read-backs. Then the next note: debug export and
+   the JSON test-script runner; after that, performance (informed by the section above).
 1. The owner's next spec (after 0.2.0 alpha 1): Nikon Z7 NEF files don't open (only Sony ARW
    has a recipe); the Shadow bias slider (−1…1) can't hold the photo's own default of 3.00;
    Send to Photoshop writes Apple's numbers into `Exposure2012`, `Temperature` and `Tint`
@@ -230,6 +305,14 @@ shown, how several frames are selected for the editor, the font, the overall loo
 - Each downloaded build must be allowed once in System Settings, Privacy & Security. Only an
   Apple Developer account (paid yearly) removes that step.
 - The repository is public (since alpha 21): anyone can read the code and notes.
+- Shadow bias's default can lie far outside its slider (5.00 on the made-up DNG, 3.00 the
+  owner saw on ARWs): the thumb sits at the end while Apple's true value is used; touching the
+  slider then jumps the image. The slider's range is unchanged in this build (spec).
+- The status under the image says "Raw" while a slider moves, though a smaller draft is shown.
+- White balance by point is saved as Temperature and Tint, which Camera Raw then reads as
+  Apple's numbers in Adobe's fields (the issue already listed for the next spec).
+- A change made and then left before its full render (another frame chosen within 0.4 s)
+  logs its line without a render time.
 - Kept renders hold up to 900 MB, and that memory is not handed back while they are kept
   (until another folder is opened). With 33 MP files that is six frames, where alpha 6 kept
   three, so resting memory can sit up to about 400 MB higher than alpha 6's.

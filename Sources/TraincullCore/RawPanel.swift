@@ -111,7 +111,7 @@ public enum RawPanel {
         RawControl(key: "baselineExposure", title: "Baseline exposure", section: "Light", kind: .slider, range: -3 ... 3, neutral: 0,
                    appleProperty: "baselineExposure", supportProperty: nil, isNew: true, show: { String(format: "%+.2f EV", locale: posix, $0) },
                    namespace: .trainCull, field: "BaselineExposure", save: stored),
-        toggle("highlightRecovery", "Highlight recovery", "Light", apple: "isHighlightRecoveryEnabled", supported: "isHighlightRecoverySupported"),
+        // Highlight recovery (isHighlightRecoveryEnabled) is not in Apple's raw filter before macOS 27: left out until the Mac has it.
         own("shadowBias", "Blacks (Shadow bias)", "Light", -1 ... 1, 0, apple: "shadowBias"),
         // Tone curve
         own("boost", "Tone curve (Boost)", "Tone curve", 0 ... 1, 1, apple: "boostAmount"),

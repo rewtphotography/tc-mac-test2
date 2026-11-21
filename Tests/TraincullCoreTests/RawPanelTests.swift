@@ -10,7 +10,7 @@ final class RawPanelTests: XCTestCase {
             ("Raw & Detail", ["Decoder", "Lens correction", "Luminance noise reduction", "Colour noise reduction",
                               "Moiré reduction", "Sharpness", "Detail", "Local contrast (Contrast)"]),
             ("Light", ["Temperature", "Tint", "White balance by point", "Exposure", "Baseline exposure",
-                       "Highlight recovery", "Blacks (Shadow bias)"]),
+                       "Blacks (Shadow bias)"]),
             ("Tone curve", ["Tone curve (Boost)", "Shadows (Shadow boost)", "Local tone map"]),
             ("Colour", ["Saturation", "Vibrance"]),
             ("Output", ["Gamut mapping"]),
@@ -82,7 +82,7 @@ final class RawPanelTests: XCTestCase {
     /// T10: every new control set to a non-default value, saved, read back; defaults write nothing.
     func testT10SidecarRoundTrip() throws {
         let dir = MemDir(atomic: true)
-        let moved: [String: Float] = ["lensCorrection": 0, "highlightRecovery": 1, "gamutMapping": 0, "baselineExposure": 0.75,
+        let moved: [String: Float] = ["lensCorrection": 1, "gamutMapping": 0, "baselineExposure": 0.75,
                                       "decoder": 9, "exposure": 0.5, "temperature": 5200, "tint": 7]
         let name = try XCTUnwrap(Edits.write(dir, baseName: "DSC00001", sidecarName: nil, values: SidecarValues(rating: 3, label: nil),
                                              fields: RawPanel.fields(moved)))
@@ -93,8 +93,8 @@ final class RawPanelTests: XCTestCase {
         XCTAssertEqual(Set(back.keys), Set(moved.keys))
         XCTAssertLessThanOrEqual(worst, 0.001)
         // New controls under TrainCull's namespace; Adobe's fields in their existing format.
-        XCTAssertTrue(text.contains("traincull:HighlightRecovery=\"True\""))
-        XCTAssertTrue(text.contains("traincull:LensCorrection=\"False\""))
+        XCTAssertTrue(text.contains("traincull:LensCorrection=\"True\""))
+        XCTAssertTrue(text.contains("traincull:GamutMapping=\"False\""))
         XCTAssertTrue(text.contains("traincull:BaselineExposure=\"0.750\""))
         XCTAssertTrue(text.contains("crs:Exposure2012=\"+0.50\""))
         XCTAssertTrue(text.contains("crs:Temperature=\"5200\""))
@@ -104,7 +104,7 @@ final class RawPanelTests: XCTestCase {
         _ = try Edits.write(dir, baseName: "DSC00001", sidecarName: name, values: SidecarValues(rating: 3, label: nil),
                             fields: RawPanel.fields(["exposure": 0.5]))
         let after = try XCTUnwrap(dir.files[name])
-        for field in ["LensCorrection", "HighlightRecovery", "GamutMapping", "BaselineExposure", "DecoderVersion"] {
+        for field in ["LensCorrection", "GamutMapping", "BaselineExposure", "DecoderVersion"] {
             XCTAssertFalse(after.contains("traincull:\(field)"), field)
         }
         XCTAssertNil(try Edits.write(MemDir(atomic: true), baseName: "DSC00002", sidecarName: nil,

@@ -90,6 +90,8 @@ final class RawControlsTests: XCTestCase {
         let facts = try XCTUnwrap(Adjust.facts(url))
         let dots = Adjust.controls.filter { RawPanel.state($0, supported: facts.supported).redDot }.map { $0.title }
         print("SPEC-RESULT decoder (DNG): Apple uses \(f.decoderVersion.rawValue); supported [\(facts.decoders.joined(separator: ", "))]; line \(RawPanel.decoderLine(facts.decoders)); native size \(Int(f.nativeSize.width))×\(Int(f.nativeSize.height))")
+        let ctx = Imaging.ciContext
+        print("SPEC-RESULT pipeline (DNG): draft mode by default \(f.isDraftModeEnabled ? "on" : "off"); scale factor \(f.scaleFactor); Core Image working format \(ctx.workingFormat == .RGBAh ? "RGBAh (16-bit half float)" : "\(ctx.workingFormat.rawValue)"), working colour space \(ctx.workingColorSpace?.name.map { $0 as String } ?? "none")")
         print("SPEC-RESULT T7 red dots on the made-up DNG (DNG): \(dots.isEmpty ? "none" : dots.joined(separator: ", ")) · flags \(facts.supported.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: " "))")
     }
 
@@ -184,7 +186,8 @@ final class RawControlsTests: XCTestCase {
         }
         let first = try render([:])
         var allPass = true
-        for key in ["highlightRecovery", "gamutMapping", "lensCorrection"] {
+        // Highlight recovery is left out: Apple's raw filter has no such setting before macOS 27.
+        for key in ["gamutMapping", "lensCorrection"] {
             let c = try XCTUnwrap(Adjust.control(key))
             let d = try XCTUnwrap(defaults[key])
             let flipped = try render([key: 1 - d])
@@ -264,7 +267,7 @@ final class RawControlsTests: XCTestCase {
     /// T11: after Reset All (the panel empties every change) the render equals a fresh open.
     func testT11ResetAll() throws {
         _ = try decodable("T11")
-        var values: [String: Float] = ["exposure": 1, "baselineExposure": 0.5, "highlightRecovery": 0, "gamutMapping": 0,
+        var values: [String: Float] = ["exposure": 1, "baselineExposure": 0.5, "gamutMapping": 0,
                                        "temperature": 4500, "tint": 12, "saturation": 1.4, "vibrance": 0.3, "shadowBoost": 1.2]
         let moved = try render(values)
         values = [:] // what Reset All leaves

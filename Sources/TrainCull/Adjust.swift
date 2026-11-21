@@ -37,8 +37,6 @@ enum Adjust {
             "tint": f.neutralTint,
             "exposure": f.exposure,
             "baselineExposure": f.baselineExposure,
-            // Not in Apple's raw filter on macOS 15: the owner decides what happens to this control.
-            "highlightRecovery": 0,
             "shadowBias": f.shadowBias,
             "boost": f.boostAmount,
             "shadowBoost": f.boostShadowAmount,
@@ -60,7 +58,6 @@ enum Adjust {
             "isDetailSupported": f.isDetailSupported,
             "isContrastSupported": f.isContrastSupported,
             "isLocalToneMapSupported": f.isLocalToneMapSupported,
-            "isHighlightRecoverySupported": false,
         ]
     }
 

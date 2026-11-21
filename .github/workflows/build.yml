@@ -46,6 +46,8 @@ jobs:
       - name: Raw filter API
         run: |
           H="$(xcrun --show-sdk-path)/System/Library/Frameworks/CoreImage.framework/Headers/CIRAWFilter.h"
+          echo "SDK: $(xcrun --show-sdk-version)"
+          sed -n '1,35p' "$H" | grep -n -E "AVAILABLE|@interface" || true
           grep -n -E "API_AVAILABLE|API_UNAVAILABLE|@interface|@property" "$H"
           echo "---- every mention of highlights, in all of Core Image's headers ----"
           grep -rn -i "highlight" "$(dirname "$H")" || echo "none"
