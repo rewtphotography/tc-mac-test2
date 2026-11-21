@@ -9,8 +9,9 @@ struct PreviewTuning {
     static let settleChoices: [Double] = [0.1, 0.25, 0.4, 0.75, 1.0]
     static let keys = (settle: "TCPreviewSettleDelay", draft: "TCPreviewDraftMode", viewSize: "TCPreviewViewSizeSettle",
                        region: "TCPreviewVisibleRegion", legacy: "TCPreviewLegacy")
-    /// View-size settled render at fit: on, after test C3b (see the notes).
-    static let viewSizeSettleDefault = true
+    /// View-size settled render at fit: off, because it failed test C3b (mean 0.84, max 40 levels
+    /// against the export made the same size; see the notes).
+    static let viewSizeSettleDefault = false
 
     /// Seconds from the last change (or a drag's release) to the settled render.
     var settleDelay: Double

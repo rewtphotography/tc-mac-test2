@@ -44,6 +44,15 @@ final class PreviewTests: XCTestCase {
         return (w, h, Array(UnsafeBufferPointer(start: data.assumingMemoryBound(to: UInt8.self), count: w * h * 4)))
     }
 
+    /// The export's 16-bit ProPhoto pixels turned into 8-bit Display P3 by Core Image, the way the
+    /// preview's own pixels are made.
+    private func p3ci(_ image: CGImage) throws -> (w: Int, h: Int, bytes: [UInt8]) {
+        let space = try XCTUnwrap(CGColorSpace(name: CGColorSpace.displayP3))
+        let ci = CIImage(cgImage: image)
+        let out = try XCTUnwrap(Imaging.ciContext.createCGImage(ci, from: ci.extent, format: .RGBA8, colorSpace: space))
+        return try raw8(out)
+    }
+
     /// The bytes of an 8-bit picture as it is (no redraw).
     private func raw8(_ image: CGImage) throws -> (w: Int, h: Int, bytes: [UInt8]) {
         let data = try XCTUnwrap(image.dataProvider?.data)
@@ -92,9 +101,10 @@ final class PreviewTests: XCTestCase {
         let settled = try dragThenSettle(r, region, region)
         let export = try exportRender(values)
         let part = try XCTUnwrap(export.cropping(to: settled.rect.integral))
-        let d = diff(try raw8(settled.image), try p3(part))
+        let d = diff(try raw8(settled.image), try p3ci(part))
+        let cg = diff(try raw8(settled.image), try p3(part))
         XCTAssertLessThanOrEqual(d.max, 1)
-        print("SPEC-RESULT C3a settled = export at 100% (DNG): region \(settled.image.width)×\(settled.image.height) after 4 draft frames; max \(d.max), mean \(String(format: "%.4f", d.mean)) levels (8-bit Display P3) — \(d.max <= 1 ? "PASS" : "FAIL")")
+        print("SPEC-RESULT C3a settled = export at 100% (DNG): region \(settled.image.width)×\(settled.image.height) after 4 draft frames; max \(d.max), mean \(String(format: "%.4f", d.mean)) levels (export turned into 8-bit Display P3 by Core Image; by Core Graphics: max \(cg.max)) — \(d.max <= 1 ? "PASS" : "FAIL")")
     }
 
     /// C3b: at fit, the view-size settled render against the full-resolution export made the same size.
@@ -109,8 +119,12 @@ final class PreviewTests: XCTestCase {
         let passOn = on.mean <= 0.5 && on.max <= 4
         print("SPEC-RESULT C3b settled = export at fit, view-size settle ON (DNG): \(a.w)×\(a.h) (scale \(String(format: "%.3f", small.scale))); mean \(String(format: "%.3f", on.mean)), max \(on.max) levels — \(passOn ? "PASS" : "FAIL")")
         let full = try XCTUnwrap(r.renderNow(request(99, values, .whole(viewLongEdge: nil), draft: false)))
-        let off = diff(try raw8(full.image), try p3(export))
-        print("SPEC-RESULT C3b settled = export at fit, view-size settle OFF (DNG): \(full.image.width)×\(full.image.height); mean \(String(format: "%.4f", off.mean)), max \(off.max) levels — \(off.max <= 1 ? "PASS" : "FAIL")")
+        let exportP3 = try p3ci(export)
+        let off = diff(try raw8(full.image), exportP3)
+        // For reference: alpha 2's own settled render against the same export, compared the same way.
+        let alpha2 = diff(try raw8(try XCTUnwrap(Imaging.renderRaw(url, values))), exportP3)
+        let sameAsAlpha2 = diff(try raw8(full.image), try raw8(try XCTUnwrap(Imaging.renderRaw(url, values))))
+        print("SPEC-RESULT C3b settled = export at fit, view-size settle OFF (DNG): \(full.image.width)×\(full.image.height); mean \(String(format: "%.4f", off.mean)), max \(off.max) levels (alpha 2's render vs the same export: max \(alpha2.max); this build vs alpha 2: max \(sameAsAlpha2.max)) — \(off.max <= 1 ? "PASS" : "FAIL")")
         XCTAssertLessThanOrEqual(off.max, 1)
         if PreviewTuning.viewSizeSettleDefault { XCTAssertTrue(passOn, "view-size settle is on by default but fails C3b") }
     }
@@ -156,16 +170,18 @@ final class PreviewTests: XCTestCase {
         try decodableOrSkip("C9")
         let alpha2 = try XCTUnwrap(Imaging.renderRaw(url, [:])) // alpha 2's settled render: a fresh filter, full resolution
         let r = PreviewRenderer(url: url, legacy: false)
-        let fitWant = PreviewRenderer.Want.whole(viewLongEdge: 1800)
+        // At fit, the settled render as the default tuning makes it.
+        let fitWant = PreviewRenderer.Want.whole(viewLongEdge: PreviewTuning.viewSizeSettleDefault ? 1800 : nil)
         let fit = try XCTUnwrap(r.renderNow(request(1, [:], fitWant, draft: false)))
         let zoomed = try XCTUnwrap(r.renderNow(request(2, [:], region, draft: false)))
         let part = try XCTUnwrap(alpha2.cropping(to: zoomed.rect.integral))
         let at100 = diff(try raw8(zoomed.image), try raw8(part))
         let a = try raw8(fit.image)
-        let atFit = diff(a, try p3(alpha2, width: a.w, height: a.h))
+        let atFit = PreviewTuning.viewSizeSettleDefault ? diff(a, try p3(alpha2, width: a.w, height: a.h)) : diff(a, try raw8(alpha2))
         XCTAssertEqual(at100.max, 0)
-        let fitPass = atFit.mean <= 0.5 && atFit.max <= 4
-        print("SPEC-RESULT C9 no look change (DNG): at 100% vs alpha 2's render max \(at100.max) — \(at100.max == 0 ? "PASS" : "FAIL"); at fit (view-size settle) mean \(String(format: "%.3f", atFit.mean)), max \(atFit.max) — \(fitPass ? "PASS" : "FAIL")")
+        let fitPass = PreviewTuning.viewSizeSettleDefault ? (atFit.mean <= 0.5 && atFit.max <= 4) : atFit.max == 0
+        XCTAssertTrue(fitPass)
+        print("SPEC-RESULT C9 no look change (DNG): at 100% vs alpha 2's render max \(at100.max) — \(at100.max == 0 ? "PASS" : "FAIL"); at fit (view-size settle \(PreviewTuning.viewSizeSettleDefault ? "on" : "off, full resolution")) \(a.w)×\(a.h): mean \(String(format: "%.3f", atFit.mean)), max \(atFit.max) — \(fitPass ? "PASS" : "FAIL")")
     }
 }
 #endif
