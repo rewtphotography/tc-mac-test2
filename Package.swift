@@ -8,6 +8,12 @@ var targets: [Target] = [
         name: "TraincullCore",
         swiftSettings: [.swiftLanguageMode(.v5)]
     ),
+    // Writes the made-up DNG the automated build's launch check opens.
+    .executableTarget(
+        name: "MakeDng",
+        dependencies: ["TraincullCore"],
+        swiftSettings: [.swiftLanguageMode(.v5)]
+    ),
     .testTarget(
         name: "TraincullCoreTests",
         dependencies: ["TraincullCore"],

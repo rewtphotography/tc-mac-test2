@@ -42,10 +42,19 @@ jobs:
         with:
           persist-credentials: false
       - run: swift --version
-      # The core library's own tests run in the Linux job. Here, only the ones that need a Mac.
+      # Which macOS each raw-filter property the panel uses first appeared in, from Apple's own header.
+      - name: Raw filter API
+        run: |
+          H="$(xcrun --show-sdk-path)/System/Library/Frameworks/CoreImage.framework/Headers/CIRAWFilter.h"
+          grep -n -E "^CI_EXPORT|API_AVAILABLE|isLensCorrection|baselineExposure|isHighlightRecovery|isGamutMapping|neutralLocation|neutralTemperature|supportedDecoderVersions|decoderVersion|Supported" "$H" | head -120
+      # The core library's own tests run in the Linux job. Here, only the ones that need a Mac,
+      # among them the spec tests on the made-up DNG; their figures go in the run's summary.
       - name: Tests
         timeout-minutes: 30
-        run: swift test --filter TrainCullTests
+        run: |
+          set -o pipefail
+          swift test --filter TrainCullTests 2>&1 | tee "$RUNNER_TEMP/mac-tests.log"
+          { echo "### Spec results (made-up DNG)"; grep -h "SPEC-RESULT" "$RUNNER_TEMP/mac-tests.log" | sed 's/^/- /'; } >> "$GITHUB_STEP_SUMMARY"
       # The version is in packaging/VERSION. A version tag gives its own alpha number; anywhere
       # else the number follows on from the last release of this version, so a failed build
       # never uses a number up. (The alpha-N tags belong to 0.1.0 and are not counted.)
@@ -82,17 +91,21 @@ jobs:
       - name: Launch check
         run: |
           swift scripts/make-fixture.swift "$PWD/build/fixture"
-          shoot() { # <picture name> [arguments]
-            open -n build/TrainCull.app --args -TCOpenFolder "$PWD/build/fixture" "${@:2}"
-            sleep 15
+          mkdir -p build/fixture-dng
+          swift run -c release MakeDng "$PWD/build/fixture-dng/SYNTHETIC.dng"
+          shoot() { # <picture name> <folder> <seconds> [arguments]
+            open -n build/TrainCull.app --args -TCOpenFolder "$PWD/build/$2" "${@:4}"
+            sleep "$3"
             pgrep -x TrainCull
             screencapture -x "build/$1.png" || true
             pkill -x TrainCull || true
             sleep 2
           }
-          shoot launch
-          shoot launch-compare -TCCompare YES
-          shoot launch-edit -TCEdit YES
+          shoot launch fixture 15
+          shoot launch-compare fixture 15 -TCCompare YES
+          shoot launch-edit fixture 15 -TCEdit YES
+          # T12: the made-up DNG in Edit mode, driven by the app's launch-check script.
+          shoot launch-script fixture-dng 50 -TCListDNG YES -TCEdit YES -TCScript YES
           LOGS="$HOME/Library/Logs/TrainCull"
           echo "---- the app's own log ----"
           cat "$LOGS/"*.log || true
@@ -118,6 +131,37 @@ jobs:
                   assert plain[14:].startswith(event["category"]), f"{log.name} line {i + 1}: area differs"
               print(f"{log.name}: {len(lines)} events, every JSON line valid and matching")
           EOF
+      # T12: the scripted session logs one structured line per change, and one line of Apple's
+      # defaults when the file is selected.
+      - name: Check the change log (T12)
+        run: |
+          set -o pipefail
+          python3 - "$HOME/Library/Logs/TrainCull" <<'EOF' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json, pathlib, sys
+          folder = pathlib.Path(sys.argv[1])
+          wanted = ["file", "control", "appleProperty", "oldValue", "newValue", "appleDefault", "readBackValue",
+                    "renderMs", "peakMemoryMB", "zoom", "isDragEnd"]
+          for log in sorted(folder.glob("*.jsonl")):
+              events = [json.loads(l) for l in log.read_text().splitlines()]
+              if not any(e["category"] == "script" for e in events):
+                  continue
+              changes = [e.get("fields", {}) for e in events if e["category"] == "change"]
+              complete = [c for c in changes if all(k in c for k in wanted)]
+              rendered = [c for c in complete if isinstance(c["renderMs"], (int, float)) and c["renderMs"] > 0]
+              drags = [c for c in complete if c["isDragEnd"] is True]
+              selections = [e for e in events if e["category"] == "raw" and e.get("fields", {}).get("file") == "SYNTHETIC.dng"]
+              skipped = [e["message"] for e in events if e["category"] == "script" and "skipped" in e["message"]]
+              ok = len(complete) >= 20 and len(rendered) == len(complete) and len(drags) == 2 and len(selections) == 1
+              print(f"- SPEC-RESULT T12 logging (DNG): {len(changes)} change lines, {len(complete)} with every field, "
+                    f"{len(rendered)} with renderMs > 0, {len(drags)} drag ends, {len(selections)} defaults line(s); "
+                    f"skipped: {skipped or 'none'} — {'PASS' if ok else 'FAIL'}")
+              for c in complete:
+                  print(f"  - {c['control']}: {c['oldValue']:.3f} → {c['newValue']:.3f}, read back {c['readBackValue']}, "
+                        f"{c['renderMs'] if c['renderMs'] is None else round(c['renderMs'])} ms, peak {c['peakMemoryMB'] if c['peakMemoryMB'] is None else round(c['peakMemoryMB'])} MB, zoom {c['zoom']}, drag end {c['isDragEnd']}")
+              sys.exit(0 if ok else 1)
+          print("- SPEC-RESULT T12 logging (DNG): NOT RUN — no scripted session in the logs")
+          sys.exit(1)
+          EOF
       # The app, kept with the build for two weeks; the publish job takes it from here.
       - uses: actions/upload-artifact@v4
         with:
@@ -134,6 +178,7 @@ jobs:
             build/launch.png
             build/launch-compare.png
             build/launch-edit.png
+            build/launch-script.png
             build/logs
           if-no-files-found: ignore
 

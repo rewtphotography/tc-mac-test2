@@ -2,87 +2,93 @@ import CoreImage
 import Foundation
 import TraincullCore
 
-/// One editing control. The controls are Apple's own raw controls under Apple's own names,
-/// relabelled only in stops and Kelvin, so they can be judged on their own terms.
-struct Control: Identifiable {
-    let key: String
-    let title: String
-    let section: String
-    let range: ClosedRange<Float>
-    /// The value used when the file gives no default of its own.
-    let neutral: Float
-    let show: (Float) -> String
-    /// Where the value is saved in the sidecar.
-    let namespace: Xmp.Namespace
-    let field: String
-    let save: (Float) -> String
+/// The panel's controls are described in the core library (`RawPanel`); this is where they
+/// meet Apple's raw filter.
+typealias Control = RawControl
 
-    var id: String { key }
+/// What Apple's decoder says about one file before anything is changed.
+struct RawFacts {
+    /// Apple's own default for every control, by control key (toggles as 1 or 0).
+    var defaults: [String: Float]
+    /// Apple's is…Supported flags, by property name.
+    var supported: [String: Bool]
+    var decoder: String
+    var decoders: [String]
 }
 
 enum Adjust {
-    private static func plain(_ v: Float) -> String { String(format: "%.2f", v) }
-    private static func stored(_ v: Float) -> String { String(format: "%.3f", locale: Locale(identifier: "en_US_POSIX"), v) }
+    static var controls: [Control] { RawPanel.controls }
+    static var sections: [String] { RawPanel.sections }
+    static func control(_ key: String) -> Control? { RawPanel.control(key) }
 
-    private static func own(_ key: String, _ title: String, _ section: String, _ range: ClosedRange<Float>, _ neutral: Float) -> Control {
-        Control(key: key, title: title, section: section, range: range, neutral: neutral, show: plain,
-                namespace: .trainCull, field: key.prefix(1).uppercased() + key.dropFirst(), save: stored)
-    }
-
-    static let controls: [Control] = [
-        Control(key: "exposure", title: "Exposure", section: "Light", range: -3 ... 3, neutral: 0,
-                show: { String(format: "%+.2f EV", $0) },
-                namespace: .cameraRaw, field: "Exposure2012",
-                save: { String(format: "%+.2f", locale: Locale(identifier: "en_US_POSIX"), $0) }),
-        own("boost", "Boost", "Light", 0 ... 1, 1),
-        own("shadowBoost", "Shadow boost", "Light", 0 ... 2, 0),
-        own("shadowBias", "Shadow bias", "Light", -1 ... 1, 0),
-        own("contrast", "Contrast", "Light", 0 ... 1, 0),
-        own("localToneMap", "Local tone map", "Light", 0 ... 1, 0),
-        Control(key: "temperature", title: "Temperature", section: "Colour", range: 2000 ... 12000, neutral: 5500,
-                show: { String(format: "%.0f K", $0) },
-                namespace: .cameraRaw, field: "Temperature", save: { String(Int($0.rounded())) }),
-        Control(key: "tint", title: "Tint", section: "Colour", range: -150 ... 150, neutral: 0,
-                show: { String(format: "%+.0f", $0) },
-                namespace: .cameraRaw, field: "Tint", save: { String(format: "%+d", Int($0.rounded())) }),
-        own("saturation", "Saturation", "Colour", 0 ... 2, 1),
-        own("vibrance", "Vibrance", "Colour", -1 ... 1, 0),
-        own("sharpness", "Sharpness", "Detail", 0 ... 1, 0),
-        own("detail", "Detail", "Detail", 0 ... 3, 0),
-        own("luminanceNoise", "Luminance noise reduction", "Detail", 0 ... 1, 0),
-        own("colorNoise", "Colour noise reduction", "Detail", 0 ... 1, 0),
-        own("moire", "Moiré reduction", "Detail", 0 ... 1, 0),
-    ]
-
-    static let sections = ["Light", "Colour", "Detail"]
-
-    /// What Apple's decoder uses for this file when nothing is changed (white balance as shot).
-    static func defaults(_ url: URL) -> [String: Float] {
-        guard let f = CIRAWFilter(imageURL: url) else { return [:] }
-        return [
-            "exposure": f.exposure,
-            "boost": f.boostAmount,
-            "shadowBoost": f.boostShadowAmount,
-            "shadowBias": f.shadowBias,
-            "contrast": f.contrastAmount,
-            "localToneMap": f.localToneMapAmount,
-            "temperature": f.neutralTemperature,
-            "tint": f.neutralTint,
-            "saturation": 1,
-            "vibrance": 0,
-            "sharpness": f.sharpnessAmount,
-            "detail": f.detailAmount,
+    /// Every control's value as the filter holds it now: Apple's defaults on a fresh filter,
+    /// what Apple kept after values were set on one. Saturation and vibrance are not Apple's.
+    static func properties(_ f: CIRAWFilter) -> [String: Float] {
+        [
+            "decoder": Float(RawPanel.major(f.decoderVersion.rawValue) ?? 0),
+            "lensCorrection": f.isLensCorrectionEnabled ? 1 : 0,
             "luminanceNoise": f.luminanceNoiseReductionAmount,
             "colorNoise": f.colorNoiseReductionAmount,
             "moire": f.moireReductionAmount,
+            "sharpness": f.sharpnessAmount,
+            "detail": f.detailAmount,
+            "contrast": f.contrastAmount,
+            "temperature": f.neutralTemperature,
+            "tint": f.neutralTint,
+            "exposure": f.exposure,
+            "baselineExposure": f.baselineExposure,
+            "highlightRecovery": f.isHighlightRecoveryEnabled ? 1 : 0,
+            "shadowBias": f.shadowBias,
+            "boost": f.boostAmount,
+            "shadowBoost": f.boostShadowAmount,
+            "localToneMap": f.localToneMapAmount,
+            "saturation": 1,
+            "vibrance": 0,
+            "gamutMapping": f.isGamutMappingEnabled ? 1 : 0,
         ]
     }
 
-    /// Applies the changed values to Apple's raw filter. Anything not in `values` is left alone.
+    /// Apple's is…Supported flags for the file the filter holds.
+    static func supported(_ f: CIRAWFilter) -> [String: Bool] {
+        [
+            "isLensCorrectionSupported": f.isLensCorrectionSupported,
+            "isLuminanceNoiseReductionSupported": f.isLuminanceNoiseReductionSupported,
+            "isColorNoiseReductionSupported": f.isColorNoiseReductionSupported,
+            "isMoireReductionSupported": f.isMoireReductionSupported,
+            "isSharpnessSupported": f.isSharpnessSupported,
+            "isDetailSupported": f.isDetailSupported,
+            "isContrastSupported": f.isContrastSupported,
+            "isLocalToneMapSupported": f.isLocalToneMapSupported,
+            "isHighlightRecoverySupported": f.isHighlightRecoverySupported,
+        ]
+    }
+
+    /// Apple's defaults, supported flags and decoders for a file, from a fresh filter.
+    static func facts(_ url: URL) -> RawFacts? {
+        guard let f = CIRAWFilter(imageURL: url) else { return nil }
+        return RawFacts(defaults: properties(f), supported: supported(f), decoder: f.decoderVersion.rawValue,
+                        decoders: f.supportedDecoderVersions.map { $0.rawValue })
+    }
+
+    /// What Apple's decoder uses for this file when nothing is changed (white balance as shot).
+    static func defaults(_ url: URL) -> [String: Float] { facts(url)?.defaults ?? [:] }
+
+    /// Applies the changed values to Apple's raw filter. Anything not in `values` is left
+    /// alone, so Apple's own default stays, unclamped; so is anything Apple doesn't support
+    /// for this file.
     static func apply(_ values: [String: Float], to f: CIRAWFilter) {
-        for (key, v) in values {
+        if values.isEmpty { return }
+        let send = RawPanel.sendable(values, supported: supported(f))
+        // The decoder first: the other controls belong to it.
+        if let v = send["decoder"], let version = f.supportedDecoderVersions.first(where: {
+            RawPanel.major($0.rawValue) == Int(v.rounded()) && $0.rawValue.lowercased().contains("dng") == f.decoderVersion.rawValue.lowercased().contains("dng")
+        }) {
+            f.decoderVersion = version
+        }
+        for (key, v) in send {
             switch key {
             case "exposure": f.exposure = v
+            case "baselineExposure": f.baselineExposure = v
             case "boost": f.boostAmount = v
             case "shadowBoost": f.boostShadowAmount = v
             case "shadowBias": f.shadowBias = v
@@ -93,12 +99,15 @@ enum Adjust {
             case "luminanceNoise": f.luminanceNoiseReductionAmount = v
             case "colorNoise": f.colorNoiseReductionAmount = v
             case "moire": f.moireReductionAmount = v
+            case "lensCorrection": f.isLensCorrectionEnabled = v >= 0.5
+            case "highlightRecovery": f.isHighlightRecoveryEnabled = v >= 0.5
+            case "gamutMapping": f.isGamutMappingEnabled = v >= 0.5
             default: break
             }
         }
         // White balance last, temperature before tint.
-        if let t = values["temperature"] { f.neutralTemperature = t }
-        if let t = values["tint"] { f.neutralTint = t }
+        if let t = send["temperature"] { f.neutralTemperature = t }
+        if let t = send["tint"] { f.neutralTint = t }
     }
 
     /// Saturation and vibrance are Core Image filters applied after the raw decode.
@@ -115,27 +124,7 @@ enum Adjust {
 
     // MARK: Sidecar
 
-    /// The fields to write for a frame's changed values; unchanged controls are removed.
-    static func fields(_ values: [String: Float]) -> [SidecarField] {
-        var out = controls.map { c in SidecarField(c.namespace, c.field, values[c.key].map(c.save)) }
-        // Camera Raw only honours a temperature and tint when its white balance says "Custom".
-        if values["temperature"] != nil || values["tint"] != nil {
-            out.append(SidecarField(.cameraRaw, "WhiteBalance", "Custom"))
-        }
-        return out
-    }
+    static func fields(_ values: [String: Float]) -> [SidecarField] { RawPanel.fields(values) }
 
-    /// The changed values a sidecar holds. Temperature and tint count only when the sidecar's
-    /// white balance is "Custom" or absent: "As Shot" values there are Adobe's own reading.
-    static func read(_ text: String) -> [String: Float] {
-        var out: [String: Float] = [:]
-        let whiteBalance = Xmp.readField(text, "crs:WhiteBalance")
-        for c in controls {
-            if (c.key == "temperature" || c.key == "tint") && whiteBalance != nil && whiteBalance != "Custom" { continue }
-            guard let raw = Xmp.readField(text, "\(c.namespace.prefix):\(c.field)"),
-                  let v = Float(raw.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: "+", with: "")) else { continue }
-            out[c.key] = min(max(v, c.range.lowerBound), c.range.upperBound)
-        }
-        return out
-    }
+    static func read(_ text: String) -> [String: Float] { RawPanel.read(text) }
 }

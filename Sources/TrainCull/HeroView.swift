@@ -47,6 +47,17 @@ final class HeroNSView: NSView {
     var onUserZoom: ((UserZoom) -> Void)?
 
     static let maxZoom: CGFloat = 4 // 400%
+
+    /// White balance by point: while on, a click picks the point instead of zooming.
+    var picksPoint = false {
+        didSet { if picksPoint != oldValue { window?.invalidateCursorRects(for: self) } }
+    }
+    /// The point clicked, in pixels of the full-size picture, origin at the top left.
+    var onPick: ((CGPoint) -> Void)?
+
+    override func resetCursorRects() {
+        if picksPoint { addCursorRect(bounds, cursor: .crosshair) }
+    }
     static let deadZone = 0.05
 
     override var acceptsFirstResponder: Bool { true }
@@ -275,6 +286,11 @@ final class HeroNSView: NSView {
         let p = convert(event.locationInWindow, from: nil)
         defer { downPoint = nil }
         guard let d = downPoint, hypot(p.x - d.x, p.y - d.y) < 4, image != nil, space.width > 0 else { return }
+        if picksPoint {
+            let at = spacePoint(p)
+            if CGRect(origin: .zero, size: space).contains(at) { onPick?(at) }
+            return
+        }
         guard acceptsClick?() ?? true else { return }
         if !isFit {
             fit()

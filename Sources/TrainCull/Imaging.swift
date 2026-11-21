@@ -104,15 +104,43 @@ enum Imaging {
     /// Renders the raw with Apple's built-in decoder and the frame's adjustments.
     /// `scale` below 1 gives a quick smaller render for live feedback while a slider moves.
     static func renderRaw(_ url: URL, _ values: [String: Float] = [:], scale: Float = 1) -> CGImage? {
+        renderRawReading(url, values, scale: scale).image
+    }
+
+    /// The same render, and every control's value as Apple's filter held it once the values
+    /// were set: what Apple actually used, after any clamping of its own.
+    static func renderRawReading(_ url: URL, _ values: [String: Float] = [:], scale: Float = 1) -> (image: CGImage?, readBack: [String: Float]) {
         autoreleasepool {
-            guard let filter = CIRAWFilter(imageURL: url) else { return nil }
+            guard let filter = CIRAWFilter(imageURL: url) else { return (nil, [:]) }
             if scale < 1 { filter.scaleFactor = max(scale, 0.05) }
             Adjust.apply(values, to: filter)
-            guard let decoded = filter.outputImage else { return nil }
+            guard let decoded = filter.outputImage else { return (nil, [:]) }
+            var readBack = Adjust.properties(filter)
+            // Saturation and vibrance are Core Image parameters: what was asked for is what is used.
+            readBack["saturation"] = values["saturation"] ?? 1
+            readBack["vibrance"] = values["vibrance"] ?? 0
             let out = Adjust.finish(decoded, values)
             let e = decoded.extent
-            if e.isInfinite || e.isEmpty { return nil }
-            return pixels(out, from: e)
+            if e.isInfinite || e.isEmpty { return (nil, readBack) }
+            return (pixels(out, from: e), readBack)
+        }
+    }
+
+    /// White balance by point: Apple's temperature and tint that make the colour at `point`
+    /// neutral. The point is in pixels of the upright full-size picture, origin at the top
+    /// left (the large image's own coordinates); Core Image counts from the bottom left.
+    static func neutral(at point: CGPoint, _ url: URL, _ values: [String: Float]) -> (temperature: Float, tint: Float, location: CGPoint)? {
+        autoreleasepool {
+            guard let filter = CIRAWFilter(imageURL: url) else { return nil }
+            var others = values
+            others["temperature"] = nil
+            others["tint"] = nil
+            Adjust.apply(others, to: filter)
+            guard let e = filter.outputImage?.extent, !e.isInfinite, !e.isEmpty else { return nil }
+            let location = CGPoint(x: e.minX + point.x, y: e.maxY - point.y)
+            filter.neutralLocation = location
+            _ = filter.outputImage
+            return (filter.neutralTemperature, filter.neutralTint, location)
         }
     }
 

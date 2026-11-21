@@ -118,6 +118,13 @@ final class Session: ObservableObject {
     /// The current frame's changed controls, and what Apple's decoder uses by default for it.
     @Published var values: [String: Float] = [:]
     @Published var defaults: [String: Float] = [:]
+    /// Apple's is…Supported flags for the current frame, and its decoders.
+    @Published var supported: [String: Bool] = [:]
+    @Published var decoderLine = DecoderLine.label("")
+    /// White balance by point: the next click on the image picks the neutral point. Esc cancels.
+    @Published var pickingNeutral = false {
+        didSet { slots[0].view?.picksPoint = pickingNeutral }
+    }
 
     let formats = Formats()
     /// The main window, so keys typed in another window (Diagnostics) are left alone.
@@ -139,6 +146,22 @@ final class Session: ObservableObject {
     /// while a draft was still being made.
     private var renderTrigger = "selection"
     private var draftsSkipped = 0
+    /// One change to a control, waiting for the frame that shows it so its line can be logged.
+    private struct Change {
+        let file: String
+        let frame: Int
+        let key: String
+        let old: Float
+        let new: Float
+        let isDragEnd: Bool
+        let cause: String
+        let at: CFAbsoluteTime
+        /// The edit this change is part of: the full render for this edit, or a later one, shows it.
+        let editToken: Int
+    }
+    private var pendingChanges: [Change] = []
+    /// A slider's value when its drag began, by control key.
+    private var dragStart: [String: Float] = [:]
     private var fullSize: [Int: CGSize] = [:]
     private var editToken = 0
     private var valuesToken = 0
@@ -314,7 +337,9 @@ final class Session: ObservableObject {
             for n in after where !n.hasPrefix(".") && n.lowercased().hasSuffix(".xmp") {
                 sidecars[String(n.dropLast(4)).lowercased()] = n
             }
-            let raws = after.filter { formats.isRaw($0) }.sorted { $0.caseInsensitiveCompare($1) == .orderedAscending }
+            // The launch check's made-up DNG: Apple's decoder opens it, but no recipe lists it.
+            let dngToo = UserDefaults.standard.bool(forKey: "TCListDNG")
+            let raws = after.filter { formats.isRaw($0) || (dngToo && !$0.hasPrefix(".") && $0.lowercased().hasSuffix(".dng")) }.sorted { $0.caseInsensitiveCompare($1) == .orderedAscending }
             let items: [FrameItem] = raws.enumerated().map { i, name in
                 let fileURL = url.appendingPathComponent(name)
                 let base = fileURL.deletingPathExtension().lastPathComponent
@@ -341,6 +366,9 @@ final class Session: ObservableObject {
                 if UserDefaults.standard.bool(forKey: "TCCompare"), items.count > 1 { self.commandClick(1, cause: "programmatic (launch check)") }
                 // For the automated build's launch check: Edit mode, to measure its memory.
                 if UserDefaults.standard.bool(forKey: "TCEdit") { self.setEditing(true, cause: "programmatic (launch check)") }
+                if UserDefaults.standard.bool(forKey: "TCScript") {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 4) { self.runLaunchScript() }
+                }
             }
         }
     }
@@ -461,6 +489,10 @@ final class Session: ObservableObject {
             }
         }
         view.acceptsClick = { [weak self] in self?.clicked(index) ?? true }
+        if index == 0 {
+            view.picksPoint = pickingNeutral
+            view.onPick = { [weak self] point in self?.pickNeutral(at: point) }
+        }
         view.onUserZoom = { [weak self] kind in self?.userZoomed(index, kind) }
         if frame(for: index) != nil { show(index) }
     }
@@ -530,13 +562,23 @@ final class Session: ObservableObject {
             introduced.insert(item.id)
             Log.note("image", "\(item.name): \(shot.label())\(shot.lens.map { " · \($0)" } ?? "")")
         }
+        flushPendingChanges("another frame was selected first")
+        pickingNeutral = false
         values = item.adjust
         defaults = [:]
+        supported = [:]
+        decoderLine = .label("")
         let token = valuesToken
-        let url = item.url
+        let url = item.url, name = item.name
         heroQueue.async {
-            let found = Adjust.defaults(url)
-            DispatchQueue.main.async { if token == self.valuesToken { self.defaults = found } }
+            let facts = Adjust.facts(url)
+            if let facts = facts { Session.logFacts(facts, name) }
+            DispatchQueue.main.async {
+                guard token == self.valuesToken else { return }
+                self.defaults = facts?.defaults ?? [:]
+                self.supported = facts?.supported ?? [:]
+                self.decoderLine = facts.map { RawPanel.decoderLine($0.decoders) } ?? .label("")
+            }
         }
     }
 
@@ -797,6 +839,7 @@ final class Session: ObservableObject {
         guard on != editing else { return }
         if on, compare != nil { endCompare() }
         editing = on
+        if !on { pickingNeutral = false }
         Log.note("edit", "edit mode \(on ? "on" : "off") · cause: \(cause)")
         // Entering Edit mode only swaps the thumbnails for sliders; this reading shows it costs nothing.
         if on { MemoryMonitor.mark("entering Edit mode") }
@@ -819,9 +862,14 @@ final class Session: ObservableObject {
 
     func isChanged(_ control: Control) -> Bool { values[control.key] != nil }
 
+    /// Greyed out with a red dot when Apple says the control isn't supported for this file.
+    func state(_ control: Control) -> ControlState { RawPanel.state(control, supported: supported) }
+
     func setValue(_ control: Control, _ new: Float) {
-        guard let item = current else { return }
-        renderTrigger = "\(control.title) drag"
+        guard let item = current, state(control).enabled, !defaults.isEmpty else { return }
+        let old = value(control)
+        let dragging = dragStart[control.key] != nil
+        renderTrigger = dragging ? "\(control.title) drag" : "\(control.title) set"
         let span = control.range.upperBound - control.range.lowerBound
         if let d = defaults[control.key], abs(d - new) <= span * 0.0005 {
             values[control.key] = nil
@@ -829,20 +877,130 @@ final class Session: ObservableObject {
             values[control.key] = new
         }
         edited(item)
+        // A drag is logged once, when it ends; anything else at once.
+        if !dragging { noteChange(control, old: old, new: value(control), isDragEnd: false, cause: "set") }
+    }
+
+    /// A slider's drag began or ended (a click on its track counts as a short drag).
+    func dragChanged(_ control: Control, began: Bool) {
+        if began {
+            dragStart[control.key] = value(control)
+        } else if let old = dragStart.removeValue(forKey: control.key) {
+            noteChange(control, old: old, new: value(control), isDragEnd: true, cause: "drag")
+        }
     }
 
     func reset(_ control: Control) {
         guard let item = current, values[control.key] != nil else { return }
+        let old = value(control)
         renderTrigger = "\(control.title) reset"
         values[control.key] = nil
         edited(item)
+        noteChange(control, old: old, new: value(control), isDragEnd: false, cause: "reset")
     }
 
+    /// Every control, old and new, back to Apple's default for this file.
     func resetAll() {
         guard let item = current, !values.isEmpty else { return }
+        let moved = Adjust.controls.filter { values[$0.key] != nil }.map { ($0, value($0)) }
         renderTrigger = "reset all"
         values = [:]
         edited(item)
+        for (control, old) in moved { noteChange(control, old: old, new: value(control), isDragEnd: false, cause: "reset all") }
+    }
+
+    /// Turns the white-balance eyedropper on or off.
+    func toggleNeutralPick() {
+        guard editing, current != nil else { return }
+        pickingNeutral.toggle()
+        Log.note("edit", "white balance by point \(pickingNeutral ? "on: click a neutral point" : "cancelled")")
+    }
+
+    /// White balance by point: Apple works out the temperature and tint that make the clicked
+    /// point neutral, and they become the frame's Temperature and Tint.
+    func pickNeutral(at point: CGPoint) {
+        guard pickingNeutral, let item = current, let temperature = Adjust.control("temperature"), let tint = Adjust.control("tint") else { return }
+        pickingNeutral = false
+        let url = item.url, adjust = item.adjust, frame = heroToken
+        let started = CFAbsoluteTimeGetCurrent()
+        rawQueue.async {
+            let found = Imaging.neutral(at: point, url, adjust)
+            DispatchQueue.main.async {
+                guard frame == self.heroToken, self.current === item else { return }
+                guard let found = found else {
+                    Log.warn("\(item.name): white balance by point failed at \(Int(point.x)), \(Int(point.y))")
+                    self.say("Apple's decoder couldn't set the white balance from that point.")
+                    return
+                }
+                Log.note("edit", "\(item.name): white balance by point at \(Int(point.x)), \(Int(point.y)) (Core Image \(Int(found.location.x)), \(Int(found.location.y)))"
+                    + " → \(Int(found.temperature.rounded())) K, tint \(String(format: "%+.1f", found.tint)) in \(Log.seconds(since: started))",
+                    fields: ["file": item.name, "x": Double(point.x), "y": Double(point.y), "temperature": Double(found.temperature), "tint": Double(found.tint)])
+                let oldT = self.value(temperature), oldTint = self.value(tint)
+                self.renderTrigger = "white balance by point"
+                self.values["temperature"] = found.temperature
+                self.values["tint"] = found.tint
+                self.edited(item)
+                self.noteChange(temperature, old: oldT, new: found.temperature, isDragEnd: false, cause: "white balance by point")
+                self.noteChange(tint, old: oldTint, new: found.tint, isDragEnd: false, cause: "white balance by point")
+            }
+        }
+    }
+
+    // MARK: The change log
+
+    private func noteChange(_ control: Control, old: Float, new: Float, isDragEnd: Bool, cause: String) {
+        guard let item = current else { return }
+        pendingChanges.append(Change(file: item.name, frame: item.id, key: control.key, old: old, new: new, isDragEnd: isDragEnd,
+                                     cause: cause, at: CFAbsoluteTimeGetCurrent(), editToken: editToken))
+    }
+
+    /// The full render for edit `token` is on screen: every change it shows gets its line.
+    private func changesShown(frame: Int, token: Int, readBack: [String: Float], peak: Double) {
+        let now = CFAbsoluteTimeGetCurrent()
+        let shown = pendingChanges.filter { $0.frame == frame && $0.editToken <= token }
+        pendingChanges.removeAll { $0.frame == frame && $0.editToken <= token }
+        for change in shown { logChange(change, readBack: readBack[change.key], renderMs: (now - change.at) * 1000, peak: peak) }
+    }
+
+    /// Changes whose frame never reached the screen (another frame was chosen first).
+    private func flushPendingChanges(_ why: String) {
+        let left = pendingChanges
+        pendingChanges = []
+        for change in left { logChange(change, readBack: nil, renderMs: nil, peak: nil, note: why) }
+    }
+
+    private func logChange(_ c: Change, readBack: Float?, renderMs: Double?, peak: Double?, note: String? = nil) {
+        guard let control = Adjust.control(c.key) else { return }
+        let appleDefault = defaults[c.key]
+        func json(_ v: Float?) -> Any { v.map { Double($0) } ?? NSNull() }
+        let fields: [String: Any] = [
+            "file": c.file, "control": control.title, "appleProperty": control.appleProperty,
+            "oldValue": Double(c.old), "newValue": Double(c.new), "appleDefault": json(appleDefault), "readBackValue": json(readBack),
+            "renderMs": renderMs.map { $0 as Any } ?? NSNull(), "peakMemoryMB": peak.map { $0 as Any } ?? NSNull(),
+            "zoom": zoomTexts[0], "isDragEnd": c.isDragEnd, "cause": c.cause,
+        ]
+        let text = "\(c.file): \(control.title) \(control.show(c.old)) → \(control.show(c.new)) (\(c.cause))"
+            + " · Apple default \(appleDefault.map(control.show) ?? "unknown")"
+            + " · read back \(readBack.map { String(format: "%.3f", $0) } ?? "—")"
+            + (renderMs.map { String(format: " · on screen after %.0f ms", $0) } ?? "")
+            + (peak.map { String(format: " · peak %.0f MB", $0) } ?? "")
+            + " · zoom \(zoomTexts[0])\(c.isDragEnd ? " · drag end" : "")\(note.map { " · \($0)" } ?? "")"
+        Log.note("change", text, fields: fields)
+    }
+
+    /// One line per selected frame: every control's Apple default and supported flag.
+    private static func logFacts(_ facts: RawFacts, _ name: String) {
+        var controls: [String: Any] = [:]
+        var parts: [String] = []
+        for c in Adjust.controls where c.kind != .neutralPoint {
+            let d = facts.defaults[c.key]
+            let flag: Any = c.supportProperty.map { facts.supported[$0] ?? false } ?? "n/a"
+            controls[c.title] = ["appleProperty": c.appleProperty, "default": d.map { Double($0) as Any } ?? NSNull(), "supported": flag]
+            let shown = d.map { String(format: "%.3f", $0) } ?? "?"
+            parts.append("\(c.title) \(shown)\(c.supportProperty.map { facts.supported[$0] == false ? " (not supported)" : "" } ?? "")")
+        }
+        Log.note("raw", "\(name): decoder \(facts.decoder) of [\(facts.decoders.joined(separator: ", "))] · Apple's defaults: \(parts.joined(separator: " · "))",
+                 fields: ["file": name, "decoder": facts.decoder, "decoders": facts.decoders, "controls": controls])
     }
 
     private func edited(_ item: FrameItem) {
@@ -861,7 +1019,7 @@ final class Session: ObservableObject {
                 DispatchQueue.main.sync { wanted = token == self.editToken && frame == self.heroToken }
                 guard wanted else { return }
                 let meter = JobMeter()
-                let rendered = Imaging.renderRaw(url, adjust)
+                let (rendered, readBack) = Imaging.renderRawReading(url, adjust)
                 let measured = meter.finish()
                 guard let image = rendered else {
                     Log.warn("\(name): the full render after an edit failed · trigger: \(trigger)")
@@ -881,6 +1039,8 @@ final class Session: ObservableObject {
                     self.hero?.show(image, space: CGSize(width: image.width, height: image.height), newFrame: false)
                     // The image is the raw itself again, even if the edit came before the first render.
                     self.setState(0, "Raw")
+                    let peak = ((measured.fields["memory_peak"] as? Double) ?? 0) / 1_048_576
+                    self.changesShown(frame: id, token: token, readBack: readBack, peak: peak)
                 }
             }
         }
@@ -1142,6 +1302,71 @@ final class Session: ObservableObject {
         }
     }
 
+    // MARK: The launch check's script
+
+    /// For the automated build only (`-TCScript YES` with the made-up DNG): twenty-odd changes
+    /// across old and new controls, two of them drags, a white balance by point on the grey
+    /// patch and a Reset All, each a moment apart so its render reaches the screen.
+    private func runLaunchScript() {
+        enum Step {
+            case set(String, (Float) -> Float)
+            case drag(String, [Float])
+            case reset(String)
+            case pick
+            case resetAll
+        }
+        let steps: [Step] = [
+            .set("exposure", { _ in 0.5 }), .drag("shadowBoost", [1.0, 1.2, 1.5]), .set("highlightRecovery", { 1 - $0 }),
+            .set("baselineExposure", { $0 + 1 }), .set("temperature", { _ in 4500 }), .set("tint", { _ in 10 }),
+            .set("gamutMapping", { 1 - $0 }), .set("lensCorrection", { 1 - $0 }), .drag("exposure", [0.6, 0.8, 1.0]),
+            .set("saturation", { _ in 1.3 }), .set("vibrance", { _ in 0.3 }), .set("contrast", { _ in 0.5 }),
+            .set("sharpness", { _ in 0.6 }), .set("detail", { _ in 1.5 }), .set("luminanceNoise", { _ in 0.5 }),
+            .set("colorNoise", { _ in 0.5 }), .set("moire", { _ in 0.5 }), .set("boost", { _ in 0.6 }),
+            .set("shadowBias", { _ in 0.5 }), .set("localToneMap", { _ in 0.5 }), .reset("exposure"), .pick, .resetAll,
+        ]
+        Log.note("script", "launch-check script: \(steps.count) steps")
+        var at = 0.0
+        for (n, step) in steps.enumerated() {
+            DispatchQueue.main.asyncAfter(deadline: .now() + at) {
+                switch step {
+                case let .set(key, to):
+                    guard let c = Adjust.control(key) else { return }
+                    if !self.state(c).enabled {
+                        Log.note("script", "step \(n + 1): \(c.title) skipped (not supported for this file)")
+                        return
+                    }
+                    Log.note("script", "step \(n + 1): set \(c.title)")
+                    self.setValue(c, to(self.value(c)))
+                case let .drag(key, through):
+                    guard let c = Adjust.control(key) else { return }
+                    Log.note("script", "step \(n + 1): drag \(c.title) through \(through)")
+                    self.dragChanged(c, began: true)
+                    for (i, v) in through.enumerated() {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1 * Double(i + 1)) {
+                            self.setValue(c, v)
+                            if i == through.count - 1 { self.dragChanged(c, began: false) }
+                        }
+                    }
+                case let .reset(key):
+                    guard let c = Adjust.control(key) else { return }
+                    Log.note("script", "step \(n + 1): reset \(c.title)")
+                    self.reset(c)
+                case .pick:
+                    guard let space = self.slots[0].view?.space, space.width > 0 else { return }
+                    let patch = SyntheticDng.layout(width: Int(space.width), height: Int(space.height)).greyPatch
+                    Log.note("script", "step \(n + 1): white balance by point on the grey patch")
+                    self.pickingNeutral = true
+                    self.pickNeutral(at: CGPoint(x: patch.centreX, y: patch.centreY))
+                case .resetAll:
+                    Log.note("script", "step \(n + 1): Reset All")
+                    self.resetAll()
+                }
+            }
+            at += 1.5
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + at + 1) { Log.note("script", "launch-check script finished") }
+    }
+
     // MARK: Keys
 
     /// Only the shortcuts the core actions need. Returns true when the key was used.
@@ -1158,7 +1383,12 @@ final class Session: ObservableObject {
         case 126, 125: // up, down: only where one large image fills the view
             if compare == nil { nudgeRating(event.keyCode == 126 ? 1 : -1) }
             return true
-        case 53: // esc: back one level. Zoom, then full screen, then the side-by-side view.
+        case 53: // esc: back one level. The eyedropper, then zoom, then full screen, then the side-by-side view.
+            if pickingNeutral {
+                pickingNeutral = false
+                Log.note("edit", "white balance by point cancelled (Esc)")
+                return true
+            }
             let views = compare == nil ? [slots[0].view] : slots.map { $0.view }
             if views.contains(where: { $0?.isZoomed == true }) {
                 for view in views { view?.fit() }
