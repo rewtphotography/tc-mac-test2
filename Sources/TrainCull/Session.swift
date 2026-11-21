@@ -953,7 +953,10 @@ final class Session: ObservableObject {
         if !on { pickingNeutral = false }
         Log.note("edit", "edit mode \(on ? "on" : "off") · cause: \(cause)")
         // Entering Edit mode only swaps the thumbnails for sliders; this reading shows it costs nothing.
-        if on { MemoryMonitor.mark("entering Edit mode") }
+        if on {
+            MemoryMonitor.mark("entering Edit mode")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { self.prewarmDraft() }
+        }
     }
 
     private func cache(_ id: Int, _ values: [String: Float], _ image: CGImage) {
@@ -1281,12 +1284,20 @@ final class Session: ObservableObject {
                           "renderMs": frame.renderMs, "trigger": trigger, "tuning": tuning.fields])
         changesShown(frame: item.id, token: edit, readBack: frame.readBack, peak: frame.peakBytes / 1_048_576)
         if !firstRenderLogged {
+            prewarmDraft()
             firstRenderLogged = true
             let ms = (CFAbsoluteTimeGetCurrent() - selectionStarted) * 1000
             Log.note("render", "\(item.name): first raw render on screen \(String(format: "%.0f", ms)) ms after selecting · Apple raw filters made: \(frame.creations)",
                      fields: ["file": item.name, "timeToFirstRawRenderMs": ms, "filterCreations": frame.creations, "tuning": tuning.fields])
         }
         if let d = drag, d.released != nil, frame.request.values == item.adjust { finishDrag(d, settled: frame, item: item) }
+    }
+
+    /// In Edit mode, readies the draft filter once the frame has settled.
+    private func prewarmDraft() {
+        guard editing, compare == nil, let item = current, let view = slots[0].view, PreviewTuning.current.draftMode else { return }
+        let px = view.pixelSize
+        rendererFor(item).prewarm(item.adjust, viewLongEdge: max(px.width, px.height))
     }
 
     /// One line per drag, once its settled render is on screen.

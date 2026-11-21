@@ -88,7 +88,16 @@ public final class LogFiles {
     /// the fields if they can be written as JSON.
     func jsonLine(_ area: String, _ message: String, level: Level, fields: [String: Any]?, at now: Date) -> Data? {
         var event: [String: Any] = ["ts": stamp.string(from: now), "level": level.rawValue, "category": area, "message": message]
-        if let fields = fields, JSONSerialization.isValidJSONObject(fields) { event["fields"] = fields }
+        if let fields = fields {
+            if JSONSerialization.isValidJSONObject(fields) {
+                event["fields"] = fields
+            } else {
+                // Keep the fields JSON can hold, and name the ones it can't (a NaN, a date…).
+                let bad = fields.keys.filter { !JSONSerialization.isValidJSONObject([$0: fields[$0]!]) }.sorted()
+                event["fields"] = fields.filter { !bad.contains($0.key) }
+                event["invalidFields"] = bad
+            }
+        }
         return try? JSONSerialization.data(withJSONObject: event, options: [.sortedKeys])
     }
 

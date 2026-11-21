@@ -9,9 +9,9 @@ struct PreviewTuning {
     static let settleChoices: [Double] = [0.1, 0.25, 0.4, 0.75, 1.0]
     static let keys = (settle: "TCPreviewSettleDelay", draft: "TCPreviewDraftMode", viewSize: "TCPreviewViewSizeSettle",
                        region: "TCPreviewVisibleRegion", legacy: "TCPreviewLegacy")
-    /// View-size settled render at fit: off, because it failed test C3b (mean 0.84, max 40 levels
-    /// against the export made the same size; see the notes).
-    static let viewSizeSettleDefault = false
+    /// View-size settled render at fit (Core Image's Lanczos on the full-resolution decode): on
+    /// only while test C3b passes; see the notes.
+    static let viewSizeSettleDefault = true
 
     /// Seconds from the last change (or a drag's release) to the settled render.
     var settleDelay: Double
@@ -102,6 +102,10 @@ final class PreviewRenderer {
     // Only touched on `queue`.
     private var filter: CIRAWFilter?
     private var applied: [String: Float] = [:]
+    /// The second filter, for quick frames at fit: always in Apple's draft mode at the view's
+    /// size, so a drag never makes the main filter decode again at another size or mode.
+    private var draftFilter: CIRAWFilter?
+    private var draftApplied: [String: Float] = [:]
     private var fullSize = CGSize.zero
     private var creations = 0
     // Only touched on the main thread.
@@ -137,6 +141,23 @@ final class PreviewRenderer {
             let size = self.fullSize
             DispatchQueue.main.async { done(facts, size) }
         }
+    }
+
+    /// Readies the draft filter in the background, so the first frame of a drag at fit doesn't
+    /// pay for Apple's draft decode (Edit mode only). Main thread.
+    func prewarm(_ values: [String: Float], viewLongEdge: CGFloat) {
+        guard !legacy, isIdle else { return }
+        submit(Request(seq: 0, values: values, want: .whole(viewLongEdge: viewLongEdge), draft: true, requested: CFAbsoluteTimeGetCurrent(),
+                       quick: true)) { _ in }
+    }
+
+    /// A picture made smaller by Core Image's Lanczos filter, its corner kept at the origin.
+    static func lanczos(_ image: CIImage, _ scale: Double) -> CIImage {
+        let e = image.extent
+        let moved = image.transformed(by: CGAffineTransform(translationX: -e.minX, y: -e.minY))
+        let small = moved.applyingFilter("CILanczosScaleTransform", parameters: [kCIInputScaleKey: scale, kCIInputAspectRatioKey: 1.0])
+        let size = CGRect(x: 0, y: 0, width: (e.width * scale).rounded(), height: (e.height * scale).rounded())
+        return small.cropped(to: size)
     }
 
     /// Renders at once on the renderer's queue and waits (the tests).
@@ -188,10 +209,30 @@ final class PreviewRenderer {
         return f
     }
 
+    /// The draft filter, with only what changed set on it (a fresh one if a control went back
+    /// to its default).
+    private func preparedDraft(_ values: [String: Float]) -> CIRAWFilter? {
+        if draftFilter == nil || draftApplied.keys.contains(where: { values[$0] == nil }) {
+            draftFilter = CIRAWFilter(imageURL: url)
+            creations += 1
+            draftApplied = [:]
+            draftFilter?.isDraftModeEnabled = true
+        }
+        guard let f = draftFilter else { return nil }
+        Adjust.apply(values.filter { draftApplied[$0.key] != $0.value }, to: f)
+        draftApplied = values
+        return f
+    }
+
     private func render(_ r: Request) -> Frame? {
         let start = CFAbsoluteTimeGetCurrent()
         let meter = JobMeter()
-        guard let f = prepared(r.values), fullSize.width > 0 else { _ = meter.finish(); return nil }
+        // Quick frames at fit in draft mode go to the draft filter.
+        var useDraftFilter = false
+        if !legacy, r.quick, r.draft, case .whole(viewLongEdge: _?) = r.want { useDraftFilter = true }
+        if useDraftFilter, filter == nil { _ = prepared([:]) } // the main filter gives the frame's size
+        let chosen = useDraftFilter ? preparedDraft(r.values) : prepared(r.values)
+        guard let f = chosen, fullSize.width > 0 else { _ = meter.finish(); return nil }
         // Resolve what the view wants into a scale and, for a region, a rectangle of the frame.
         var part = CGRect(origin: .zero, size: fullSize)
         let scale: Float
@@ -205,12 +246,21 @@ final class PreviewRenderer {
         }
         // Draft mode is only ever turned on, and back off, here: a filter that never drafted is
         // left as Apple made it.
-        if f.isDraftModeEnabled != r.draft { f.isDraftModeEnabled = r.draft }
-        if f.scaleFactor != scale { f.scaleFactor = scale }
-        guard let decoded = f.outputImage else { _ = meter.finish(); return nil }
-        let e = decoded.extent
+        // A settled picture at the view's size is made from the full-resolution decode, made
+        // smaller by Core Image (Lanczos), so it matches the export made smaller the same way.
+        let downscale = !r.quick && scale < 1 && { if case .whole = r.want { return true }; return false }()
+        if !useDraftFilter, f.isDraftModeEnabled != r.draft { f.isDraftModeEnabled = r.draft }
+        let filterScale: Float = downscale ? 1 : scale
+        if f.scaleFactor != filterScale { f.scaleFactor = filterScale }
+        guard let decodedRaw = f.outputImage else { _ = meter.finish(); return nil }
+        var decoded = decodedRaw
+        var out = Adjust.finish(decodedRaw, r.values)
+        if downscale {
+            out = PreviewRenderer.lanczos(out, Double(scale))
+            decoded = PreviewRenderer.lanczos(decodedRaw, Double(scale))
+        }
+        let e = decoded.extent.integral
         if e.isInfinite || e.isEmpty { _ = meter.finish(); return nil }
-        let out = Adjust.finish(decoded, r.values)
         let k = e.width / fullSize.width // rendered pixels per full-size pixel
         var from = e
         var rect = CGRect(origin: .zero, size: fullSize)

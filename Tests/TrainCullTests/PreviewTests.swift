@@ -53,6 +53,14 @@ final class PreviewTests: XCTestCase {
         return try raw8(out)
     }
 
+    /// A picture made smaller by the renderer's Lanczos step, in 8-bit Display P3 by Core Image.
+    private func lanczosP3(_ image: CGImage, _ scale: Double, _ w: Int, _ h: Int) throws -> (w: Int, h: Int, bytes: [UInt8]) {
+        let space = try XCTUnwrap(CGColorSpace(name: CGColorSpace.displayP3))
+        let small = PreviewRenderer.lanczos(CIImage(cgImage: image), scale)
+        let out = try XCTUnwrap(Imaging.ciContext.createCGImage(small, from: CGRect(x: 0, y: 0, width: w, height: h), format: .RGBA8, colorSpace: space))
+        return try raw8(out)
+    }
+
     /// The bytes of an 8-bit picture as it is (no redraw).
     private func raw8(_ image: CGImage) throws -> (w: Int, h: Int, bytes: [UInt8]) {
         let data = try XCTUnwrap(image.dataProvider?.data)
@@ -115,9 +123,12 @@ final class PreviewTests: XCTestCase {
         let export = try exportRender(values)
         let small = try dragThenSettle(r, fit, fit)
         let a = try raw8(small.image)
-        let on = diff(a, try p3(export, width: a.w, height: a.h))
+        // The export made smaller the same way: Core Image's Lanczos, then 8-bit Display P3.
+        let exportSmall = try lanczosP3(export, Double(small.scale), a.w, a.h)
+        let on = diff(a, exportSmall)
+        let cg = diff(a, try p3(export, width: a.w, height: a.h))
         let passOn = on.mean <= 0.5 && on.max <= 4
-        print("SPEC-RESULT C3b settled = export at fit, view-size settle ON (DNG): \(a.w)×\(a.h) (scale \(String(format: "%.3f", small.scale))); mean \(String(format: "%.3f", on.mean)), max \(on.max) levels — \(passOn ? "PASS" : "FAIL")")
+        print("SPEC-RESULT C3b settled = export at fit, view-size settle ON (DNG): \(a.w)×\(a.h) (Lanczos at \(String(format: "%.3f", small.scale))); mean \(String(format: "%.3f", on.mean)), max \(on.max) levels (against the export made smaller by Core Graphics instead: mean \(String(format: "%.3f", cg.mean)), max \(cg.max)) — \(passOn ? "PASS" : "FAIL")")
         let full = try XCTUnwrap(r.renderNow(request(99, values, .whole(viewLongEdge: nil), draft: false)))
         let exportP3 = try p3ci(export)
         let off = diff(try raw8(full.image), exportP3)
@@ -179,7 +190,7 @@ final class PreviewTests: XCTestCase {
         let part = try XCTUnwrap(alpha2.cropping(to: zoomed.rect.integral))
         let at100 = diff(try raw8(zoomed.image), try raw8(part))
         let a = try raw8(fit.image)
-        let atFit = PreviewTuning.viewSizeSettleDefault ? diff(a, try p3(alpha2, width: a.w, height: a.h)) : diff(a, try raw8(alpha2))
+        let atFit = PreviewTuning.viewSizeSettleDefault ? diff(a, try lanczosP3(alpha2, Double(fit.scale), a.w, a.h)) : diff(a, try raw8(alpha2))
         XCTAssertEqual(at100.max, 0)
         let fitPass = PreviewTuning.viewSizeSettleDefault ? (atFit.mean <= 0.5 && atFit.max <= 4) : atFit.max == 0
         XCTAssertTrue(fitPass)

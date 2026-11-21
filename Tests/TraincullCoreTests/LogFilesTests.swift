@@ -64,9 +64,9 @@ final class LogFilesTests: XCTestCase {
         let fields = try XCTUnwrap(cache?["fields"] as? [String: Any])
         XCTAssertEqual(fields["bytes"] as? Int, 251_658_240)
         XCTAssertEqual(fields["frame"] as? String, "DSC01234.ARW")
-        // Fields JSON can't hold are left out; the event is still written.
+        // Fields JSON can't hold are left out and named; the event and its other fields are still written.
         let job = try JSONSerialization.jsonObject(with: Data(jsonLines[5].utf8)) as? [String: Any]
-        XCTAssertNil(job?["fields"])
+        XCTAssertEqual(job?["invalidFields"] as? [String], ["date"])
     }
 
     /// Twenty sessions are kept, each as a .log and its .jsonl.
