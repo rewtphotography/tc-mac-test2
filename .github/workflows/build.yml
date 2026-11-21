@@ -85,6 +85,18 @@ jobs:
           echo "Building TrainCull $VERSION alpha $N (build ${{ github.run_number }}), tag $TAG"
       - name: Build the app
         run: scripts/make-app.sh "${{ steps.number.outputs.alpha }}" "${{ github.run_number }}"
+      # B1: the same app built with the debug tools switched off compiles, has no Debug menu and
+      # doesn't contain the tools; the normal build does.
+      - name: Without the debug tools (B1)
+        run: |
+          TC_ALPHA_DEBUG=0 swift build -c release --arch arm64 --product TrainCull --build-path .build-nodebug --manifest-cache local
+          OFF="$(TC_ALPHA_DEBUG=0 swift build -c release --arch arm64 --build-path .build-nodebug --manifest-cache local --show-bin-path)/TrainCull"
+          ON=build/TrainCull.app/Contents/MacOS/TrainCull
+          count() { { strings "$1" | grep -c -E "Run Test Script|Export Debug Package"; nm "$1" | grep -c -E "DebugRunner|DebugTools|ZipWriter|DebugScriptReader"; } | paste -sd+ - | bc; }
+          echo "flag off: $(count "$OFF") debug strings and symbols; flag on: $(count "$ON")"
+          if [ "$(count "$OFF")" = "0" ] && [ "$(count "$ON")" != "0" ]; then R=PASS; else R=FAIL; fi
+          echo "- SPEC-RESULT B1 severability: flag off compiles; Debug menu strings and debug-tool symbols in it: $(count "$OFF"); in the normal build: $(count "$ON") — $R" | tee -a "$GITHUB_STEP_SUMMARY"
+          [ "$R" = PASS ]
       - name: Size of the download
         run: |
           BYTES=$(stat -f%z build/TrainCull.dmg)
@@ -110,6 +122,30 @@ jobs:
           shoot launch-edit fixture 15 -TCEdit YES
           # T12: the made-up DNG in Edit mode, driven by the app's launch-check script.
           shoot launch-script fixture-dng 50 -TCListDNG YES -TCEdit YES -TCScript YES
+          # B3, B12, B13: the debug tools on the made-up DNG, with a sidecar holding edits and a
+          # corrupted file beside it: a test script, two manual exports; then, after a restart,
+          # one more export zoomed in.
+          mkdir -p build/fixture-debug
+          cp build/fixture-dng/SYNTHETIC.dng build/fixture-debug/
+          head -c 4096 build/fixture-dng/SYNTHETIC.dng > build/fixture-debug/ZZ-CORRUPT.dng  # listed after SYNTHETIC.dng, which opens first
+          printf '%s' '<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?><x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description rdf:about="" xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/" xmlns:traincull="http://ns.traincull.app/1.0/" crs:Exposure2012="+0.70" traincull:ShadowBoost="1.300"/></rdf:RDF></x:xmpmeta><?xpacket end="w"?>' > build/fixture-debug/SYNTHETIC.xmp
+          cat > build/selftest.json <<'EOF'
+          {
+            "scriptNumber": 7,
+            "name": "launch-check",
+            "index": ["0701: exposure +0.5, crop", "0702: Shadow bias min", "0703: Local tone map (unsupported here)", "0704: corrupted file"],
+            "cases": [
+              { "case": 1, "file": "SYNTHETIC.dng", "set": { "exposure": 0.5 }, "crop": [0.1, 0.1, 0.25, 0.25] },
+              { "case": 2, "file": "SYNTHETIC.dng", "set": { "shadowBias": "min" } },
+              { "case": 3, "file": "SYNTHETIC.dng", "set": { "localToneMapAmount": 0.5 } },
+              { "case": 4, "file": "ZZ-CORRUPT.dng", "set": { "exposure": 0.2 } }
+            ]
+          }
+          EOF
+          shoot launch-debug fixture-debug 60 -TCListDNG YES -TCDebugResetCounter YES -TCDebugScript "$PWD/build/selftest.json" -TCDebugExports 2
+          shoot launch-debug-zoomed fixture-debug 30 -TCListDNG YES -TCDebugZoomedExports 1
+          shasum -a 256 build/fixture-debug/SYNTHETIC.xmp
+          ls -lR "$HOME/Pictures/TrainCull Debug" || true
           LOGS="$HOME/Library/Logs/TrainCull"
           echo "---- the app's own log ----"
           cat "$LOGS/"*.log || true
@@ -137,6 +173,45 @@ jobs:
           EOF
       # T12: the scripted session logs one structured line per change, and one line of Apple's
       # defaults when the file is selected.
+      # B3, B12, B13 from the debug tools' launch-check runs.
+      - name: Check the debug tools (B3, B12, B13)
+        run: |
+          set -o pipefail
+          python3 - "$HOME/Library/Logs/TrainCull" "$HOME/Pictures/TrainCull Debug" <<'EOF' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json, pathlib, sys, zipfile
+          logs, root = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+          events = []
+          for f in sorted(logs.glob("*.jsonl")):
+              events += [json.loads(l) for l in f.read_text().splitlines()]
+          debug = [e for e in events if e["category"] == "debug"]
+          ok = True
+          iso = [e.get("fields", {}) for e in debug if e["message"].startswith("isolation")]
+          if iso:
+              f = iso[0]
+              b3 = f["valuesBefore"] == f["valuesAfter"] and f["sidecarsBefore"] == f["sidecarsAfter"] and f["imageUnchanged"] and len(f["valuesBefore"]) > 0
+              print(f"- SPEC-RESULT B3 isolation (DNG): panel values before {f['valuesBefore']}, after {f['valuesAfter']}; sidecar hashes equal: {f['sidecarsBefore'] == f['sidecarsAfter']}; image on screen unchanged: {f['imageUnchanged']} — {'PASS' if b3 else 'FAIL'}")
+              ok &= b3
+          else:
+              print("- SPEC-RESULT B3 isolation (DNG): NOT RUN — no isolation line"); ok = False
+          tests = [e.get("fields", {}) for e in debug if "status" in e.get("fields", {})]
+          wanted = ["id", "file", "status", "zip", "zipSize", "renderMs"]
+          full = [t for t in tests if all(k in t for k in wanted)]
+          b13 = len(tests) > 0 and len(full) == len(tests)
+          print(f"- SPEC-RESULT B13 logging (DNG): {len(tests)} test lines, {len(full)} with every field ({', '.join(wanted)}): " + "; ".join(f"{t['id']} {t['status']}" for t in tests) + f" — {'PASS' if b13 else 'FAIL'}")
+          ok &= b13
+          zips = {z.name: z for z in root.glob("script-00_*/TC-test-00*.zip")}
+          contents = {n: sorted(zipfile.ZipFile(z).namelist()) for n, z in zips.items()}
+          diffs = [e.get("fields", {}) for e in debug if "screenVsFrameMeanDifference" in e.get("fields", {})]
+          b12 = (set(contents) == {"TC-test-0001.zip", "TC-test-0002.zip", "TC-test-0003.zip"}
+                 and all("screen.png" in c and "frame.png" in c and "report.json" in c for c in contents.values())
+                 and "crop.png" in contents.get("TC-test-0003.zip", []) and "crop-default.png" in contents.get("TC-test-0003.zip", [])
+                 and "crop.png" not in contents.get("TC-test-0001.zip", []))
+          print(f"- SPEC-RESULT B12 manual export (DNG): {contents}; screen.png vs the export at the same size, mean difference: "
+                + ", ".join(f"{d['id']} {d['screenVsFrameMeanDifference']:.3f} levels at {d['screenSize'][0]}×{d['screenSize'][1]}" for d in diffs)
+                + f"; output root {root} — {'PASS' if b12 else 'FAIL'}")
+          ok &= b12
+          sys.exit(0 if ok else 1)
+          EOF
       - name: Check the change log (T12)
         run: |
           set -o pipefail
@@ -183,7 +258,10 @@ jobs:
             build/launch-compare.png
             build/launch-edit.png
             build/launch-script.png
+            build/launch-debug.png
+            build/launch-debug-zoomed.png
             build/logs
+            ~/Pictures/TrainCull Debug
           if-no-files-found: ignore
 
   # A full release, not a pre-release, so that

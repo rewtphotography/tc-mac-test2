@@ -128,6 +128,17 @@ final class HeroNSView: NSView {
 
     var isZoomed: Bool { !isFit }
 
+    /// The part of the picture on screen, in its pixels (origin top left), and how many screen
+    /// pixels one picture pixel takes up there.
+    var visibleSpaceRect: CGRect {
+        let s = shownScale, c = shownCenter
+        guard s > 0 else { return .zero }
+        let r = CGRect(x: c.x - bounds.width / 2 / s, y: c.y - bounds.height / 2 / s, width: bounds.width / s, height: bounds.height / s)
+        return r.intersection(CGRect(origin: .zero, size: space))
+    }
+
+    var screenPixelsPerPicturePixel: CGFloat { shownScale * backing }
+
     /// View points per image pixel when zoomed; nil when fitted.
     var zoomScale: CGFloat? { isFit ? nil : scale }
 

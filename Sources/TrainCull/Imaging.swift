@@ -175,12 +175,21 @@ enum Imaging {
     /// The raw developed by Apple's decoder with the frame's adjustments, not yet turned into
     /// pixels, and the rectangle it covers. Exports render it at full quality.
     static func developed(_ url: URL, _ values: [String: Float]) -> (image: CIImage, extent: CGRect)? {
+        developedReading(url, values).map { ($0.image, $0.extent) }
+    }
+
+    /// The same, with every control's value as Apple's filter held it once the values were set,
+    /// and the decoder it used.
+    static func developedReading(_ url: URL, _ values: [String: Float]) -> (image: CIImage, extent: CGRect, readBack: [String: Float], decoder: String)? {
         guard let filter = CIRAWFilter(imageURL: url) else { return nil }
         Adjust.apply(values, to: filter)
         guard let decoded = filter.outputImage else { return nil }
         let e = decoded.extent
         if e.isInfinite || e.isEmpty { return nil }
-        return (Adjust.finish(decoded, values), e)
+        var readBack = Adjust.properties(filter)
+        readBack["saturation"] = values["saturation"] ?? 1
+        readBack["vibrance"] = values["vibrance"] ?? 0
+        return (Adjust.finish(decoded, values), e, readBack, filter.decoderVersion.rawValue)
     }
 
     /// Faces and eye centres in an upright image, using Apple's Vision framework. Faces are

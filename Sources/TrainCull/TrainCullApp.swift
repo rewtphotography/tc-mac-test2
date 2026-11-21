@@ -41,6 +41,9 @@ struct TrainCullApp: App {
                 DiagnosticsMenuItem()
             }
         }
+        #if TC_ALPHA_DEBUG
+        .commands { DebugCommands(session: session) } // the alpha-only Debug menu (Sources/TrainCull/AlphaDebug)
+        #endif
 
         Window("Diagnostics", id: "diagnostics") {
             DiagnosticsView()

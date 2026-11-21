@@ -69,14 +69,25 @@ enum Export {
         }
     }
 
-    /// Renders `image` to 16-bit ProPhoto RGB and writes it as a TIFF. The strips are
-    /// compressed side by side on every processor core.
-    static func writeTiff(_ image: CIImage, _ extent: CGRect, to handle: FileHandle, shot: ShotInfo?) throws {
+    /// The export's render: `image` turned into 16-bit ProPhoto RGB pixels.
+    static func render16(_ image: CIImage, _ extent: CGRect) throws -> CGImage {
         guard let space = CGColorSpace(name: CGColorSpace.rommrgb) else { throw Failure("ProPhoto RGB isn't available") }
-        let start = CFAbsoluteTimeGetCurrent()
         guard let pixels = Imaging.ciContext.createCGImage(image, from: extent, format: .RGBA16, colorSpace: space) else {
             throw Failure("the photo couldn't be rendered")
         }
+        return pixels
+    }
+
+    /// Renders `image` to 16-bit ProPhoto RGB and writes it as a TIFF. The strips are
+    /// compressed side by side on every processor core.
+    static func writeTiff(_ image: CIImage, _ extent: CGRect, to handle: FileHandle, shot: ShotInfo?) throws {
+        let start = CFAbsoluteTimeGetCurrent()
+        try writeTiff(pixels: try render16(image, extent), rendered: start, to: handle, shot: shot)
+    }
+
+    /// Writes pixels from `render16` as a TIFF.
+    static func writeTiff(pixels: CGImage, rendered start: CFAbsoluteTime, to handle: FileHandle, shot: ShotInfo?) throws {
+        guard let space = pixels.colorSpace else { throw Failure("the rendered photo has no colour space") }
         let w = pixels.width, h = pixels.height, rowBytes = pixels.bytesPerRow
         guard pixels.bitsPerComponent == 16, pixels.bitsPerPixel == 64, w > 0, h > 0,
               let data = pixels.dataProvider?.data, let base = CFDataGetBytePtr(data),

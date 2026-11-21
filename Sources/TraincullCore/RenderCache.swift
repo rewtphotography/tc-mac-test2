@@ -49,6 +49,11 @@ public struct RenderCache<Picture> {
         return .miss(evicted.contains(id) ? .evicted : .cold)
     }
 
+    /// The frame's render with exactly these edits, if kept, without counting it as shown.
+    public func peek(_ id: Int, _ values: [String: Float]) -> Picture? {
+        entries.first { $0.id == id && $0.values == values }?.picture
+    }
+
     /// Keeps a render as the most recently shown, then lets the least recently shown go until
     /// the total is within the budget. The newest is always kept, even if it alone is larger.
     /// Returns what was let go, oldest first.

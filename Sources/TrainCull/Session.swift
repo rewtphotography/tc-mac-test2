@@ -185,6 +185,16 @@ final class Session: ObservableObject {
 
     var current: FrameItem? { frames.indices.contains(selected) ? frames[selected] : nil }
 
+    /// The single view's large image.
+    var singleView: HeroNSView? { slots[0].view }
+
+    /// The full-resolution preview render of the current frame with its current edits, once it
+    /// is the one on screen (never a quick draft); nil until then.
+    func settledPreview() -> CGImage? {
+        guard compare == nil, let item = current, heroStates[0] == "Raw", !draftBusy else { return nil }
+        return rawCache.peek(item.id, item.adjust)
+    }
+
     /// The slot ratings and keys act on: the active side when comparing, else the single view.
     var activeSlot: Int { compare?.active.rawValue ?? 0 }
     var heroState: String { heroStates[activeSlot] }
