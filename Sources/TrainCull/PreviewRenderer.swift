@@ -74,8 +74,11 @@ final class PreviewRenderer {
         let seq: Int
         let values: [String: Float]
         let want: Want
+        /// Apple's draft mode for this render.
         let draft: Bool
         let requested: CFAbsoluteTime
+        /// A quick frame while a slider moves (the alpha 2 path makes them without draft mode).
+        var quick: Bool = false
     }
 
     struct Frame {
@@ -218,6 +221,8 @@ final class PreviewRenderer {
             rect = CGRect(x: (from.minX - e.minX) / k, y: (e.maxY - from.maxY) / k, width: from.width / k, height: from.height / k)
         }
         guard let image = Imaging.pixels(out, from: from) else { _ = meter.finish(); return nil }
+        // Once settled, Core Image's working buffers go: memory between drags stays low.
+        if !r.quick && !legacy { Imaging.ciContext.clearCaches() }
         var readBack = Adjust.properties(f)
         readBack["saturation"] = r.values["saturation"] ?? 1
         readBack["vibrance"] = r.values["vibrance"] ?? 0

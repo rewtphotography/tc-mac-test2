@@ -249,7 +249,8 @@ jobs:
           ok = True
           n, o = runs["new"], runs["alpha2"]
           nd, od = of(n, "drag"), of(o, "drag")
-          nsel, osel = of(n, "render")[0], of(o, "render")[0]
+          nsel = [r for r in of(n, "render") if "filterCreations" in r][0]
+          osel = [r for r in of(o, "render") if "filterCreations" in r][0]
           # C1
           c1 = nsel["filterCreations"] == 1 and nd[0]["filterCreations"] == 0 and nd[1]["filterCreations"] == 0
           print(f"- SPEC-RESULT C1 decode reuse (DNG): this build {nsel['filterCreations']} Apple raw filter on selection, {nd[0]['filterCreations']} more during the 50-step drag at fit, {nd[1]['filterCreations']} at 100%; "
@@ -286,7 +287,7 @@ jobs:
           draft_off = next((d for d in rest if d["tuning"]["draftMode"] is False), None)
           size_flip = next((d for d in rest if d["tuning"]["viewSizeSettle"] != nd[0]["tuning"]["viewSizeSettle"]), None)
           region_off = next((d for d in rest if d["tuning"]["visibleRegion"] is False), None)
-          drafts_off = [p for p in of(n, "preview") if p["tuning"]["draftMode"] is False and p["draft"] is True]
+          drafts_off = [p for p in of(n, "preview") if p["tuning"]["draftMode"] is False and p["draft"] is True and p.get("draftMode") is False]
           took = draft_off is not None and size_flip is not None and region_off is not None and "full resolution" in region_off["settledWant"] \
               and (("full resolution" in size_flip["settledWant"]) != size_flip["tuning"]["viewSizeSettle"])
           print(f"- SPEC-RESULT C7 settings changed mid-session (DNG): draft mode off {draft_off is not None}; view-size settle flipped, settled as {size_flip and size_flip['settledWant']}; visible region off at 100%, settled as {region_off and region_off['settledWant']} — {'PASS' if took else 'FAIL'}")
@@ -336,6 +337,7 @@ jobs:
           path: build/TrainCull.dmg
       # The pictures and logs are small, and never stop a build if storage is short.
       - uses: actions/upload-artifact@v4
+        if: always()
         continue-on-error: true
         with:
           name: launch-screenshot

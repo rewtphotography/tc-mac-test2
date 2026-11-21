@@ -1166,10 +1166,11 @@ final class Session: ObservableObject {
         return (fit, tuning.viewSizeSettle ? fit : .whole(viewLongEdge: nil))
     }
 
-    private func submitPreview(_ item: FrameItem, want: PreviewRenderer.Want, draft: Bool, trigger: String) {
+    private func submitPreview(_ item: FrameItem, want: PreviewRenderer.Want, draft: Bool, quick: Bool, trigger: String) {
         let r = rendererFor(item)
         previewSeq += 1
-        let request = PreviewRenderer.Request(seq: previewSeq, values: item.adjust, want: want, draft: draft, requested: CFAbsoluteTimeGetCurrent())
+        let request = PreviewRenderer.Request(seq: previewSeq, values: item.adjust, want: want, draft: draft,
+                                              requested: CFAbsoluteTimeGetCurrent(), quick: quick)
         let token = heroToken, edit = editToken
         r.submit(request) { [weak self] frame in
             self?.previewArrived(frame, item: item, heroToken: token, editToken: edit, trigger: trigger)
@@ -1181,7 +1182,7 @@ final class Session: ObservableObject {
         guard compare == nil, let item = current else { return }
         let tuning = PreviewTuning.current
         guard let w = wants(tuning) else { return }
-        submitPreview(item, want: w.draft, draft: tuning.draftMode && !tuning.legacy, trigger: renderTrigger)
+        submitPreview(item, want: w.draft, draft: tuning.draftMode && !tuning.legacy, quick: true, trigger: renderTrigger)
     }
 
     /// The settled render, once the sliders have been still for the settle delay.
@@ -1201,7 +1202,7 @@ final class Session: ObservableObject {
         settleWork?.cancel()
         settleWork = nil
         guard compare == nil, let item = current, let w = wants(PreviewTuning.current) else { return }
-        submitPreview(item, want: w.settled, draft: false, trigger: trigger)
+        submitPreview(item, want: w.settled, draft: false, quick: false, trigger: trigger)
     }
 
     /// The single view's zoom, position or size changed: once it has been still a moment, the
@@ -1241,7 +1242,9 @@ final class Session: ObservableObject {
             return
         }
         lastKnownCreations = frame.creations
-        let draft = frame.request.draft
+        // "Draft" on screen means a quick frame while a slider moves, whether or not Apple's
+        // draft mode made it.
+        let draft = frame.request.quick
         guard token == heroToken, current === item, compare == nil, let view = slots[0].view, frame.request.seq > shownSeq else {
             staleFrames += 1
             return
@@ -1265,7 +1268,7 @@ final class Session: ObservableObject {
         setState(0, kind)
         let tuning = PreviewTuning.current
         Log.debug("preview", "\(item.name): \(kind.lowercased()) frame #\(frame.request.seq) \(frame.image.width)×\(frame.image.height) · \(frame.request.want.text) · \(String(format: "%.0f", frame.renderMs)) ms",
-                  fields: ["file": item.name, "seq": frame.request.seq, "draft": draft, "renderMs": frame.renderMs, "width": frame.image.width,
+                  fields: ["file": item.name, "seq": frame.request.seq, "draft": draft, "draftMode": frame.request.draft, "renderMs": frame.renderMs, "width": frame.image.width,
                            "height": frame.image.height, "want": frame.request.want.text, "scale": Double(frame.scale), "creations": frame.creations,
                            "tuning": tuning.fields])
         if draft {
