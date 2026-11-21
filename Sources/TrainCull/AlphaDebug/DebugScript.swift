@@ -445,8 +445,8 @@ enum DebugNames {
 /// before Run). PNG compression of a photo varies with its noise; the factors are averages.
 enum DebugEstimate {
     static let frameLongEdge = 3000
-    static let pngBytesPerPixel8 = 1.9 // 3 channels, compressed
-    static let pngBytesPerPixel16 = 6.6 // 4 channels of 16 bits, compressed
+    static let pngBytesPerPixel8 = 1.7 // 3 channels, compressed (measured on the made-up DNG: 1.65)
+    static let pngBytesPerPixel16 = 4.5 // 4 channels of 16 bits, compressed (measured: 4.1)
     static let tiffBytesPerPixel = 5.0
     static let reportBytes = 9_000
     static let zipOverheadPerFile = 120

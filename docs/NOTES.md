@@ -153,6 +153,44 @@ every old tag still works) plus the few non-masking gains of alphas 7–23, re-m
 - Not carried over from the alpha 23 notes: everything about masking. The alpha 6
   measurements are below.
 
+## Debug export and test scripts (0.2.0 alpha 3, alpha only)
+
+The owner's spec (2026-11-21, with three amendments): a debug package of the current image and a
+JSON test-script runner, so RAW engine tests with another chat need no screenshots.
+- **Adopted:** Debug ▸ Run Test Script… (strict validation, a dialog with the index, errors,
+  warnings and size estimates, Run / Cancel, progress with Cancel), Debug ▸ Export Debug
+  Package (script 00, counter 01–99 kept across launches, warning at 99), Debug ▸ Reset
+  Manual Export Counter. Output in `~/Pictures/TrainCull Debug/`, a new `script-NN_date-time`
+  folder per run (a `-2` suffix if two land in one second): baselines outside the zips, one
+  `TC-test-NNCC.zip` per test, `run-manifest.json`, the folder shown in Finder at the end. One
+  `debug` log line per test (id, file, status, zip, zipSize, renderMs). Amendments: cases
+  setting `isHighlightRecoveryEnabled` are "skipped: requires macOS 27"; screen.png waits
+  for the settled full-resolution preview and takes its Display P3 pixels before any
+  display conversion; "min"/"max" are the slider's ends, "default" is Apple's true default,
+  and every control's slider range is in report.json.
+- **How it is built:** everything in `Sources/TrainCull/AlphaDebug/` (see its README for
+  removal), compiled only with `TC_ALPHA_DEBUG` (Package.swift; on unless built with
+  `TC_ALPHA_DEBUG=0`). It can't be a separate Swift module, because it uses the app's
+  render and export code; the app references nothing in it except the one Debug menu line.
+  Small general helpers it reads: `Export.render16`, `Imaging.developedReading`,
+  `Session.settledPreview`, `Session.singleView`, `HeroNSView.visibleSpaceRect`,
+  `RenderCache.peek`.
+- **One render:** every picture comes from the TIFF export's render (16-bit ProPhoto,
+  full resolution). frame.png is that render drawn at 3000 px long edge into 8-bit Display
+  P3 by Core Graphics; crops are cut from it unchanged (16-bit ProPhoto PNG); fullResTIFF
+  adds `frame.tif` (the export's own TIFF writer) to the zip.
+- **Defaults chosen:** zips store their files as they are (PNGs are compressed already),
+  written in code, no outside tool. A manual export's report holds its case as the script
+  would have written it (the current edits under Apple's names), and is allowed out-of-range
+  values. Toggles take true / false / "default" only; neutralLocation can't be combined with
+  neutralTemperature or neutralTint. On macOS 27 or later, highlight-recovery cases are still
+  skipped ("not yet supported by this build") until it is added.
+- **Size estimates** are made before anything renders, from the frame size and PNG rates
+  measured on the made-up DNG (1.7 bytes per pixel at 8 bits, 4.5 at 16); real ARWs may differ.
+  The manifest gives estimate and actual for every zip.
+- `-TCDebugScript`, `-TCDebugExports`, `-TCDebugZoomedExports` and `-TCDebugResetCounter` are
+  launch-check settings for B3, B12 and B13 (no dialogs, no Finder window).
+
 ## RAW panel spec (0.2.0 alpha 2)
 
 The owner's spec (pasted in, 2026-11-21): the RAW panel in pipeline order, new Apple
@@ -276,7 +314,9 @@ Same folder and Mac, two and a half minutes of use:
 
 ## Next, in order
 
-0. The owner opens their four a7 IV test ARWs in 0.2.0 alpha 2 and sends the log: its `raw`
+0. The owner runs the alpha 3 checklist on real ARWs (B11's Local tone map, B12's manual
+   export) and sends the zips and log. Before that, from alpha 2: the owner opens their four
+   a7 IV test ARWs and sends the log: its `raw`
    lines give Shadow bias's true default, Apple's other defaults and the red dots per file;
    its `change` lines give the Shadow boost read-backs. Then the next note: debug export and
    the JSON test-script runner; after that, performance (informed by the section above).

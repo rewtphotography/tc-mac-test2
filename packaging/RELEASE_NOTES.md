@@ -8,7 +8,16 @@ An alpha build of TrainCull for Mac (Apple silicon, macOS 15 or later).
    **Done**, then open **System Settings → Privacy & Security**, scroll down to the message
    about TrainCull and click **Open Anyway**. This is needed once for each new build.
 
-**New in this build (0.2.0 alpha 2): the RAW panel**
+**New in this build (0.2.0 alpha 3): debug tools (alpha only)**
+
+- A **Debug** menu. **Export Debug Package** saves the photo you're looking at, with its
+  edits, as a small zip for testing the raw engine: the full picture, what the screen shows,
+  and a report of every setting. If you're zoomed in, the zoomed part is included at full
+  quality. **Run Test Script…** reads a test script (a .json file) and makes one zip per test.
+- Everything goes in **Pictures ▸ TrainCull Debug**, in a new folder each time; nothing is
+  ever overwritten, and your photos and sidecars are never changed.
+
+**In 0.2.0 alpha 2: the RAW panel**
 
 - The editing controls follow Apple's own order in five sections: **Raw & Detail**, **Light**,
   **Tone curve**, **Colour** and **Output**. Click a section's name to fold it away; the app
