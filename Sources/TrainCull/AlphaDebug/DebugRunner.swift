@@ -300,6 +300,7 @@ enum DebugRunner {
             "neutralLocation": neutralInfo,
             "decoder": ["used": rendered.decoder, "supportedDecoderVersions": facts.decoders],
             "pipeline": DebugRender.pipeline(url),
+            "previewTuning": PreviewTuning.current.fields,
             "crop": cropInfo,
             "output": output,
             "renderMs": rendered.milliseconds,

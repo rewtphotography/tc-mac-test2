@@ -145,7 +145,46 @@ final class Session: ObservableObject {
     /// What the user last did that calls for a new render, and how many draft requests arrived
     /// while a draft was still being made.
     private var renderTrigger = "selection"
-    private var draftsSkipped = 0
+    /// The single view's renderer: one Apple raw filter for the selected file, reused.
+    private var renderer: PreviewRenderer?
+    private var previewSeq = 0
+    /// The newest request whose frame is on screen: an older frame is never shown after it.
+    private var shownSeq = 0
+    private var settleWork: DispatchWorkItem?
+    private var viewportWork: DispatchWorkItem?
+    /// What the renderer last put on screen: the whole picture, and a sharper part over it.
+    private var shownWhole: (values: [String: Float], want: PreviewRenderer.Want, draft: Bool)?
+    private var shownPart: (values: [String: Float], want: PreviewRenderer.Want, draft: Bool)?
+    private var selectionStarted = CFAbsoluteTimeGetCurrent()
+    private var firstRenderLogged = true
+    private var lastKnownCreations = 0
+    /// Frames thrown away because a newer one was already on screen.
+    private var staleFrames = 0
+    /// One slider drag, for its log line.
+    private final class DragRecord {
+        let key: String
+        let start: Float
+        let began = CFAbsoluteTimeGetCurrent()
+        let meter = JobMeter()
+        let replacedAtStart: Int
+        let creationsAtStart: Int
+        let staleAtStart: Int
+        let tuning: PreviewTuning
+        var frameMs: [Double] = []
+        var released: CFAbsoluteTime?
+        var settleStart: CFAbsoluteTime?
+        var end: Float?
+
+        init(key: String, start: Float, replaced: Int, creations: Int, stale: Int, tuning: PreviewTuning) {
+            self.key = key
+            self.start = start
+            replacedAtStart = replaced
+            creationsAtStart = creations
+            staleAtStart = stale
+            self.tuning = tuning
+        }
+    }
+    private var drag: DragRecord?
     /// One change to a control, waiting for the frame that shows it so its line can be logged.
     private struct Change {
         let file: String
@@ -165,10 +204,8 @@ final class Session: ObservableObject {
     private var fullSize: [Int: CGSize] = [:]
     private var editToken = 0
     private var valuesToken = 0
-    private var draftBusy = false
     private var saveToken = 0
     private var pendingSave: FrameItem?
-    private let draftQueue = DispatchQueue(label: "draft", qos: .userInteractive)
     private let loadQueue: OperationQueue = {
         let q = OperationQueue()
         q.maxConcurrentOperationCount = max(2, ProcessInfo.processInfo.activeProcessorCount - 2)
@@ -188,11 +225,21 @@ final class Session: ObservableObject {
     /// The single view's large image.
     var singleView: HeroNSView? { slots[0].view }
 
-    /// The full-resolution preview render of the current frame with its current edits, once it
-    /// is the one on screen (never a quick draft); nil until then.
-    func settledPreview() -> CGImage? {
-        guard compare == nil, let item = current, heroStates[0] == "Raw", !draftBusy else { return nil }
-        return rawCache.peek(item.id, item.adjust)
+    /// The single view's settled picture of the current frame with its current edits, once it is
+    /// on screen (never a draft, nothing still to come): the picture and the part of the frame it
+    /// covers, in full-size pixels. Nil until then.
+    func settledPreview() -> (image: CGImage, rect: CGRect)? {
+        guard compare == nil, current != nil, heroStates[0] == "Raw", settleWork == nil, viewportWork == nil,
+              renderer?.isIdle ?? true, shownSeq == previewSeq, let view = slots[0].view else { return nil }
+        return view.shownPicture
+    }
+
+    /// The tuning in force and what the single view shows, for the debug tools.
+    var previewState: [String: Any] {
+        var out = PreviewTuning.current.fields
+        out["shownKind"] = slots[0].view?.shownKind ?? ""
+        out["status"] = heroStates[0]
+        return out
     }
 
     /// The slot ratings and keys act on: the active side when comparing, else the single view.
@@ -502,6 +549,7 @@ final class Session: ObservableObject {
         if index == 0 {
             view.picksPoint = pickingNeutral
             view.onPick = { [weak self] point in self?.pickNeutral(at: point) }
+            view.onViewportChange = { [weak self] in self?.viewportChanged() }
         }
         view.onUserZoom = { [weak self] kind in self?.userZoomed(index, kind) }
         if frame(for: index) != nil { show(index) }
@@ -579,16 +627,15 @@ final class Session: ObservableObject {
         supported = [:]
         decoderLine = .label("")
         let token = valuesToken
-        let url = item.url, name = item.name
-        heroQueue.async {
-            let facts = Adjust.facts(url)
+        let name = item.name, id = item.id
+        // The renderer's own filter gives Apple's defaults: no other filter is made for them.
+        rendererFor(item).facts { facts, size in
             if let facts = facts { Session.logFacts(facts, name) }
-            DispatchQueue.main.async {
-                guard token == self.valuesToken else { return }
-                self.defaults = facts?.defaults ?? [:]
-                self.supported = facts?.supported ?? [:]
-                self.decoderLine = facts.map { RawPanel.decoderLine($0.decoders) } ?? .label("")
-            }
+            if size.width > 0 { self.fullSize[id] = size }
+            guard token == self.valuesToken else { return }
+            self.defaults = facts?.defaults ?? [:]
+            self.supported = facts?.supported ?? [:]
+            self.decoderLine = facts.map { RawPanel.decoderLine($0.decoders) } ?? .label("")
         }
     }
 
@@ -608,12 +655,30 @@ final class Session: ObservableObject {
         let adjust = item.adjust
         let started = CFAbsoluteTimeGetCurrent()
 
+        let single = index == 0 && compare == nil
+        if single {
+            settleWork?.cancel()
+            settleWork = nil
+            shownSeq = previewSeq // anything still on its way is for the frame before
+            shownWhole = nil
+            shownPart = nil
+            selectionStarted = started
+            firstRenderLogged = false
+        }
         switch rawCache.lookup(id, adjust) {
-        case let .hit(cached):
-            view.show(cached, space: CGSize(width: cached.width, height: cached.height), newFrame: true, keepZoom: keepZoom)
+        case let .hit(cached) where adequate(cached, id: id, single: single):
+            let size = fullSize[id] ?? CGSize(width: cached.width, height: cached.height)
+            view.show(cached, space: size, newFrame: true, keepZoom: keepZoom, kind: "Raw")
             setState(index, "Raw")
+            if single {
+                shownWhole = (adjust, .whole(viewLongEdge: CGFloat(max(cached.width, cached.height))), false)
+                firstRenderLogged = true
+                viewportChanged()
+            }
             Log.note("cache", "render \(name) · hit", fields: ["frame": name, "result": "hit"])
             return
+        case .hit:
+            Log.note("cache", "render \(name) · miss: kept at a smaller size", fields: ["frame": name, "result": "miss", "reason": "smaller"])
         case let .miss(why):
             Log.note("cache", "render \(name) · miss: \(why.rawValue)", fields: ["frame": name, "result": "miss", "reason": why.rawValue])
         }
@@ -630,11 +695,12 @@ final class Session: ObservableObject {
                 Log.note("image", "\(name): the embedded preview couldn't be read")
                 return
             }
-            let size = Imaging.rawSize(url) ?? CGSize(width: big.width, height: big.height)
             Log.note("image", "\(name): embedded preview \(big.width)×\(big.height) after \(Log.seconds(since: started))")
             DispatchQueue.main.async {
-                self.fullSize[id] = size
-                guard token == slot.token else { return }
+                // The frame's size comes from the renderer's filter; no filter is made here for it.
+                let size = self.fullSize[id] ?? CGSize(width: big.width, height: big.height)
+                // Only while nothing better is up: a raw render may have arrived first.
+                guard token == slot.token, self.heroStates[index] == "Preview" else { return }
                 slot.view?.show(big, space: size, newFrame: false)
             }
             if needFaces {
@@ -647,6 +713,21 @@ final class Session: ObservableObject {
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
             guard token == slot.token else { return }
+            if index == 0 && self.compare == nil {
+                self.renderTrigger = "selection"
+                self.requestSettled(trigger: "selection")
+                return
+            }
+            self.renderWhole(index, token: token, item: item, adjust: adjust, started: started)
+        }
+    }
+
+    /// A full-resolution render with a fresh filter: the side-by-side view's way (no editing
+    /// happens there).
+    private func renderWhole(_ index: Int, token: Int, item: FrameItem, adjust: [String: Float], started: CFAbsoluteTime) {
+        let slot = slots[index]
+        let url = item.url, id = item.id, name = item.name, formats = self.formats
+        do {
             self.rawQueue.async {
                 var stillWanted = false
                 DispatchQueue.main.sync { stillWanted = token == slot.token }
@@ -674,13 +755,26 @@ final class Session: ObservableObject {
                         if token == slot.token { self.setState(index, "Preview only") }
                         return
                     }
-                    if raw != nil { self.cache(id, adjust, image) }
+                    if raw != nil {
+                        self.cache(id, adjust, image)
+                        self.fullSize[id] = CGSize(width: image.width, height: image.height)
+                    }
                     guard token == slot.token, item.adjust == adjust else { return }
-                    slot.view?.show(image, space: CGSize(width: image.width, height: image.height), newFrame: false)
+                    slot.view?.show(image, space: CGSize(width: image.width, height: image.height), newFrame: false, kind: raw != nil ? "Raw" : "")
                     self.setState(index, raw != nil ? "Raw" : "Embedded JPEG")
                 }
             }
         }
+    }
+
+    /// Whether a kept render is sharp enough for where it is going: the single view needs what
+    /// its settled render would make, the side-by-side view full resolution.
+    private func adequate(_ image: CGImage, id: Int, single: Bool) -> Bool {
+        guard let full = fullSize[id] else { return !single ? false : true }
+        let fullEdge = max(full.width, full.height)
+        var needed = fullEdge
+        if single, let w = wants(PreviewTuning.current), case let .whole(edge?) = w.settled { needed = min(edge, fullEdge) }
+        return CGFloat(max(image.width, image.height)) >= needed * 0.98
     }
 
     /// A slot's faces, in pixels of what its view shows now.
@@ -743,7 +837,14 @@ final class Session: ObservableObject {
         Log.note("compare", "started: \(frames[selected].name) | \(frames[id].name)")
         // Both sides start fitted, so their zoom is linked from the first click.
         slots[0].view?.fit(animated: false)
+        settleWork?.cancel()
+        settleWork = nil
         compare = ComparePair(left: selected, right: id, active: .right)
+        // The left side may hold a view-sized render; side by side zooms want full resolution.
+        if let left = frame(for: 0), let shown = slots[0].view?.shownPicture,
+           CGFloat(shown.image.width) < (fullSize[left.id]?.width ?? 0) * 0.99 {
+            renderWhole(0, token: slots[0].token, item: left, adjust: left.adjust, started: CFAbsoluteTimeGetCurrent())
+        }
         selected = id
         selectionChanged("\(cause), side by side")
         // The right-hand view shows its frame as soon as the window has made it (`attach`).
@@ -864,7 +965,6 @@ final class Session: ObservableObject {
                 + "\(MemoryStats.plain(UInt64(rawCache.bytes))) of \(MemoryStats.plain(UInt64(Session.renderCacheBytes)))",
                 fields: ["frame": name, "bytes": gone.bytes, "kept": rawCache.count, "kept_bytes": rawCache.bytes])
         }
-        fullSize[id] = CGSize(width: image.width, height: image.height)
     }
 
     /// The value a control shows: the changed one, else the file's default.
@@ -895,8 +995,16 @@ final class Session: ObservableObject {
     func dragChanged(_ control: Control, began: Bool) {
         if began {
             dragStart[control.key] = value(control)
+            drag = DragRecord(key: control.key, start: value(control), replaced: renderer?.replaced ?? 0, creations: lastKnownCreations,
+                              stale: staleFrames, tuning: PreviewTuning.current)
         } else if let old = dragStart.removeValue(forKey: control.key) {
             noteChange(control, old: old, new: value(control), isDragEnd: true, cause: "drag")
+            if let d = drag, d.key == control.key {
+                d.released = CFAbsoluteTimeGetCurrent()
+                d.end = value(control)
+                // The settle delay counts from the release.
+                if compare == nil, current != nil { scheduleSettle() }
+            }
         }
     }
 
@@ -1016,86 +1124,196 @@ final class Session: ObservableObject {
     private func edited(_ item: FrameItem) {
         item.adjust = values
         editToken += 1
-        startDraft()
-        let token = editToken
-        let frame = heroToken
-        let url = item.url, id = item.id, adjust = item.adjust, name = item.name
-        let trigger = renderTrigger
-        // The full-size render waits until the sliders have been still for a moment.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
-            guard token == self.editToken, frame == self.heroToken else { return }
-            self.rawQueue.async {
-                var wanted = false
-                DispatchQueue.main.sync { wanted = token == self.editToken && frame == self.heroToken }
-                guard wanted else { return }
-                let meter = JobMeter()
-                let (rendered, readBack) = Imaging.renderRawReading(url, adjust)
-                let measured = meter.finish()
-                guard let image = rendered else {
-                    Log.warn("\(name): the full render after an edit failed · trigger: \(trigger)")
-                    return
-                }
-                var fields = measured.fields
-                fields["frame"] = name
-                fields["trigger"] = trigger
-                fields["width"] = image.width
-                fields["height"] = image.height
-                Log.note("image", "\(name): render \(image.width)×\(image.height) (full) · trigger: \(trigger)", fields: fields)
-                Log.note("job", "render \(name) · \(measured.text)", fields: fields)
-                MemoryMonitor.mark("a full render of \(name)")
-                DispatchQueue.main.async {
-                    self.cache(id, adjust, image)
-                    guard token == self.editToken, frame == self.heroToken else { return }
-                    self.hero?.show(image, space: CGSize(width: image.width, height: image.height), newFrame: false)
-                    // The image is the raw itself again, even if the edit came before the first render.
-                    self.setState(0, "Raw")
-                    let peak = ((measured.fields["memory_peak"] as? Double) ?? 0) / 1_048_576
-                    self.changesShown(frame: id, token: token, readBack: readBack, peak: peak)
-                }
-            }
-        }
+        requestDraft()
+        scheduleSettle()
         pendingSave = item
         saveToken += 1
         let save = saveToken
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { if save == self.saveToken { self.flushSave() } }
     }
 
-    /// A quick, smaller render for live feedback. One runs at a time; when it finishes and the
-    /// sliders have moved on, the next one starts from the latest values.
-    private func startDraft() {
-        if draftBusy { draftsSkipped += 1 }
-        guard !draftBusy, let item = current, let hero = hero else { return }
-        draftBusy = true
-        let coalesced = draftsSkipped
-        draftsSkipped = 0
-        let trigger = renderTrigger
-        let drafting = CFAbsoluteTimeGetCurrent()
-        let token = editToken
-        let frame = heroToken
-        let url = item.url, adjust = item.adjust
-        let size = fullSize[item.id]
-        var scale: Float = 0.25
-        if let size = size, size.width > 0 {
-            let pixels = max(hero.bounds.width, hero.bounds.height) * (hero.window?.backingScaleFactor ?? 2)
-            scale = Float(min(1, max(0.1, pixels / max(size.width, size.height))))
+    // MARK: The single view's renders
+
+    @discardableResult
+    private func rendererFor(_ item: FrameItem) -> PreviewRenderer {
+        let legacy = PreviewTuning.current.legacy
+        if let r = renderer, r.url == item.url, r.legacy == legacy { return r }
+        // The previous file's filter goes with its renderer.
+        let r = PreviewRenderer(url: item.url, legacy: legacy)
+        renderer = r
+        lastKnownCreations = 0
+        return r
+    }
+
+    /// What the single view wants drawn: while a slider moves, and once settled.
+    private func wants(_ tuning: PreviewTuning) -> (draft: PreviewRenderer.Want, settled: PreviewRenderer.Want)? {
+        guard let view = slots[0].view, view.bounds.width > 0 else { return nil }
+        let px = view.pixelSize
+        let fit = PreviewRenderer.Want.whole(viewLongEdge: max(px.width, px.height))
+        if tuning.legacy { return (fit, .whole(viewLongEdge: nil)) }
+        if view.isZoomed {
+            let t = view.targetView
+            guard tuning.visibleRegion, view.space.width > 0, view.space.height > 0, !t.rect.isEmpty else { return (fit, .whole(viewLongEdge: nil)) }
+            // The part in view with a small margin, so a little panning stays sharp.
+            let m = 0.05 * max(t.rect.width, t.rect.height)
+            let r = t.rect.insetBy(dx: -m, dy: -m).intersection(CGRect(origin: .zero, size: view.space))
+            let fraction = CGRect(x: r.minX / view.space.width, y: r.minY / view.space.height,
+                                  width: r.width / view.space.width, height: r.height / view.space.height)
+            let fullWidth = current.flatMap { fullSize[$0.id]?.width } ?? view.space.width
+            let region = PreviewRenderer.Want.region(fraction, screenPixelsPerPixel: t.pixelsPerPicturePixel * view.space.width / fullWidth)
+            return (region, region)
         }
-        draftQueue.async {
-            let image = Imaging.renderRaw(url, adjust, scale: scale)
-            if let image = image {
-                Log.debug("image", "\(item.name): draft \(image.width)×\(image.height) (view, scale \(String(format: "%.2f", scale)))"
-                    + " · trigger: \(trigger) · coalesced \(coalesced) · wall \(Log.seconds(since: drafting))",
-                    fields: ["frame": item.name, "trigger": trigger, "coalesced": coalesced, "scale": Double(scale),
-                             "seconds": CFAbsoluteTimeGetCurrent() - drafting])
-            }
-            DispatchQueue.main.async {
-                self.draftBusy = false
-                guard frame == self.heroToken else { return }
-                if let image = image {
-                    self.hero?.show(image, space: size ?? CGSize(width: image.width, height: image.height), newFrame: false)
-                }
-                if token != self.editToken { self.startDraft() }
-            }
+        return (fit, tuning.viewSizeSettle ? fit : .whole(viewLongEdge: nil))
+    }
+
+    private func submitPreview(_ item: FrameItem, want: PreviewRenderer.Want, draft: Bool, trigger: String) {
+        let r = rendererFor(item)
+        previewSeq += 1
+        let request = PreviewRenderer.Request(seq: previewSeq, values: item.adjust, want: want, draft: draft, requested: CFAbsoluteTimeGetCurrent())
+        let token = heroToken, edit = editToken
+        r.submit(request) { [weak self] frame in
+            self?.previewArrived(frame, item: item, heroToken: token, editToken: edit, trigger: trigger)
         }
+    }
+
+    /// A quick frame while a slider moves: Apple's draft mode, at the view's size or for the part in view.
+    private func requestDraft() {
+        guard compare == nil, let item = current else { return }
+        let tuning = PreviewTuning.current
+        guard let w = wants(tuning) else { return }
+        submitPreview(item, want: w.draft, draft: tuning.draftMode && !tuning.legacy, trigger: renderTrigger)
+    }
+
+    /// The settled render, once the sliders have been still for the settle delay.
+    private func scheduleSettle() {
+        settleWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+            self.settleWork = nil
+            if let d = self.drag, d.released != nil, d.settleStart == nil { d.settleStart = CFAbsoluteTimeGetCurrent() }
+            self.requestSettled(trigger: self.renderTrigger)
+        }
+        settleWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + PreviewTuning.current.settleDelay, execute: work)
+    }
+
+    private func requestSettled(trigger: String) {
+        settleWork?.cancel()
+        settleWork = nil
+        guard compare == nil, let item = current, let w = wants(PreviewTuning.current) else { return }
+        submitPreview(item, want: w.settled, draft: false, trigger: trigger)
+    }
+
+    /// The single view's zoom, position or size changed: once it has been still a moment, the
+    /// settled picture is made for the new view if what is on screen doesn't already fit it.
+    private func viewportChanged() {
+        guard compare == nil else { return }
+        viewportWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            self?.viewportWork = nil
+            self?.viewportSettled()
+        }
+        viewportWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: work)
+    }
+
+    private func viewportSettled() {
+        guard compare == nil, let item = current, settleWork == nil, shownWhole != nil || shownPart != nil,
+              let w = wants(PreviewTuning.current) else { return }
+        let values = item.adjust
+        switch w.settled {
+        case .whole:
+            if shownPart != nil {
+                slots[0].view?.clearDetail()
+                shownPart = nil
+            }
+            if let s = shownWhole, !s.draft, s.values == values, s.want == w.settled { return }
+        case .region:
+            if let p = shownPart, !p.draft, p.values == values, p.want == w.settled { return }
+        }
+        requestSettled(trigger: "zoom or pan")
+    }
+
+    /// A frame from the renderer: shown only if nothing newer is on screen, for the frame still selected.
+    private func previewArrived(_ frame: PreviewRenderer.Frame?, item: FrameItem, heroToken token: Int, editToken edit: Int, trigger: String) {
+        guard let frame = frame else {
+            if token == heroToken { Log.warn("\(item.name): a preview render failed · trigger: \(trigger)") }
+            return
+        }
+        lastKnownCreations = frame.creations
+        let draft = frame.request.draft
+        guard token == heroToken, current === item, compare == nil, let view = slots[0].view, frame.request.seq > shownSeq else {
+            staleFrames += 1
+            return
+        }
+        shownSeq = frame.request.seq
+        fullSize[item.id] = frame.fullSize
+        let kind = draft ? "Draft" : "Raw"
+        if frame.isWhole {
+            view.show(frame.image, space: frame.fullSize, newFrame: false, kind: kind)
+            shownWhole = (frame.request.values, frame.request.want, draft)
+            shownPart = nil
+        } else {
+            var rect = frame.rect
+            if view.space != frame.fullSize, view.space.width > 0 {
+                let k = view.space.width / frame.fullSize.width
+                rect = CGRect(x: rect.minX * k, y: rect.minY * k, width: rect.width * k, height: rect.height * k)
+            }
+            view.showDetail(frame.image, rect: rect, kind: kind)
+            shownPart = (frame.request.values, frame.request.want, draft)
+        }
+        setState(0, kind)
+        let tuning = PreviewTuning.current
+        Log.debug("preview", "\(item.name): \(kind.lowercased()) frame #\(frame.request.seq) \(frame.image.width)×\(frame.image.height) · \(frame.request.want.text) · \(String(format: "%.0f", frame.renderMs)) ms",
+                  fields: ["file": item.name, "seq": frame.request.seq, "draft": draft, "renderMs": frame.renderMs, "width": frame.image.width,
+                           "height": frame.image.height, "want": frame.request.want.text, "scale": Double(frame.scale), "creations": frame.creations,
+                           "tuning": tuning.fields])
+        if draft {
+            drag?.frameMs.append(frame.renderMs)
+            return
+        }
+        if frame.isWhole { cache(item.id, frame.request.values, frame.image) }
+        Log.note("image", "\(item.name): settled render \(frame.image.width)×\(frame.image.height) (\(frame.request.want.text)) in \(String(format: "%.0f", frame.renderMs)) ms · trigger: \(trigger)",
+                 fields: ["file": item.name, "width": frame.image.width, "height": frame.image.height, "want": frame.request.want.text,
+                          "renderMs": frame.renderMs, "trigger": trigger, "tuning": tuning.fields])
+        changesShown(frame: item.id, token: edit, readBack: frame.readBack, peak: frame.peakBytes / 1_048_576)
+        if !firstRenderLogged {
+            firstRenderLogged = true
+            let ms = (CFAbsoluteTimeGetCurrent() - selectionStarted) * 1000
+            Log.note("render", "\(item.name): first raw render on screen \(String(format: "%.0f", ms)) ms after selecting · Apple raw filters made: \(frame.creations)",
+                     fields: ["file": item.name, "timeToFirstRawRenderMs": ms, "filterCreations": frame.creations, "tuning": tuning.fields])
+        }
+        if let d = drag, d.released != nil, frame.request.values == item.adjust { finishDrag(d, settled: frame, item: item) }
+    }
+
+    /// One line per drag, once its settled render is on screen.
+    private func finishDrag(_ d: DragRecord, settled: PreviewRenderer.Frame, item: FrameItem) {
+        drag = nil
+        let now = CFAbsoluteTimeGetCurrent()
+        let ms = d.frameMs.sorted()
+        func pct(_ p: Double) -> Double { ms.isEmpty ? 0 : ms[min(ms.count - 1, max(0, Int((p * Double(ms.count)).rounded(.up)) - 1))] }
+        let measured = d.meter.finish()
+        let peak = ((measured.fields["memory_peak"] as? Double) ?? 0) / 1_048_576
+        let stale = staleFrames - d.staleAtStart
+        let replaced = (renderer?.replaced ?? d.replacedAtStart) - d.replacedAtStart
+        let released = d.released ?? now
+        let control = Adjust.control(d.key)
+        let fields: [String: Any] = [
+            "file": item.name, "control": control?.title ?? d.key, "appleProperty": control?.appleProperty ?? d.key,
+            "startValue": Double(d.start), "endValue": Double(d.end ?? d.start),
+            "framesRendered": d.frameMs.count + stale, "framesShown": d.frameMs.count, "framesDropped": replaced + stale,
+            "medianFrameMs": pct(0.5), "p95FrameMs": pct(0.95), "maxFrameMs": ms.last ?? 0,
+            "releaseToSettleStartMs": d.settleStart.map { ($0 - released) * 1000 as Any } ?? NSNull(),
+            "releaseToSettledMs": (now - released) * 1000,
+            "peakMemoryMB": peak, "zoom": zoomTexts[0], "tuning": d.tuning.fields,
+            "filterCreations": settled.creations - d.creationsAtStart,
+            "outOfOrderShown": 0, "settledMatchesFinal": settled.request.values == item.adjust,
+            "settledSize": [settled.image.width, settled.image.height], "settledWant": settled.request.want.text,
+        ]
+        Log.note("drag", "\(item.name): \(control?.title ?? d.key) \(d.start) → \(d.end ?? d.start) · \(d.frameMs.count) frames shown, \(replaced + stale) dropped"
+            + String(format: " · median %.0f ms, p95 %.0f ms, max %.0f ms", pct(0.5), pct(0.95), ms.last ?? 0)
+            + String(format: " · release to settled %.0f ms · peak %.0f MB", (now - released) * 1000, peak)
+            + " · \(zoomTexts[0]) · \(d.tuning.text)", fields: fields)
     }
 
     /// Writes any edits still waiting to the sidecar now.

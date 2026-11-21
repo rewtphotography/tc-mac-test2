@@ -21,12 +21,47 @@ struct DebugCommands: Commands {
             Button("Export Debug Package") { DebugTools.manualExport(session) }
             Divider()
             Button("Reset Manual Export Counter") { DebugTools.resetCounter() }
+            Divider()
+            PreviewTuningMenu()
+        }
+    }
+}
+
+/// Debug ▸ Preview tuning: changes take effect at the next render, no restart.
+struct PreviewTuningMenu: View {
+    @AppStorage(PreviewTuning.keys.settle) private var settle = 0.25
+    @AppStorage(PreviewTuning.keys.draft) private var draft = true
+    @AppStorage(PreviewTuning.keys.viewSize) private var viewSize = PreviewTuning.viewSizeSettleDefault
+    @AppStorage(PreviewTuning.keys.region) private var region = true
+
+    var body: some View {
+        Menu("Preview tuning") {
+            Picker("Settle delay", selection: Binding(get: { settle }, set: { settle = $0; DebugTools.tuningChanged("settle delay") })) {
+                ForEach(PreviewTuning.settleChoices, id: \.self) { Text(String(format: "%.2f s", $0)).tag($0) }
+            }
+            .pickerStyle(.inline)
+            Divider()
+            Toggle("Draft mode during drags", isOn: Binding(get: { draft }, set: { draft = $0; DebugTools.tuningChanged("draft mode") }))
+            Toggle("View-size settled render at fit", isOn: Binding(get: { viewSize }, set: { viewSize = $0; DebugTools.tuningChanged("view-size settle") }))
+            Toggle("Visible-region rendering at 100% and above", isOn: Binding(get: { region }, set: { region = $0; DebugTools.tuningChanged("visible region") }))
         }
     }
 }
 
 enum DebugTools {
     static let counterKey = "TCDebugManualCase"
+
+    /// A Preview tuning setting changed (from the menu, or the launch check's perf script).
+    static func tuningChanged(_ what: String) {
+        let t = PreviewTuning.current
+        Log.note("tuning", "\(what) changed · now \(t.text)", fields: ["changed": what, "tuning": t.fields])
+    }
+
+    /// Sets a tuning value the way the menu does.
+    static func setTuning(_ key: String, _ value: Any) {
+        UserDefaults.standard.set(value, forKey: key)
+        tuningChanged(key)
+    }
     private static var busy = false
     private static var hooksInstalled = false
     /// While the automated build drives the tools: no Finder windows, no dialogs.
@@ -169,13 +204,19 @@ enum DebugTools {
         attempt()
     }
 
-    private static func export(_ session: Session, folder: URL, item: FrameItem, view: HeroNSView, preview: CGImage, number: Int, done: @escaping (Bool) -> Void) {
+    private static func export(_ session: Session, folder: URL, item: FrameItem, view: HeroNSView, preview: (image: CGImage, rect: CGRect),
+                               number: Int, done: @escaping (Bool) -> Void) {
         // The preview pipeline's own picture (Display P3) of what is on screen, at the size shown.
         let visible = view.visibleSpaceRect
         let k = view.screenPixelsPerPicturePixel
         let zoomed = view.isZoomed
         let width = max(1, Int((visible.width * k).rounded())), height = max(1, Int((visible.height * k).rounded()))
-        guard let screen = try? DebugRender.redraw(preview, from: visible, width: width, height: height) else {
+        // The settled preview may be view-sized, or cover only the part in view: find the visible
+        // part in its own pixels.
+        let kx = CGFloat(preview.image.width) / max(preview.rect.width, 1), ky = CGFloat(preview.image.height) / max(preview.rect.height, 1)
+        let inPicture = CGRect(x: (visible.minX - preview.rect.minX) * kx, y: (visible.minY - preview.rect.minY) * ky,
+                               width: visible.width * kx, height: visible.height * ky)
+        guard let screen = try? DebugRender.redraw(preview.image, from: inPicture, width: width, height: height) else {
             say("The preview couldn't be captured", "")
             return done(false)
         }
@@ -233,6 +274,11 @@ enum DebugTools {
         let script = d.string(forKey: "TCDebugScript")
         let exports = d.integer(forKey: "TCDebugExports"), zoomedExports = d.integer(forKey: "TCDebugZoomedExports")
         if d.bool(forKey: "TCDebugResetCounter") { d.set(0, forKey: counterKey) }
+        if d.bool(forKey: "TCPerf") {
+            automated = true
+            DebugPerf.start(session)
+            return
+        }
         guard script != nil || exports > 0 || zoomedExports > 0 else { return }
         automated = true
         func whenSettled(_ then: @escaping () -> Void) {
@@ -267,10 +313,10 @@ enum DebugTools {
                     }
                     return out
                 }
-                let valuesBefore = session.values, sidecarsBefore = sidecars(), imageBefore = session.settledPreview()
+                let valuesBefore = session.values, sidecarsBefore = sidecars(), imageBefore = session.settledPreview()?.image
                 runScript(text, folder: folder, session: session, ask: false) { result in
                     let valuesAfter = session.values, sidecarsAfter = sidecars()
-                    let sameImage = imageBefore != nil && session.settledPreview() === imageBefore
+                    let sameImage = imageBefore != nil && session.settledPreview()?.image === imageBefore
                     Log.note("debug", "isolation: panel values \(valuesAfter == valuesBefore ? "unchanged" : "CHANGED") · sidecars \(sidecarsAfter == sidecarsBefore ? "unchanged" : "CHANGED") · image on screen \(sameImage ? "unchanged" : "CHANGED")",
                              fields: ["valuesBefore": valuesBefore.mapValues { Double($0) }, "valuesAfter": valuesAfter.mapValues { Double($0) },
                                       "sidecarsBefore": sidecarsBefore, "sidecarsAfter": sidecarsAfter, "imageUnchanged": sameImage,

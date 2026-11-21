@@ -12,6 +12,14 @@ import TraincullCore
 /// The picture drawn may be a smaller preview of the same frame; it is stretched over the space.
 final class HeroNSView: NSView {
     private var image: CGImage?
+    /// A sharper picture of part of the frame, drawn over `image`: the visible region rendered
+    /// at full resolution when zoomed. `detailRect` is where it sits, in space pixels.
+    private var detail: CGImage?
+    private var detailRect = CGRect.zero
+    /// What is on screen, for the status line's check: "Draft", "Raw" or "" (a preview).
+    private(set) var shownKind = ""
+    /// Called when the zoom, the position or the size of the view changes.
+    var onViewportChange: (() -> Void)?
     private(set) var space = CGSize.zero
     private var isFit = true
     /// View points per space pixel, when not fitted.
@@ -89,7 +97,10 @@ final class HeroNSView: NSView {
     /// Shows a picture of the current frame. `newFrame` returns to the fitted view, unless
     /// `keepZoom` asks a zoomed view to stay at the same magnification and the same spot of the
     /// new frame (stepping through a burst in the side-by-side view).
-    func show(_ picture: CGImage?, space newSpace: CGSize, newFrame: Bool, keepZoom: Bool = false) {
+    func show(_ picture: CGImage?, space newSpace: CGSize, newFrame: Bool, keepZoom: Bool = false, kind: String = "") {
+        // A new whole picture replaces any sharper part drawn over the old one.
+        detail = nil
+        shownKind = kind
         if newFrame {
             stopGlide()
             if keepZoom, !isFit, space.width > 0, space.height > 0, newSpace.width > 0, fitScale > 0 {
@@ -118,6 +129,33 @@ final class HeroNSView: NSView {
         needsDisplay = true
     }
 
+    /// Shows a picture of part of the frame over the whole one: `rect` in space pixels.
+    func showDetail(_ picture: CGImage, rect: CGRect, kind: String) {
+        detail = picture
+        detailRect = rect
+        shownKind = kind
+        needsDisplay = true
+    }
+
+    func clearDetail() {
+        guard detail != nil else { return }
+        detail = nil
+        needsDisplay = true
+    }
+
+    /// The picture on screen for the part in view: the sharper part if there is one, else the
+    /// whole picture, with the rectangle of the space it covers.
+    var shownPicture: (image: CGImage, rect: CGRect)? {
+        if let d = detail { return (d, detailRect) }
+        return image.map { ($0, CGRect(origin: .zero, size: space)) }
+    }
+
+    /// A zoom in percent (100 = one picture pixel per screen pixel) centred on a spot of the
+    /// frame (fractions), at once.
+    func zoom(percent: CGFloat, spot: CGPoint) {
+        follow(scale: percent / 100 / backing, face: nil, spot: spot, animated: false)
+    }
+
     func fit(animated: Bool = true) {
         if isFit { return }
         let from = shown
@@ -138,6 +176,15 @@ final class HeroNSView: NSView {
     }
 
     var screenPixelsPerPicturePixel: CGFloat { shownScale * backing }
+
+    /// Where the view is heading once any glide ends: the part of the picture in view (space
+    /// pixels, origin top left) and how many screen pixels one picture pixel then takes up.
+    var targetView: (rect: CGRect, pixelsPerPicturePixel: CGFloat) {
+        let s = targetScale, c = targetCenter
+        guard s > 0 else { return (.zero, 1) }
+        let r = CGRect(x: c.x - bounds.width / 2 / s, y: c.y - bounds.height / 2 / s, width: bounds.width / s, height: bounds.height / s)
+        return (r.intersection(CGRect(origin: .zero, size: space)), s * backing)
+    }
 
     /// View points per image pixel when zoomed; nil when fitted.
     var zoomScale: CGFloat? { isFit ? nil : scale }
@@ -229,7 +276,10 @@ final class HeroNSView: NSView {
         settle(from: from, animated: animated)
     }
 
-    private func report() { onZoom?(isFit, Int((targetScale * backing * 100).rounded())) }
+    private func report() {
+        onZoom?(isFit, Int((targetScale * backing * 100).rounded()))
+        onViewportChange?()
+    }
 
     /// Keeps the image from leaving empty space at an edge.
     private func clamp() {
@@ -251,6 +301,9 @@ final class HeroNSView: NSView {
         report()
         needsDisplay = true
     }
+
+    /// The view's size in screen pixels.
+    var pixelSize: CGSize { CGSize(width: bounds.width * backing, height: bounds.height * backing) }
 
     override func draw(_ dirtyRect: NSRect) {
         NSColor(srgbRed: 0.043, green: 0.043, blue: 0.047, alpha: 1).setFill()
@@ -285,6 +338,21 @@ final class HeroNSView: NSView {
         // draws quickly and the last frame, once it has stopped, is drawn properly.
         ctx.interpolationQuality = gliding ? .low : ((kx > 0.99 && s * backing >= 1) ? .none : .high)
         ctx.draw(part, in: CGRect(x: left, y: bounds.height - top - h * s, width: w * s, height: h * s))
+        // The sharper part, where it is in view.
+        if let d = detail, !detailRect.isEmpty {
+            let seen = visible.intersection(detailRect)
+            let dx = CGFloat(d.width) / detailRect.width, dy = CGFloat(d.height) / detailRect.height
+            let dCrop = CGRect(x: (seen.minX - detailRect.minX) * dx, y: (seen.minY - detailRect.minY) * dy,
+                               width: seen.width * dx, height: seen.height * dy).integral
+                .intersection(CGRect(x: 0, y: 0, width: d.width, height: d.height))
+            if !seen.isEmpty, !dCrop.isEmpty, let dPart = d.cropping(to: dCrop) {
+                let x0 = detailRect.minX + dCrop.minX / dx, y0 = detailRect.minY + dCrop.minY / dy
+                let w0 = dCrop.width / dx, h0 = dCrop.height / dy
+                let l = bounds.width / 2 + (x0 - c.x) * s, t = bounds.height / 2 + (y0 - c.y) * s
+                ctx.interpolationQuality = gliding ? .low : ((dx > 0.99 && s * backing >= 1) ? .none : .high)
+                ctx.draw(dPart, in: CGRect(x: l, y: bounds.height - t - h0 * s, width: w0 * s, height: h0 * s))
+            }
+        }
     }
 
     // MARK: Input
@@ -323,6 +391,7 @@ final class HeroNSView: NSView {
         center.y -= event.scrollingDeltaY * k / scale
         clamp()
         needsDisplay = true
+        onViewportChange?()
     }
 
     /// Pinch zooms about the pointer, between fit and 400%.

@@ -57,7 +57,9 @@ jobs:
         timeout-minutes: 30
         run: |
           set -o pipefail
-          swift test --filter TrainCullTests 2>&1 | tee "$RUNNER_TEMP/mac-tests.log"
+          # The large made-up DNG (7008 × 4672, the a7 IV's pixel count) for the preview tests.
+          swift run -c release MakeDng "$RUNNER_TEMP/big.dng" 7008 4672
+          TC_BIG_DNG="$RUNNER_TEMP/big.dng" swift test --filter TrainCullTests 2>&1 | tee "$RUNNER_TEMP/mac-tests.log"
           { echo "### Spec results (made-up DNG)"; grep -h "SPEC-RESULT" "$RUNNER_TEMP/mac-tests.log" | sed 's/^/- /'; } >> "$GITHUB_STEP_SUMMARY"
       # The version is in packaging/VERSION. A version tag gives its own alpha number; anywhere
       # else the number follows on from the last release of this version, so a failed build
@@ -144,6 +146,22 @@ jobs:
           EOF
           shoot launch-debug fixture-debug 60 -TCListDNG YES -TCDebugResetCounter YES -TCDebugScript "$PWD/build/selftest.json" -TCDebugExports 2
           shoot launch-debug-zoomed fixture-debug 30 -TCListDNG YES -TCDebugZoomedExports 1
+          # C1, C2, C5-C8: the performance run on the large made-up DNG, with this build's preview
+          # and again the alpha 2 way, each in its own launch, until its log says it finished.
+          mkdir -p build/fixture-perf
+          swift run -c release MakeDng "$PWD/build/fixture-perf/BIG.dng" 7008 4672
+          perf() { # <picture name> <seconds at most> [arguments]
+            open -n build/TrainCull.app --args -TCOpenFolder "$PWD/build/fixture-perf" -TCListDNG YES -TCEdit YES -TCPerf YES "${@:3}"
+            for i in $(seq 1 "$2"); do
+              sleep 1
+              if grep -q -E "perf +finished" "$(ls -t "$HOME/Library/Logs/TrainCull/"*.log | head -1)"; then echo "finished after $i s"; break; fi
+            done
+            screencapture -x "build/$1.png" || true
+            pkill -x TrainCull || true
+            sleep 2
+          }
+          perf launch-perf 300
+          perf launch-perf-alpha2 420 -TCPreviewLegacy YES
           shasum -a 256 build/fixture-debug/SYNTHETIC.xmp
           ls -lR "$HOME/Pictures/TrainCull Debug" || true
           LOGS="$HOME/Library/Logs/TrainCull"
@@ -212,6 +230,75 @@ jobs:
           ok &= b12
           sys.exit(0 if ok else 1)
           EOF
+      # C1, C2, C5-C8 from the two performance runs.
+      - name: Check the preview performance (C1, C2, C5-C8)
+        run: |
+          set -o pipefail
+          python3 - "$HOME/Library/Logs/TrainCull" <<'EOF' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json, pathlib, statistics, sys
+          runs = {}
+          for f in sorted(pathlib.Path(sys.argv[1]).glob("*.jsonl")):
+              events = [json.loads(l) for l in f.read_text().splitlines()]
+              start = [e for e in events if e["category"] == "perf" and e["message"].startswith("start")]
+              if start:
+                  runs["alpha2" if start[0]["fields"]["tuning"]["legacy"] else "new"] = events
+          if set(runs) != {"new", "alpha2"}:
+              print(f"- SPEC-RESULT C1–C8 (DNG): NOT RUN — perf runs found: {sorted(runs)}"); sys.exit(1)
+          def of(events, cat): return [e.get("fields", {}) for e in events if e["category"] == cat]
+          def mem(events, what): return next((m["footprintMB"] for m in of(events, "perf") if m.get("what") == what), None)
+          ok = True
+          n, o = runs["new"], runs["alpha2"]
+          nd, od = of(n, "drag"), of(o, "drag")
+          nsel, osel = of(n, "render")[0], of(o, "render")[0]
+          # C1
+          c1 = nsel["filterCreations"] == 1 and nd[0]["filterCreations"] == 0 and nd[1]["filterCreations"] == 0
+          print(f"- SPEC-RESULT C1 decode reuse (DNG): this build {nsel['filterCreations']} Apple raw filter on selection, {nd[0]['filterCreations']} more during the 50-step drag at fit, {nd[1]['filterCreations']} at 100%; "
+                f"alpha 2 path {osel['filterCreations']} on selection, {od[0]['filterCreations']} and {od[1]['filterCreations']} during the drags — {'PASS' if c1 else 'FAIL'}")
+          ok &= c1
+          # C2
+          for i, where in [(0, "fit"), (1, "100%")]:
+              a, b = nd[i], od[i]
+              c2 = b["medianFrameMs"] > 0 and a["medianFrameMs"] <= b["medianFrameMs"] / 3
+              print(f"- SPEC-RESULT C2 drag speed at {where} (DNG): this build median {a['medianFrameMs']:.0f} ms, p95 {a['p95FrameMs']:.0f}, max {a['maxFrameMs']:.0f} ({a['framesShown']} frames shown); "
+                    f"alpha 2 path median {b['medianFrameMs']:.0f} ms, p95 {b['p95FrameMs']:.0f}, max {b['maxFrameMs']:.0f} ({b['framesShown']} shown); ratio {a['medianFrameMs'] / max(b['medianFrameMs'], 0.001):.2f} — {'PASS' if c2 else 'FAIL'}")
+              ok &= c2
+          # C5: frames shown in order, the settled frame for the final value
+          def order(events):
+              bad, last = 0, 0
+              for p in of(events, "preview"):
+                  if p["seq"] < last: bad += 1
+                  last = max(last, p["seq"])
+              return bad
+          c5 = order(n) == 0 and all(d["settledMatchesFinal"] for d in nd[:2])
+          print(f"- SPEC-RESULT C5 ordering (DNG): frames shown out of order {order(n)} (alpha 2 path {order(o)}); frames dropped in the 50-step drags {nd[0]['framesDropped']} at fit, {nd[1]['framesDropped']} at 100%; settled frame for the final value: {all(d['settledMatchesFinal'] for d in nd[:2])} — {'PASS' if c5 else 'FAIL'}")
+          ok &= c5
+          # C6
+          for label, a, b in [("50-step drag at fit", nd[0]["peakMemoryMB"], od[0]["peakMemoryMB"]), ("50-step drag at 100%", nd[1]["peakMemoryMB"], od[1]["peakMemoryMB"]),
+                              ("at 400%", mem(n, "at 400%, settled"), mem(o, "at 400%, settled"))]:
+              c6 = a is not None and b is not None and a <= b / 2
+              print(f"- SPEC-RESULT C6 memory {label} (DNG): this build {a:.0f} MB, alpha 2 path {b:.0f} MB ({a / b * 100:.0f}%) — {'PASS' if c6 else 'FAIL'}")
+              ok &= c6
+          # C7
+          settles = [d for d in nd[2:7]]
+          c7 = len(settles) == 5 and all(abs(d["releaseToSettleStartMs"] - d["tuning"]["settleDelay"] * 1000) <= 50 for d in settles)
+          print("- SPEC-RESULT C7 settle delay (DNG): " + "; ".join(f"{d['tuning']['settleDelay']:.2f} s → settle started {d['releaseToSettleStartMs']:.0f} ms after release" for d in settles) + f" — {'PASS' if c7 else 'FAIL'}")
+          rest = nd[7:]
+          draft_off = next((d for d in rest if d["tuning"]["draftMode"] is False), None)
+          size_flip = next((d for d in rest if d["tuning"]["viewSizeSettle"] != nd[0]["tuning"]["viewSizeSettle"]), None)
+          region_off = next((d for d in rest if d["tuning"]["visibleRegion"] is False), None)
+          drafts_off = [p for p in of(n, "preview") if p["tuning"]["draftMode"] is False and p["draft"] is True]
+          took = draft_off is not None and size_flip is not None and region_off is not None and "full resolution" in region_off["settledWant"] \
+              and (("full resolution" in size_flip["settledWant"]) != size_flip["tuning"]["viewSizeSettle"])
+          print(f"- SPEC-RESULT C7 settings changed mid-session (DNG): draft mode off {draft_off is not None}; view-size settle flipped, settled as {size_flip and size_flip['settledWant']}; visible region off at 100%, settled as {region_off and region_off['settledWant']} — {'PASS' if took else 'FAIL'}")
+          ok &= c7 and took
+          # C8
+          c8l = next((p for p in of(n, "perf") if "samples" in p), None)
+          c8 = c8l is not None and c8l["samples"] > 0 and c8l["mismatches"] == 0
+          print(f"- SPEC-RESULT C8 status label (DNG): {c8l and c8l['samples']} samples while a raw frame was on screen, {c8l and c8l['mismatches']} where the status didn't match — {'PASS' if c8 else 'FAIL'}")
+          ok &= c8
+          print(f"- (information) selection: first raw render this build {nsel['timeToFirstRawRenderMs']:.0f} ms, alpha 2 path {osel['timeToFirstRawRenderMs']:.0f} ms; release to settled at fit {nd[0]['releaseToSettledMs']:.0f} ms vs {od[0]['releaseToSettledMs']:.0f} ms")
+          sys.exit(0 if ok else 1)
+          EOF
       - name: Check the change log (T12)
         run: |
           set -o pipefail
@@ -260,6 +347,8 @@ jobs:
             build/launch-script.png
             build/launch-debug.png
             build/launch-debug-zoomed.png
+            build/launch-perf.png
+            build/launch-perf-alpha2.png
             build/logs
             ~/Pictures/TrainCull Debug
           if-no-files-found: ignore
