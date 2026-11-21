@@ -994,7 +994,7 @@ final class Session: ObservableObject {
         var parts: [String] = []
         for c in Adjust.controls where c.kind != .neutralPoint {
             let d = facts.defaults[c.key]
-            let flag: Any = c.supportProperty.map { facts.supported[$0] ?? false } ?? "n/a"
+            let flag: Any = c.supportProperty.map { (facts.supported[$0] ?? false) as Any } ?? "n/a"
             controls[c.title] = ["appleProperty": c.appleProperty, "default": d.map { Double($0) as Any } ?? NSNull(), "supported": flag]
             let shown = d.map { String(format: "%.3f", $0) } ?? "?"
             parts.append("\(c.title) \(shown)\(c.supportProperty.map { facts.supported[$0] == false ? " (not supported)" : "" } ?? "")")

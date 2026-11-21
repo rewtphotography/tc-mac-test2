@@ -46,7 +46,9 @@ jobs:
       - name: Raw filter API
         run: |
           H="$(xcrun --show-sdk-path)/System/Library/Frameworks/CoreImage.framework/Headers/CIRAWFilter.h"
-          grep -n -E "^CI_EXPORT|API_AVAILABLE|isLensCorrection|baselineExposure|isHighlightRecovery|isGamutMapping|neutralLocation|neutralTemperature|supportedDecoderVersions|decoderVersion|Supported" "$H" | head -120
+          grep -n -E "API_AVAILABLE|API_UNAVAILABLE|@interface|@property" "$H"
+          echo "---- every mention of highlights, in all of Core Image's headers ----"
+          grep -rn -i "highlight" "$(dirname "$H")" || echo "none"
       # The core library's own tests run in the Linux job. Here, only the ones that need a Mac,
       # among them the spec tests on the made-up DNG; their figures go in the run's summary.
       - name: Tests

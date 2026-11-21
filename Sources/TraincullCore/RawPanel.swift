@@ -47,6 +47,11 @@ public enum DecoderLine: Equatable {
 public struct ControlState: Equatable {
     public let enabled: Bool
     public let redDot: Bool
+
+    public init(enabled: Bool, redDot: Bool) {
+        self.enabled = enabled
+        self.redDot = redDot
+    }
 }
 
 public enum RawPanel {
