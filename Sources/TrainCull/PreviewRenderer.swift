@@ -8,7 +8,8 @@ import TraincullCore
 struct PreviewTuning {
     static let settleChoices: [Double] = [0.1, 0.25, 0.4, 0.75, 1.0]
     static let keys = (settle: "TCPreviewSettleDelay", draft: "TCPreviewDraftMode", viewSize: "TCPreviewViewSizeSettle",
-                       region: "TCPreviewVisibleRegion", legacy: "TCPreviewLegacy")
+                       region: "TCPreviewVisibleRegion", legacy: "TCPreviewLegacy",
+                       draftFilter: "TCPreviewDraftFilter", settleMethod: "TCPreviewSettleMethod")
     /// View-size settled render at fit (Core Image's Lanczos on the full-resolution decode): on
     /// only while test C3b passes; see the notes.
     static let viewSizeSettleDefault = true
@@ -24,6 +25,11 @@ struct PreviewTuning {
     /// The alpha 2 way (a new filter and a full decode for every render, no draft mode, full
     /// resolution settled, 0.4 s): a launch setting for comparison runs only.
     var legacy: Bool
+    /// Launch settings for comparison runs: a second filter kept for drag frames at fit, and
+    /// how a view-size settled render is made ("lanczos" from the full decode, or "scale":
+    /// Apple's scale factor).
+    var draftFilter = true
+    var settleMethod = "lanczos"
 
     static var current: PreviewTuning {
         let d = UserDefaults.standard
@@ -34,16 +40,20 @@ struct PreviewTuning {
                              draftMode: d.object(forKey: keys.draft) as? Bool ?? true,
                              viewSizeSettle: d.object(forKey: keys.viewSize) as? Bool ?? viewSizeSettleDefault,
                              visibleRegion: d.object(forKey: keys.region) as? Bool ?? true,
-                             legacy: false)
+                             legacy: false,
+                             draftFilter: d.object(forKey: keys.draftFilter) as? Bool ?? true,
+                             settleMethod: d.string(forKey: keys.settleMethod) ?? "lanczos")
     }
 
     var fields: [String: Any] {
-        ["settleDelay": settleDelay, "draftMode": draftMode, "viewSizeSettle": viewSizeSettle, "visibleRegion": visibleRegion, "legacy": legacy]
+        ["settleDelay": settleDelay, "draftMode": draftMode, "viewSizeSettle": viewSizeSettle, "visibleRegion": visibleRegion, "legacy": legacy,
+         "draftFilter": draftFilter, "settleMethod": settleMethod]
     }
 
     var text: String {
         legacy ? "alpha 2 path" : String(format: "settle %.2f s", settleDelay)
             + " · draft mode \(draftMode ? "on" : "off") · view-size settle \(viewSizeSettle ? "on" : "off") · visible region \(visibleRegion ? "on" : "off")"
+            + (draftFilter ? "" : " · no draft filter") + (settleMethod == "lanczos" ? "" : " · settle by \(settleMethod)")
     }
 }
 
@@ -79,6 +89,8 @@ final class PreviewRenderer {
         let requested: CFAbsoluteTime
         /// A quick frame while a slider moves (the alpha 2 path makes them without draft mode).
         var quick: Bool = false
+        var useDraftFilter = true
+        var lanczos = true
     }
 
     struct Frame {
@@ -145,10 +157,10 @@ final class PreviewRenderer {
 
     /// Readies the draft filter in the background, so the first frame of a drag at fit doesn't
     /// pay for Apple's draft decode (Edit mode only). Main thread.
-    func prewarm(_ values: [String: Float], viewLongEdge: CGFloat) {
-        guard !legacy, isIdle else { return }
+    func prewarm(_ values: [String: Float], viewLongEdge: CGFloat, done: @escaping (Int) -> Void) {
+        guard !legacy, isIdle, PreviewTuning.current.draftFilter else { return }
         submit(Request(seq: 0, values: values, want: .whole(viewLongEdge: viewLongEdge), draft: true, requested: CFAbsoluteTimeGetCurrent(),
-                       quick: true)) { _ in }
+                       quick: true)) { frame in done(frame?.creations ?? 0) }
     }
 
     /// A picture made smaller by Core Image's Lanczos filter, its corner kept at the origin.
@@ -195,31 +207,45 @@ final class PreviewRenderer {
     /// explicitly can differ by a level), so then a fresh filter is made. The alpha 2 path makes
     /// a fresh one every time.
     private func prepared(_ values: [String: Float]) -> CIRAWFilter? {
-        let unset = applied.keys.contains { values[$0] == nil }
-        if filter == nil || unset || legacy {
+        if filter == nil || legacy {
             filter = CIRAWFilter(imageURL: url)
             creations += 1
             applied = [:]
-            if let f = filter, fullSize == .zero, let e = f.outputImage?.extent, !e.isInfinite, !e.isEmpty { fullSize = e.size }
+            if let f = filter {
+                appleDefaults = Adjust.properties(f)
+                if fullSize == .zero, let e = f.outputImage?.extent, !e.isInfinite, !e.isEmpty { fullSize = e.size }
+            }
         }
         guard let f = filter else { return nil }
-        let changed = values.filter { applied[$0.key] != $0.value }
-        Adjust.apply(changed, to: f)
+        Adjust.apply(PreviewRenderer.changes(from: applied, to: values, defaults: appleDefaults), to: f)
         applied = values
         return f
+    }
+
+    /// Apple's defaults for the file, read from the first filter before anything was set.
+    private var appleDefaults: [String: Float] = [:]
+
+    /// What to set on a kept filter to go from `old` to `new`: the changed values, and Apple's
+    /// own default for a control no longer changed (a filter can't be told to forget a value).
+    static func changes(from old: [String: Float], to new: [String: Float], defaults: [String: Float]) -> [String: Float] {
+        var out = new.filter { old[$0.key] != $0.value }
+        for key in old.keys where new[key] == nil {
+            if let d = defaults[key] { out[key] = d }
+        }
+        return out
     }
 
     /// The draft filter, with only what changed set on it (a fresh one if a control went back
     /// to its default).
     private func preparedDraft(_ values: [String: Float]) -> CIRAWFilter? {
-        if draftFilter == nil || draftApplied.keys.contains(where: { values[$0] == nil }) {
+        if draftFilter == nil {
             draftFilter = CIRAWFilter(imageURL: url)
             creations += 1
             draftApplied = [:]
             draftFilter?.isDraftModeEnabled = true
         }
         guard let f = draftFilter else { return nil }
-        Adjust.apply(values.filter { draftApplied[$0.key] != $0.value }, to: f)
+        Adjust.apply(PreviewRenderer.changes(from: draftApplied, to: values, defaults: appleDefaults), to: f)
         draftApplied = values
         return f
     }
@@ -229,7 +255,7 @@ final class PreviewRenderer {
         let meter = JobMeter()
         // Quick frames at fit in draft mode go to the draft filter.
         var useDraftFilter = false
-        if !legacy, r.quick, r.draft, case .whole(viewLongEdge: _?) = r.want { useDraftFilter = true }
+        if !legacy, r.quick, r.draft, r.useDraftFilter, case .whole(viewLongEdge: _?) = r.want { useDraftFilter = true }
         if useDraftFilter, filter == nil { _ = prepared([:]) } // the main filter gives the frame's size
         let chosen = useDraftFilter ? preparedDraft(r.values) : prepared(r.values)
         guard let f = chosen, fullSize.width > 0 else { _ = meter.finish(); return nil }
@@ -248,7 +274,7 @@ final class PreviewRenderer {
         // left as Apple made it.
         // A settled picture at the view's size is made from the full-resolution decode, made
         // smaller by Core Image (Lanczos), so it matches the export made smaller the same way.
-        let downscale = !r.quick && scale < 1 && { if case .whole = r.want { return true }; return false }()
+        let downscale = r.lanczos && !r.quick && scale < 1 && { if case .whole = r.want { return true }; return false }()
         if !useDraftFilter, f.isDraftModeEnabled != r.draft { f.isDraftModeEnabled = r.draft }
         let filterScale: Float = downscale ? 1 : scale
         if f.scaleFactor != filterScale { f.scaleFactor = filterScale }

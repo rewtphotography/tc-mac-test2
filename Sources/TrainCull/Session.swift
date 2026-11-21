@@ -1172,8 +1172,10 @@ final class Session: ObservableObject {
     private func submitPreview(_ item: FrameItem, want: PreviewRenderer.Want, draft: Bool, quick: Bool, trigger: String) {
         let r = rendererFor(item)
         previewSeq += 1
+        let tuning = PreviewTuning.current
         let request = PreviewRenderer.Request(seq: previewSeq, values: item.adjust, want: want, draft: draft,
-                                              requested: CFAbsoluteTimeGetCurrent(), quick: quick)
+                                              requested: CFAbsoluteTimeGetCurrent(), quick: quick,
+                                              useDraftFilter: tuning.draftFilter, lanczos: tuning.settleMethod == "lanczos")
         let token = heroToken, edit = editToken
         r.submit(request) { [weak self] frame in
             self?.previewArrived(frame, item: item, heroToken: token, editToken: edit, trigger: trigger)
@@ -1297,7 +1299,11 @@ final class Session: ObservableObject {
     private func prewarmDraft() {
         guard editing, compare == nil, let item = current, let view = slots[0].view, PreviewTuning.current.draftMode else { return }
         let px = view.pixelSize
-        rendererFor(item).prewarm(item.adjust, viewLongEdge: max(px.width, px.height))
+        rendererFor(item).prewarm(item.adjust, viewLongEdge: max(px.width, px.height)) { [weak self] creations in
+            guard let self = self, self.current === item else { return }
+            self.lastKnownCreations = max(self.lastKnownCreations, creations)
+            Log.note("render", "\(item.name): draft filter ready · Apple raw filters made: \(creations)", fields: ["file": item.name, "prewarmCreations": creations])
+        }
     }
 
     /// One line per drag, once its settled render is on screen.
@@ -1306,6 +1312,7 @@ final class Session: ObservableObject {
         let now = CFAbsoluteTimeGetCurrent()
         let ms = d.frameMs.sorted()
         func pct(_ p: Double) -> Double { ms.isEmpty ? 0 : ms[min(ms.count - 1, max(0, Int((p * Double(ms.count)).rounded(.up)) - 1))] }
+        let maxMs: Double = ms.last ?? 0
         let measured = d.meter.finish()
         let peak = ((measured.fields["memory_peak"] as? Double) ?? 0) / 1_048_576
         let stale = staleFrames - d.staleAtStart
@@ -1316,7 +1323,7 @@ final class Session: ObservableObject {
             "file": item.name, "control": control?.title ?? d.key, "appleProperty": control?.appleProperty ?? d.key,
             "startValue": Double(d.start), "endValue": Double(d.end ?? d.start),
             "framesRendered": d.frameMs.count + stale, "framesShown": d.frameMs.count, "framesDropped": replaced + stale,
-            "medianFrameMs": pct(0.5), "p95FrameMs": pct(0.95), "maxFrameMs": ms.last ?? 0,
+            "medianFrameMs": pct(0.5), "p95FrameMs": pct(0.95), "maxFrameMs": maxMs,
             "releaseToSettleStartMs": d.settleStart.map { ($0 - released) * 1000 as Any } ?? NSNull(),
             "releaseToSettledMs": (now - released) * 1000,
             "peakMemoryMB": peak, "zoom": zoomTexts[0], "tuning": d.tuning.fields,
@@ -1325,7 +1332,7 @@ final class Session: ObservableObject {
             "settledSize": [settled.image.width, settled.image.height], "settledWant": settled.request.want.text,
         ]
         Log.note("drag", "\(item.name): \(control?.title ?? d.key) \(d.start) → \(d.end ?? d.start) · \(d.frameMs.count) frames shown, \(replaced + stale) dropped"
-            + String(format: " · median %.0f ms, p95 %.0f ms, max %.0f ms", pct(0.5), pct(0.95), ms.last ?? 0)
+            + String(format: " · median %.0f ms, p95 %.0f ms, max %.0f ms", pct(0.5), pct(0.95), maxMs)
             + String(format: " · release to settled %.0f ms · peak %.0f MB", (now - released) * 1000, peak)
             + " · \(zoomTexts[0]) · \(d.tuning.text)", fields: fields)
     }
