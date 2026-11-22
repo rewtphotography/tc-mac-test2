@@ -31,7 +31,7 @@ struct DebugCommands: Commands {
 struct PreviewTuningMenu: View {
     @AppStorage(PreviewTuning.keys.settle) private var settle = 0.25
     @AppStorage(PreviewTuning.keys.draft) private var draft = true
-    @AppStorage(PreviewTuning.keys.viewSize) private var viewSize = PreviewTuning.viewSizeSettleDefault
+    @AppStorage(PreviewTuning.keys.appleDownscale) private var appleDownscale = false
     @AppStorage(PreviewTuning.keys.region) private var region = true
 
     var body: some View {
@@ -42,7 +42,8 @@ struct PreviewTuningMenu: View {
             .pickerStyle(.inline)
             Divider()
             Toggle("Draft mode during drags", isOn: Binding(get: { draft }, set: { draft = $0; DebugTools.tuningChanged("draft mode") }))
-            Toggle("View-size settled render at fit", isOn: Binding(get: { viewSize }, set: { viewSize = $0; DebugTools.tuningChanged("view-size settle") }))
+            Toggle("View-size settled render at fit (Apple's downscaling)",
+                   isOn: Binding(get: { appleDownscale }, set: { appleDownscale = $0; DebugTools.tuningChanged("Apple's downscaling at fit") }))
             Toggle("Visible-region rendering at 100% and above", isOn: Binding(get: { region }, set: { region = $0; DebugTools.tuningChanged("visible region") }))
         }
     }

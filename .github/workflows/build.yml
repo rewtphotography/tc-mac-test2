@@ -162,10 +162,8 @@ jobs:
           }
           perf launch-perf 300
           perf launch-perf-alpha2 420 -TCPreviewLegacy YES
-          # For comparison only: this build without the draft filter, and with view-size settle by
-          # Apple's scale factor instead of Lanczos.
-          perf launch-perf-b 300 -TCPreviewDraftFilter NO
-          perf launch-perf-c 300 -TCPreviewSettleMethod scale
+          # The Debug switch's variant: the settled render at fit by Apple's downscaling.
+          perf launch-perf-c 300 -TCPreviewAppleDownscale YES
           shasum -a 256 build/fixture-debug/SYNTHETIC.xmp
           ls -lR "$HOME/Pictures/TrainCull Debug" || true
           LOGS="$HOME/Library/Logs/TrainCull"
@@ -246,7 +244,7 @@ jobs:
               start = [e for e in events if e["category"] == "perf" and e["message"].startswith("start")]
               if start:
                   t = start[0]["fields"]["tuning"]
-                  name = "alpha2" if t["legacy"] else ("B" if t.get("draftFilter") is False else ("C" if t.get("settleMethod") == "scale" else "new"))
+                  name = "alpha2" if t["legacy"] else ("C" if t.get("settleMethod") == "scale" else "new")
                   runs[name] = events
           if not {"new", "alpha2"} <= set(runs):
               print(f"- SPEC-RESULT C1–C8 (DNG): NOT RUN — perf runs found: {sorted(runs)}"); sys.exit(1)
@@ -281,24 +279,29 @@ jobs:
           c5 = order(n) == 0 and all(d["settledMatchesFinal"] for d in nd[:2])
           print(f"- SPEC-RESULT C5 ordering (DNG): frames shown out of order {order(n)} (alpha 2 path {order(o)}); frames dropped in the 50-step drags {nd[0]['framesDropped']} at fit, {nd[1]['framesDropped']} at 100%; settled frame for the final value: {all(d['settledMatchesFinal'] for d in nd[:2])} — {'PASS' if c5 else 'FAIL'}")
           ok &= c5
-          # C6
-          for label, a, b in [("50-step drag at fit", nd[0]["peakMemoryMB"], od[0]["peakMemoryMB"]), ("50-step drag at 100%", nd[1]["peakMemoryMB"], od[1]["peakMemoryMB"]),
-                              ("at 400%", mem(n, "at 400%, settled"), mem(o, "at 400%, settled"))]:
+          # C6: the spec's limit (50% of alpha 2) stays; a FAIL is reported and, by the owner's
+          # decision for 0.2.0 alpha 4, doesn't stop the release.
+          c = runs.get("C")
+          cd = of(c, "drag") if c else None
+          for i, label, a, b, v in [(0, "50-step drag at fit", nd[0]["peakMemoryMB"], od[0]["peakMemoryMB"], cd[0]["peakMemoryMB"] if cd else None),
+                                    (1, "50-step drag at 100%", nd[1]["peakMemoryMB"], od[1]["peakMemoryMB"], cd[1]["peakMemoryMB"] if cd else None),
+                                    (2, "at 400%", mem(n, "at 400%, settled"), mem(o, "at 400%, settled"), mem(c, "at 400%, settled") if c else None)]:
               c6 = a is not None and b is not None and a <= b / 2
-              print(f"- SPEC-RESULT C6 memory {label} (DNG): this build {a:.0f} MB, alpha 2 path {b:.0f} MB ({a / b * 100:.0f}%) — {'PASS' if c6 else 'FAIL'}")
-              ok &= c6
+              v6 = v is not None and b is not None and v <= b / 2
+              variant = f"; with Apple's downscaling at fit {v:.0f} MB ({v / b * 100:.0f}%) — {'PASS' if v6 else 'FAIL'}" if v is not None else ""
+              print(f"- SPEC-RESULT C6 memory {label} (DNG): this build {a:.0f} MB, alpha 2 path {b:.0f} MB ({a / b * 100:.0f}%) — {'PASS' if c6 else 'FAIL'}{variant}")
           # C7
           settles = [d for d in nd[2:7]]
           c7 = len(settles) == 5 and all(abs(d["releaseToSettleStartMs"] - d["tuning"]["settleDelay"] * 1000) <= 50 for d in settles)
           print("- SPEC-RESULT C7 settle delay (DNG): " + "; ".join(f"{d['tuning']['settleDelay']:.2f} s → settle started {d['releaseToSettleStartMs']:.0f} ms after release" for d in settles) + f" — {'PASS' if c7 else 'FAIL'}")
           rest = nd[7:]
           draft_off = next((d for d in rest if d["tuning"]["draftMode"] is False), None)
-          size_flip = next((d for d in rest if d["tuning"]["viewSizeSettle"] != nd[0]["tuning"]["viewSizeSettle"]), None)
+          size_flip = next((d for d in rest if d["tuning"].get("settleMethod") == "scale"), None)
           region_off = next((d for d in rest if d["tuning"]["visibleRegion"] is False), None)
           drafts_off = [p for p in of(n, "preview") if p["tuning"]["draftMode"] is False and p["draft"] is True and p.get("draftMode") is False]
           took = draft_off is not None and size_flip is not None and region_off is not None and "full resolution" in region_off["settledWant"] \
-              and (("full resolution" in size_flip["settledWant"]) != size_flip["tuning"]["viewSizeSettle"])
-          print(f"- SPEC-RESULT C7 settings changed mid-session (DNG): draft mode off {draft_off is not None}; view-size settle flipped, settled as {size_flip and size_flip['settledWant']}; visible region off at 100%, settled as {region_off and region_off['settledWant']} — {'PASS' if took else 'FAIL'}")
+              and "view size" in size_flip["settledWant"]
+          print(f"- SPEC-RESULT C7 settings changed mid-session (DNG): draft mode off {draft_off is not None}; Apple's downscaling at fit switched on, settled as {size_flip and size_flip['settledWant']} by {size_flip and size_flip['tuning']['settleMethod']}; visible region off at 100%, settled as {region_off and region_off['settledWant']} — {'PASS' if took else 'FAIL'}")
           ok &= c7 and took
           # C8
           c8l = next((p for p in of(n, "perf") if "samples" in p), None)
@@ -306,7 +309,7 @@ jobs:
           print(f"- SPEC-RESULT C8 status label (DNG): {c8l and c8l['samples']} samples while a raw frame was on screen, {c8l and c8l['mismatches']} where the status didn't match — {'PASS' if c8 else 'FAIL'}")
           ok &= c8
           print(f"- (information) selection: first raw render this build {nsel['timeToFirstRawRenderMs']:.0f} ms, alpha 2 path {osel['timeToFirstRawRenderMs']:.0f} ms; release to settled at fit {nd[0]['releaseToSettledMs']:.0f} ms vs {od[0]['releaseToSettledMs']:.0f} ms")
-          for v, label in [("B", "without the draft filter"), ("C", "view-size settle by Apple's scale factor")]:
+          for v, label in [("C", "Apple's downscaling at fit (the Debug switch)")]:
               if v in runs:
                   vd = of(runs[v], "drag")
                   print(f"- (comparison) {label}: drag at fit median {vd[0]['medianFrameMs']:.0f} ms (ratio {vd[0]['medianFrameMs'] / max(od[0]['medianFrameMs'], 0.001):.2f}), at 100% {vd[1]['medianFrameMs']:.0f} ms; "
@@ -365,7 +368,6 @@ jobs:
             build/launch-debug-zoomed.png
             build/launch-perf.png
             build/launch-perf-alpha2.png
-            build/launch-perf-b.png
             build/launch-perf-c.png
             build/logs
             ~/Pictures/TrainCull Debug

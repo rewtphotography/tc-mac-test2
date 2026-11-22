@@ -128,6 +128,13 @@ final class PreviewTests: XCTestCase {
         let on = diff(a, exportSmall)
         let cg = diff(a, try p3(export, width: a.w, height: a.h))
         let passOn = on.mean <= 0.5 && on.max <= 4
+        // The Apple-downscaling variant (Debug ▸ Preview tuning, off by default), for the record.
+        var apple = PreviewRenderer.Request(seq: 50, values: values, want: fit, draft: false, requested: CFAbsoluteTimeGetCurrent())
+        apple.lanczos = false
+        let appleFrame = try XCTUnwrap(r.renderNow(apple))
+        let ap = try raw8(appleFrame.image)
+        let appleDiff = ap.w == a.w && ap.h == a.h ? diff(ap, exportSmall) : diff(ap, try p3(export, width: ap.w, height: ap.h))
+        print("SPEC-RESULT C3b Apple's downscaling at fit, the Debug switch, off by default (DNG): \(ap.w)×\(ap.h); mean \(String(format: "%.3f", appleDiff.mean)), max \(appleDiff.max) levels — \(appleDiff.mean <= 0.5 && appleDiff.max <= 4 ? "PASS" : "FAIL")")
         print("SPEC-RESULT C3b settled = export at fit, view-size settle ON (DNG): \(a.w)×\(a.h) (Lanczos at \(String(format: "%.3f", small.scale))); mean \(String(format: "%.3f", on.mean)), max \(on.max) levels (against the export made smaller by Core Graphics instead: mean \(String(format: "%.3f", cg.mean)), max \(cg.max)) — \(passOn ? "PASS" : "FAIL")")
         let full = try XCTUnwrap(r.renderNow(request(99, values, .whole(viewLongEdge: nil), draft: false)))
         let exportP3 = try p3ci(export)
@@ -135,7 +142,7 @@ final class PreviewTests: XCTestCase {
         // For reference: alpha 2's own settled render against the same export, compared the same way.
         let alpha2 = diff(try raw8(try XCTUnwrap(Imaging.renderRaw(url, values))), exportP3)
         let sameAsAlpha2 = diff(try raw8(full.image), try raw8(try XCTUnwrap(Imaging.renderRaw(url, values))))
-        print("SPEC-RESULT C3b settled = export at fit, view-size settle OFF (DNG): \(full.image.width)×\(full.image.height); mean \(String(format: "%.4f", off.mean)), max \(off.max) levels (alpha 2's render vs the same export: max \(alpha2.max); this build vs alpha 2: max \(sameAsAlpha2.max)) — \(off.max <= 1 ? "PASS" : "FAIL")")
+        print("SPEC-RESULT C3b (information) full resolution at fit, not used by default (DNG): \(full.image.width)×\(full.image.height); mean \(String(format: "%.4f", off.mean)), max \(off.max) levels (alpha 2's render vs the same export: max \(alpha2.max); this build vs alpha 2: max \(sameAsAlpha2.max))")
         // Reported, not asserted: the settled render is alpha 2's to the pixel (C9), and alpha 2's own
         // render already differs from the export by this much; the owner decides.
         XCTAssertEqual(sameAsAlpha2.max, 0)

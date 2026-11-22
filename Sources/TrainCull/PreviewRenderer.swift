@@ -9,9 +9,9 @@ struct PreviewTuning {
     static let settleChoices: [Double] = [0.1, 0.25, 0.4, 0.75, 1.0]
     static let keys = (settle: "TCPreviewSettleDelay", draft: "TCPreviewDraftMode", viewSize: "TCPreviewViewSizeSettle",
                        region: "TCPreviewVisibleRegion", legacy: "TCPreviewLegacy",
-                       draftFilter: "TCPreviewDraftFilter", settleMethod: "TCPreviewSettleMethod")
-    /// View-size settled render at fit (Core Image's Lanczos on the full-resolution decode): on
-    /// only while test C3b passes; see the notes.
+                       draftFilter: "TCPreviewDraftFilter", appleDownscale: "TCPreviewAppleDownscale")
+    /// The settled render at fit is made at the view's size (by Lanczos unless Apple's
+    /// downscaling is chosen): on, as test C3b passes; see the notes. Not in the Debug menu.
     static let viewSizeSettleDefault = true
 
     /// Seconds from the last change (or a drag's release) to the settled render.
@@ -25,10 +25,13 @@ struct PreviewTuning {
     /// The alpha 2 way (a new filter and a full decode for every render, no draft mode, full
     /// resolution settled, 0.4 s): a launch setting for comparison runs only.
     var legacy: Bool
-    /// Launch settings for comparison runs: a second filter kept for drag frames at fit, and
-    /// how a view-size settled render is made ("lanczos" from the full decode, or "scale":
-    /// Apple's scale factor).
+    /// A second filter kept for drag frames at fit (a launch setting for comparison runs).
     var draftFilter = true
+    /// How the settled render at fit is made at the view's size: "lanczos" (default), from the
+    /// full-resolution decode made smaller by Core Image, matching the export made smaller the
+    /// same way (C3b); or "scale", Apple's own downscaling (its scale factor): less memory, but
+    /// it differs from the export (C3b: mean 0.84, max 40 levels). Debug ▸ Preview tuning ▸
+    /// "View-size settled render at fit (Apple's downscaling)", off by default.
     var settleMethod = "lanczos"
 
     static var current: PreviewTuning {
@@ -42,7 +45,7 @@ struct PreviewTuning {
                              visibleRegion: d.object(forKey: keys.region) as? Bool ?? true,
                              legacy: false,
                              draftFilter: d.object(forKey: keys.draftFilter) as? Bool ?? true,
-                             settleMethod: d.string(forKey: keys.settleMethod) ?? "lanczos")
+                             settleMethod: d.bool(forKey: keys.appleDownscale) ? "scale" : "lanczos")
     }
 
     var fields: [String: Any] {
@@ -53,7 +56,7 @@ struct PreviewTuning {
     var text: String {
         legacy ? "alpha 2 path" : String(format: "settle %.2f s", settleDelay)
             + " · draft mode \(draftMode ? "on" : "off") · view-size settle \(viewSizeSettle ? "on" : "off") · visible region \(visibleRegion ? "on" : "off")"
-            + (draftFilter ? "" : " · no draft filter") + (settleMethod == "lanczos" ? "" : " · settle by \(settleMethod)")
+            + (draftFilter ? "" : " · no draft filter") + (settleMethod == "lanczos" ? "" : " · Apple's downscaling at fit")
     }
 }
 

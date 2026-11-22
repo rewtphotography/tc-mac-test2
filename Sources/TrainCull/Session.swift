@@ -1315,6 +1315,8 @@ final class Session: ObservableObject {
         let maxMs: Double = ms.last ?? 0
         let measured = d.meter.finish()
         let peak = ((measured.fields["memory_peak"] as? Double) ?? 0) / 1_048_576
+        let before = ((measured.fields["memory_before"] as? Double) ?? 0) / 1_048_576
+        let after = ((measured.fields["memory_after"] as? Double) ?? 0) / 1_048_576
         let stale = staleFrames - d.staleAtStart
         let replaced = (renderer?.replaced ?? d.replacedAtStart) - d.replacedAtStart
         let released = d.released ?? now
@@ -1326,7 +1328,7 @@ final class Session: ObservableObject {
             "medianFrameMs": pct(0.5), "p95FrameMs": pct(0.95), "maxFrameMs": maxMs,
             "releaseToSettleStartMs": d.settleStart.map { ($0 - released) * 1000 as Any } ?? NSNull(),
             "releaseToSettledMs": (now - released) * 1000,
-            "peakMemoryMB": peak, "zoom": zoomTexts[0], "tuning": d.tuning.fields,
+            "peakMemoryMB": peak, "memoryBeforeMB": before, "memoryAfterMB": after, "zoom": zoomTexts[0], "tuning": d.tuning.fields,
             "filterCreations": settled.creations - d.creationsAtStart,
             "outOfOrderShown": 0, "settledMatchesFinal": settled.request.values == item.adjust,
             "settledSize": [settled.image.width, settled.image.height], "settledWant": settled.request.want.text,

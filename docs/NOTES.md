@@ -153,6 +153,52 @@ every old tag still works) plus the few non-masking gains of alphas 7–23, re-m
 - Not carried over from the alpha 23 notes: everything about masking. The alpha 6
   measurements are below.
 
+## Instant-feeling slider drags (0.2.0 alpha 4)
+
+The owner's performance spec (2026-11-21). The single view now renders through
+`PreviewRenderer`:
+- **Decode once:** one Apple raw filter made on selection (it also gives the panel's
+  defaults, so no other filter is made for them) and reused; only changed settings are set,
+  on the renderer's own queue. A control going back to its default gets Apple's default value
+  set explicitly (a filter can't forget a value; within 1 level of a fresh filter, as T4 and
+  T11 measured). **Two filters, not one:** a second filter stays in Apple's draft mode at the
+  view's size for drag frames at fit, warmed up once the frame has settled in Edit mode. With
+  one filter, switching it between full resolution and draft mode at view size made Apple
+  decode again: the first drag frame took 724–915 ms and the fit drag was 0.59× alpha 2;
+  with the draft filter it is 0.30×.
+- **Draft mode** for drag frames only; settled renders and every export have it off.
+  Exports, debug exports and script runs keep their own fresh filters, at full quality.
+- **Visible region** when zoomed in: drafts and settled renders cover only the part in view
+  plus a 5% margin, drawn over the softer whole picture. **At fit** the settled render is
+  made at the view's size by Core Image's Lanczos on the full-resolution decode (C3b passes);
+  Apple's own downscaling is the Debug switch "View-size settled render at fit (Apple's
+  downscaling)", off by default (less memory, but it differs from the export: C3b mean 0.84,
+  max 40 levels).
+- **Stale renders:** one render runs and one waits (the newest); Core Image can't stop a
+  render that has started, so one already running finishes and its frame is dropped if a
+  newer one is on screen. Frames are numbered; an older one is never shown after a newer one.
+- **Settle delay** 0.25 s from the last change or the drag's release; the status says
+  "Draft" while a drag frame is on screen and "Raw" once settled.
+- **Tuning:** Debug ▸ Preview tuning (settle delay, draft mode, Apple's downscaling at fit,
+  visible region); read from UserDefaults at each render, so changes apply at once; the
+  defaults apply without the Debug menu. The active tuning is in every drag line and in
+  debug-export report.json.
+- **Logging:** one `drag` line per drag (control, start and end value, frames rendered,
+  shown and dropped, median / p95 / max frame ms, release to settle start and to settled,
+  peak memory and memory before and after, zoom, tuning, filters made); one `render` line
+  per selection (time to the first raw render, filters made).
+- **Testing against alpha 2:** `-TCPreviewLegacy YES` (a launch setting, not in any menu)
+  makes the renderer work the alpha 2 way: a new filter and decode for every render, no
+  draft mode, full-resolution settle, 0.4 s. It is this build's code set up like alpha 2,
+  not alpha 2's code. The launch check runs the same scripted session (`-TCPerf YES`, in
+  the debug module) on a 7008 × 4672 made-up DNG with this build, the alpha 2 path and the
+  Apple-downscaling variant.
+- **Not met:** C6 memory (limit 50% of alpha 2): drags 104–115% and 400% 136% of alpha 2 on
+  CI; with Apple's downscaling at fit 63–83%. Released anyway by the owner's decision; to be
+  measured on a real Mac. C3b with full resolution at fit differs from the export by max 2
+  levels, exactly as alpha 2's render does (information; not the default).
+- The side-by-side view keeps the fresh full-resolution render of alpha 3 (no editing there).
+
 ## Debug export and test scripts (0.2.0 alpha 3, alpha only)
 
 The owner's spec (2026-11-21, with three amendments): a debug package of the current image and a
@@ -345,6 +391,10 @@ shown, how several frames are selected for the editor, the font, the overall loo
 - Each downloaded build must be allowed once in System Settings, Privacy & Security. Only an
   Apple Developer account (paid yearly) removes that step.
 - The repository is public (since alpha 21): anyone can read the code and notes.
+- Memory while dragging is 104–136% of alpha 2's on the CI Mac (the kept filters hold the
+  decoded file); not yet measured on a real Mac. The drag lines log it.
+- Zoomed in, panning shows the softer whole picture beyond the rendered region until the
+  region for the new view arrives (about a quarter of a second after the view stops).
 - Shadow bias's default can lie far outside its slider (5.00 on the made-up DNG, 3.00 the
   owner saw on ARWs): the thumb sits at the end while Apple's true value is used; touching the
   slider then jumps the image. The slider's range is unchanged in this build (spec).

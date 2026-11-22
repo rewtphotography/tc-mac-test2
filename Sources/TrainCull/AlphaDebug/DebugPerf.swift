@@ -57,7 +57,7 @@ enum DebugPerf {
         let d = UserDefaults.standard
         if !legacy {
             // Start from the defaults whatever an earlier run left.
-            for key in [PreviewTuning.keys.settle, PreviewTuning.keys.draft, PreviewTuning.keys.viewSize, PreviewTuning.keys.region] { d.removeObject(forKey: key) }
+            for key in [PreviewTuning.keys.settle, PreviewTuning.keys.draft, PreviewTuning.keys.appleDownscale, PreviewTuning.keys.region] { d.removeObject(forKey: key) }
         }
         DispatchQueue.main.async {
             whenSettled {
@@ -80,10 +80,10 @@ enum DebugPerf {
                     steps.append { next in DebugTools.setTuning(PreviewTuning.keys.draft, false); drag(5, from: 0.3, to: 0.6, next) }
                     steps.append { next in DebugTools.setTuning(PreviewTuning.keys.draft, true); next() }
                     steps.append { next in
-                        DebugTools.setTuning(PreviewTuning.keys.viewSize, !PreviewTuning.current.viewSizeSettle)
+                        DebugTools.setTuning(PreviewTuning.keys.appleDownscale, true)
                         drag(5, from: 0.6, to: 0.2, next)
                     }
-                    steps.append { next in d.removeObject(forKey: PreviewTuning.keys.viewSize); DebugTools.tuningChanged("view-size settle back to the default"); next() }
+                    steps.append { next in d.removeObject(forKey: PreviewTuning.keys.appleDownscale); DebugTools.tuningChanged("Apple's downscaling back off"); next() }
                     steps.append { next in zoom(100, next) }
                     steps.append { next in DebugTools.setTuning(PreviewTuning.keys.region, false); drag(5, from: 0.2, to: 0.5, next) }
                     steps.append { next in DebugTools.setTuning(PreviewTuning.keys.region, true); zoom(nil, next) }

@@ -8,7 +8,21 @@ An alpha build of TrainCull for Mac (Apple silicon, macOS 15 or later).
    **Done**, then open **System Settings → Privacy & Security**, scroll down to the message
    about TrainCull and click **Open Anyway**. This is needed once for each new build.
 
-**New in this build (0.2.0 alpha 3): debug tools (alpha only)**
+**New in this build (0.2.0 alpha 4): faster slider drags**
+
+- Dragging a slider shows the change straight away: about three times faster at fit and
+  more than ten times faster zoomed in, on the test machine. The sharp image follows a
+  quarter of a second after you stop (was 0.4 s).
+- The line under the image says **Draft** while you drag and **Raw** once the sharp image is
+  back.
+- Zoomed in, only the part on screen is rendered. After panning, the edges sharpen a moment
+  later.
+- **Debug ▸ Preview tuning** changes the settle delay and the other preview settings while
+  you work, for comparing on your Mac.
+
+**Known issue:** drag memory 104–136% of alpha 2 on CI; to be measured on a real Mac.
+
+**In 0.2.0 alpha 3: debug tools (alpha only)**
 
 - A **Debug** menu. **Export Debug Package** saves the photo you're looking at, with its
   edits, as a small zip for testing the raw engine: the full picture, what the screen shows,
