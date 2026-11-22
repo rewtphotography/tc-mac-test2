@@ -193,8 +193,8 @@ The owner's performance spec (2026-11-21). The single view now renders through
   not alpha 2's code. The launch check runs the same scripted session (`-TCPerf YES`, in
   the debug module) on a 7008 × 4672 made-up DNG with this build, the alpha 2 path and the
   Apple-downscaling variant.
-- **Not met:** C6 memory (limit 50% of alpha 2): drags 104–115% and 400% 136% of alpha 2 on
-  CI; with Apple's downscaling at fit 63–83%. Released anyway by the owner's decision; to be
+- **Not met:** C6 memory (limit 50% of alpha 2): drags 101–115% and 400% 133–136% of alpha 2
+  on CI over the last runs; with Apple's downscaling at fit 63–83%. Released anyway by the owner's decision; to be
   measured on a real Mac. C3b with full resolution at fit differs from the export by max 2
   levels, exactly as alpha 2's render does (information; not the default).
 - The side-by-side view keeps the fresh full-resolution render of alpha 3 (no editing there).
