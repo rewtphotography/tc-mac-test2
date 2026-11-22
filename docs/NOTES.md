@@ -360,19 +360,19 @@ Same folder and Mac, two and a half minutes of use:
 
 ## Next, in order
 
-0. The owner runs the alpha 3 checklist on real ARWs (B11's Local tone map, B12's manual
-   export) and sends the zips and log. Before that, from alpha 2: the owner opens their four
-   a7 IV test ARWs and sends the log: its `raw`
-   lines give Shadow bias's true default, Apple's other defaults and the red dots per file;
-   its `change` lines give the Shadow boost read-backs. Then the next note: debug export and
-   the JSON test-script runner; after that, performance (informed by the section above).
-1. The owner's next spec (after 0.2.0 alpha 1): Nikon Z7 NEF files don't open (only Sony ARW
-   has a recipe); the Shadow bias slider (−1…1) can't hold the photo's own default of 3.00;
-   Send to Photoshop writes Apple's numbers into `Exposure2012`, `Temperature` and `Tint`
-   (forcing `WhiteBalance=Custom`); the XMP field pattern fails on an apostrophe inside a
-   double-quoted value and can add a duplicate attribute; memory and speed with 61 MP A7CR files.
-2. Soft-focus and closed-eyes flags from Apple's face landmarks.
-3. A Settings window (label names, editor choice), Undo after reject.
+0. The owner's real-Mac checks: the alpha 2 ARW log (Shadow bias's true default, Apple's
+   defaults and red dots per file, Shadow boost read-backs); the alpha 3 checklist (manual
+   debug exports, a script with Local tone map on an ARW); the alpha 4 drags on an ISO 100 and
+   an ISO 4000 ARW (real-Mac speed and memory).
+1. The owner's next spec, from the earlier code audit: Nikon Z7 NEF files don't open (only
+   Sony ARW has a recipe); the Shadow bias slider (−1…1) can't hold the photo's own default
+   (3.00 on ARWs); Send to Photoshop writes Apple's numbers into `Exposure2012`, `Temperature`
+   and `Tint` (forcing `WhiteBalance=Custom`); the XMP field pattern fails on an apostrophe
+   inside a double-quoted value and can add a duplicate attribute; memory and speed with 61 MP
+   A7CR files.
+2. A memory build, if the alpha 4 log asks for one (drag memory 101–136% of alpha 2 on CI).
+3. Soft-focus and closed-eyes flags from Apple's face landmarks.
+4. A Settings window (label names, editor choice), Undo after reject.
 
 ## Still to design
 
